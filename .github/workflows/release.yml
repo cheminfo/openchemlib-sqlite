@@ -12,4 +12,4 @@ jobs:
       npm: true
     secrets:
       github-token: ${{ secrets.BOT_TOKEN }}
-      npm-token: ${{ secrets.NPM_TOKEN }}
+      npm-token: ${{ secrets.NPM_BOT_TOKEN }}
