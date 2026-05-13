@@ -219,6 +219,88 @@ test('pagination with from and limit', () => {
   expect(results).toHaveLength(2);
 });
 
+test('search parses idCode format', () => {
+  const { db, molDB } = makeDB();
+  const { idCode } = insertSmiles(db, molDB, 'c1ccccc1');
+
+  const { results } = molDB.search(idCode, { mode: 'exact', format: 'idCode' });
+
+  expect(results[0]?.idCode).toBe(idCode);
+});
+
+test('search parses molfile format', () => {
+  const { db, molDB } = makeDB();
+  const { idCode } = insertSmiles(db, molDB, 'c1ccccc1');
+  const mol = OCL.Molecule.fromSmiles('c1ccccc1');
+  mol.inventCoordinates();
+  const molfile = mol.toMolfile();
+
+  const { results } = molDB.search(molfile, {
+    mode: 'exact',
+    format: 'molfile',
+  });
+
+  expect(results[0]?.idCode).toBe(idCode);
+});
+
+test('search throws for unknown format', () => {
+  const { molDB } = makeDB();
+
+  expect(() =>
+    molDB.search('c1ccccc1', { mode: 'exact', format: 'unknown' as never }),
+  ).toThrow('Unknown format');
+});
+
+test('search throws for unknown mode', () => {
+  const { molDB } = makeDB();
+
+  expect(() => molDB.search('c1ccccc1', { mode: 'unknown' as never })).toThrow(
+    'Unknown search mode',
+  );
+});
+
+test('search with fragment Molecule instance uses compact copy for exact mode', () => {
+  const { db, molDB } = makeDB();
+  const { idCode } = insertSmiles(db, molDB, 'c1ccccc1');
+  const queryMol = OCL.Molecule.fromSmiles('c1ccccc1');
+  queryMol.setFragment(true);
+
+  const { results } = molDB.search(queryMol, { mode: 'exact' });
+
+  expect(results[0]?.idCode).toBe(idCode);
+  expect(queryMol.isFragment()).toBe(true);
+});
+
+test('search with Molecule instance for similarity mode', () => {
+  const { db, molDB } = makeDB();
+  const { idCode: caffeineId } = insertSmiles(
+    db,
+    molDB,
+    'Cn1c(=O)c2c(ncn2C)n(C)c1=O',
+  );
+  const queryMol = OCL.Molecule.fromSmiles('Cn1c(=O)c2c(ncn2C)n(C)c1=O');
+
+  const { results } = molDB.search(queryMol, {
+    mode: 'similarity',
+    similarityThreshold: 0.9,
+  });
+
+  expect(results[0]?.idCode).toBe(caffeineId);
+  expect(queryMol.isFragment()).toBe(false);
+});
+
+test('search with Molecule instance for exactNoStereo mode', () => {
+  const { db, molDB } = makeDB();
+  insertSmiles(db, molDB, 'N[C@@H](C)C(=O)O');
+  insertSmiles(db, molDB, 'N[C@H](C)C(=O)O');
+  const queryMol = OCL.Molecule.fromSmiles('NC(C)C(=O)O');
+
+  const { total } = molDB.search(queryMol, { mode: 'exactNoStereo' });
+
+  expect(total).toBe(2);
+  expect(queryMol.isFragment()).toBe(false);
+});
+
 test('packSSIndex and unpackSSIndex round-trip preserves bit pattern', () => {
   const mol = OCL.Molecule.fromSmiles('c1ccccc1');
   const original = mol.getIndex().map((v) => v >>> 0);
