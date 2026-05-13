@@ -1,0 +1,61 @@
+{
+  "name": "openchemlib-sqlite",
+  "version": "0.1.0",
+  "description": "SQLite-backed molecular database with substructure, exact, and similarity search using OpenChemLib",
+  "type": "module",
+  "exports": {
+    ".": "./lib/index.js"
+  },
+  "files": [
+    "lib",
+    "src"
+  ],
+  "engines": {
+    "node": ">=22.5.0"
+  },
+  "keywords": [
+    "chemistry",
+    "sqlite",
+    "substructure",
+    "openchemlib",
+    "molecules"
+  ],
+  "author": "Luc Patiny",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/cheminfo/openchemlib-sqlite.git"
+  },
+  "bugs": {
+    "url": "https://github.com/cheminfo/openchemlib-sqlite/issues"
+  },
+  "homepage": "https://github.com/cheminfo/openchemlib-sqlite#readme",
+  "scripts": {
+    "check-types": "tsc --noEmit",
+    "clean": "rimraf coverage lib",
+    "eslint": "eslint src",
+    "eslint-fix": "eslint src --fix",
+    "prepack": "npm run tsc",
+    "prettier": "prettier --check src",
+    "prettier-write": "prettier --write src",
+    "test": "npm run test-only && npm run check-types && npm run eslint && npm run prettier",
+    "test-only": "vitest run --coverage",
+    "tsc": "npm run clean && npm run tsc-build",
+    "tsc-build": "tsc --project tsconfig.build.json"
+  },
+  "peerDependencies": {
+    "openchemlib": ">=9.20.1"
+  },
+  "devDependencies": {
+    "@types/node": "^25.7.0",
+    "@vitest/coverage-v8": "^4.1.6",
+    "@zakodium/tsconfig": "^1.0.5",
+    "eslint": "^9.39.2",
+    "eslint-config-cheminfo-typescript": "^22.0.0",
+    "openchemlib": "^9.22.1",
+    "prettier": "^3.8.3",
+    "rimraf": "^6.1.3",
+    "typescript": "^5.9.3",
+    "vitest": "^4.1.6"
+  }
+}
