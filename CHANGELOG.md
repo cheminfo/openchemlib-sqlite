@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.0.2](https://github.com/cheminfo/openchemlib-sqlite/compare/v1.0.1...v1.0.2) (2026-05-13)
+
+
+### Bug Fixes
+
+* correct NPM_TOKEN ([9424034](https://github.com/cheminfo/openchemlib-sqlite/commit/94240343113e0d115b9ee30d661ca39b0f650dc8))
+
 ## [1.0.1](https://github.com/cheminfo/openchemlib-sqlite/compare/v1.0.0...v1.0.1) (2026-05-13)
 
 
