@@ -95,6 +95,14 @@ test('insert and count', () => {
   expect(molDB.count()).toBe(1);
 });
 
+test('re-inserting the same entryId does not throw and keeps count at 1', () => {
+  const { db, molDB } = makeDB();
+  const { entryId, idCode } = insertSmiles(db, molDB, 'c1ccccc1');
+  molDB.insert(entryId, idCode);
+
+  expect(molDB.count()).toBe(1);
+});
+
 test('exact search finds inserted molecule', () => {
   const { db, molDB } = makeDB();
   const { idCode, entryId } = insertSmiles(
