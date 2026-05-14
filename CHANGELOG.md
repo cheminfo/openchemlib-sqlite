@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.1.0](https://github.com/cheminfo/openchemlib-sqlite/compare/v1.0.2...v1.1.0) (2026-05-14)
+
+
+### Features
+
+* empty-molecule optimization and mwColumn mass-difference sorting for substructure search ([d8cb9e5](https://github.com/cheminfo/openchemlib-sqlite/commit/d8cb9e5d6c4890ef518e74716ebe2bab10a8e536))
+
 ## [1.0.2](https://github.com/cheminfo/openchemlib-sqlite/compare/v1.0.1...v1.0.2) (2026-05-13)
 
 
