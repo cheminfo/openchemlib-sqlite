@@ -1,3 +1,5 @@
+import { packSSIndex } from './packSSIndex.ts';
+
 /**
  * Build SQL AND conditions that pre-filter rows whose ss_index bits are a
  * superset of the query bits — i.e. (stored & query) = query for each 64-bit
@@ -10,9 +12,7 @@ export function buildSSPrefilter(queryIndex: number[] | Uint32Array): {
   sql: string;
   params: bigint[];
 } {
-  const packed = Array.from(
-    new BigInt64Array(new Uint32Array(queryIndex).buffer),
-  );
+  const packed = packSSIndex(queryIndex);
   const sql: string[] = [];
   const params: bigint[] = [];
   for (let i = 0; i < 8; i++) {
