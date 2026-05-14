@@ -309,6 +309,108 @@ test('search with Molecule instance for exactNoStereo mode', () => {
   expect(queryMol.isFragment()).toBe(false);
 });
 
+// ── empty-molecule optimization ────────────────────────────────────────────
+
+test('substructure search with empty molecule returns all entries', () => {
+  const { db, molDB } = makeDB();
+  insertSmiles(db, molDB, 'c1ccccc1');
+  insertSmiles(db, molDB, 'c1ccc(cc1)C(=O)O');
+  insertSmiles(db, molDB, 'CCO');
+
+  const emptyMol = new OCL.Molecule(0, 0);
+  const { results, total, partial } = molDB.search(emptyMol, {
+    mode: 'substructure',
+  });
+
+  expect(total).toBe(3);
+  expect(results).toHaveLength(3);
+  expect(partial).toBe(false);
+});
+
+// ── sortByMassDifference ────────────────────────────────────────────────────
+
+function makeDBWithMw() {
+  const db = new DatabaseSync(':memory:');
+  db.exec(`
+    CREATE TABLE molecules (
+      id                INTEGER PRIMARY KEY,
+      id_code           TEXT NOT NULL UNIQUE,
+      id_code_no_stereo TEXT NOT NULL,
+      mw                REAL NOT NULL
+    )
+  `);
+  const molDB = new MoleculesDBSQLite(db, OCL, {
+    entriesTable: 'molecules',
+    idCodeNoStereoColumn: 'id_code_no_stereo',
+    mwColumn: 'mw',
+  });
+  molDB.migrate();
+  return { db, molDB };
+}
+
+function insertSmilesWithMw(
+  db: DatabaseSync,
+  molDB: MoleculesDBSQLite,
+  smiles: string,
+): { entryId: number; idCode: string; mw: number } {
+  const mol = OCL.Molecule.fromSmiles(smiles);
+  const idCode = mol.getIDCode();
+  const mw = mol.getMolecularFormula().relativeWeight;
+  mol.stripStereoInformation();
+  const idCodeNoStereo = mol.getIDCode();
+  const result = db
+    .prepare(
+      'INSERT INTO molecules (id_code, id_code_no_stereo, mw) VALUES (?, ?, ?)',
+    )
+    .run(idCode, idCodeNoStereo, mw) as { lastInsertRowid: number };
+  const entryId = result.lastInsertRowid;
+  molDB.insert(entryId, idCode);
+  return { entryId, idCode, mw };
+}
+
+test('sortByMassDifference puts closest-mass match first in substructure results', () => {
+  const { db, molDB } = makeDBWithMw();
+  // benzene MW ~78, benzoic acid MW ~122, toluene MW ~92
+  const { idCode: benzeneId, mw: benzeneMw } = insertSmilesWithMw(
+    db,
+    molDB,
+    'c1ccccc1',
+  );
+  const { idCode: benzoicAcidId } = insertSmilesWithMw(
+    db,
+    molDB,
+    'c1ccc(cc1)C(=O)O',
+  );
+  const { idCode: tolueneId } = insertSmilesWithMw(db, molDB, 'Cc1ccccc1');
+
+  // Query is benzene — all three contain benzene ring; mwColumn is configured so results are sorted by mass diff
+  const { results } = molDB.search('c1ccccc1', {
+    mode: 'substructure',
+    format: 'smiles',
+  });
+
+  // Benzene (diff=0) must be first; mw field must be populated
+  expect(results[0]?.idCode).toBe(benzeneId);
+  expect(results[0]?.mw).toBeCloseTo(benzeneMw, 1);
+
+  // Toluene (diff ~14) before benzoic acid (diff ~44)
+  const toluenePos = results.findIndex((r) => r.idCode === tolueneId);
+  const benzoicPos = results.findIndex((r) => r.idCode === benzoicAcidId);
+
+  expect(toluenePos).toBeLessThan(benzoicPos);
+});
+
+test('sortByMassDifference does not mutate the query Molecule instance', () => {
+  const { db, molDB } = makeDBWithMw();
+  insertSmilesWithMw(db, molDB, 'c1ccccc1');
+  const queryMol = OCL.Molecule.fromSmiles('c1ccccc1');
+  const wasFragment = queryMol.isFragment();
+
+  molDB.search(queryMol, { mode: 'substructure' });
+
+  expect(queryMol.isFragment()).toBe(wasFragment);
+});
+
 test('packSSIndex and unpackSSIndex round-trip preserves bit pattern', () => {
   const mol = OCL.Molecule.fromSmiles('c1ccccc1');
   const original = mol.getIndex().map((v) => v >>> 0);

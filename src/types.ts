@@ -45,6 +45,12 @@ export interface MoleculesDBConfig {
    * @default null
    */
   idCodeNoStereoColumn?: string | null;
+  /**
+   * Column containing the molecular weight (REAL). When set, substructure results are automatically sorted by
+   * ascending |queryMw − resultMw|, and each result includes a `mw` field.
+   * @default null
+   */
+  mwColumn?: string | null;
 }
 
 export interface SearchOptions {
@@ -84,6 +90,8 @@ export interface SearchResult {
   idCode: string;
   /** Only present for similarity mode. */
   similarity?: number;
+  /** Molecular weight from the entries table. Present when mwColumn is configured and mode is 'substructure'. */
+  mw?: number;
 }
 
 export interface SearchResponse {

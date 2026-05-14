@@ -20,6 +20,7 @@ interface ResolvedConfig {
   pkColumn: string;
   idCodeColumn: string;
   idCodeNoStereoColumn: string | null;
+  mwColumn: string | null;
 }
 
 function resolveConfig(config: MoleculesDBConfig): ResolvedConfig {
@@ -28,6 +29,7 @@ function resolveConfig(config: MoleculesDBConfig): ResolvedConfig {
     pkColumn: config.pkColumn ?? 'id',
     idCodeColumn: config.idCodeColumn ?? 'id_code',
     idCodeNoStereoColumn: config.idCodeNoStereoColumn ?? null,
+    mwColumn: config.mwColumn ?? null,
   };
 }
 
@@ -74,11 +76,22 @@ function withFragment(
   return mol;
 }
 
+function sortByMassDiff(
+  results: SearchResult[],
+  queryMw: number,
+): SearchResult[] {
+  return results.toSorted(
+    (a, b) => Math.abs((a.mw ?? 0) - queryMw) - Math.abs((b.mw ?? 0) - queryMw),
+  );
+}
+
 function rowToResult(row: Record<string, unknown>): SearchResult {
-  return {
+  const result: SearchResult = {
     entryId: row.entry_id as number,
     idCode: row.id_code as string,
   };
+  if (row.mw != null) result.mw = row.mw as number;
+  return result;
 }
 
 export class MoleculesDBSQLite {
@@ -204,10 +217,36 @@ export class MoleculesDBSQLite {
 
       case 'substructure': {
         const mol = withFragment(baseMol, true, fromInstance);
+        const { mwColumn } = this.#cfg;
+
+        const mwSelectCol = mwColumn ? `, e.${mwColumn} AS mw` : '';
+
+        // Optimization: an empty fragment matches every molecule — skip fingerprint prefilter and OCL check.
+        if (mol.getAllAtoms() === 0) {
+          const stmt = this.#db.prepare(
+            `SELECT ${this.#selectCols}${mwSelectCol} FROM ${entriesTable} e ${this.#ssJoin}`,
+          );
+          const allRows = stmt.all() as Array<Record<string, unknown>>;
+          return {
+            results: allRows.slice(from, from + limit).map(rowToResult),
+            total: allRows.length,
+            screened: allRows.length,
+            partial: false,
+          };
+        }
+
+        // mol has fragment=true; getMolecularFormula needs fragment=false — use a temporary copy.
+        let queryMw = 0;
+        if (mwColumn) {
+          const mwMol = mol.getCompactCopy();
+          mwMol.setFragment(false);
+          queryMw = mwMol.getMolecularFormula().relativeWeight;
+        }
+
         const queryIndex = mol.getIndex();
         const prefilter = buildSSPrefilter(queryIndex);
         const stmt = this.#db.prepare(
-          `SELECT ${this.#selectCols}, ${this.#ssIndexCols} FROM ${entriesTable} e ${this.#ssJoin} WHERE ${prefilter.sql}`,
+          `SELECT ${this.#selectCols}${mwSelectCol}, ${this.#ssIndexCols} FROM ${entriesTable} e ${this.#ssJoin} WHERE ${prefilter.sql}`,
         );
         stmt.setReadBigInts?.(true);
         const candidates = stmt.all(...prefilter.params) as Array<
@@ -227,18 +266,22 @@ export class MoleculesDBSQLite {
           searcher.setMolecule(targetMol, targetIndex);
           if (searcher.isFragmentInMolecule()) results.push(rowToResult(row));
           if (i % 500 === 499 && Date.now() > deadline) {
+            const sorted = mwColumn
+              ? sortByMassDiff(results, queryMw)
+              : results;
             return {
-              results: results.slice(from, from + limit),
-              total: results.length,
+              results: sorted.slice(from, from + limit),
+              total: sorted.length,
               screened: i + 1,
               partial: true,
             };
           }
         }
 
+        const sorted = mwColumn ? sortByMassDiff(results, queryMw) : results;
         return {
-          results: results.slice(from, from + limit),
-          total: results.length,
+          results: sorted.slice(from, from + limit),
+          total: sorted.length,
           screened: candidates.length,
           partial: false,
         };
