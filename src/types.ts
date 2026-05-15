@@ -82,6 +82,20 @@ export interface SearchOptions {
    * @default 5000
    */
   timeoutMs?: number;
+  /**
+   * Maximum number of fingerprint candidates to load from the database before stopping.
+   * Limits memory usage and scan time when the fingerprint prefilter matches many rows.
+   * When hit, the search returns partial results with `partial: true`.
+   * @default Number.MAX_SAFE_INTEGER
+   */
+  maxCandidates?: number;
+  /**
+   * Maximum number of confirmed substructure matches to collect before stopping.
+   * Once this many matches are found the scan stops, sorts them by MW proximity
+   * (when mwColumn is configured), and returns them with `partial: true`.
+   * @default Number.MAX_SAFE_INTEGER
+   */
+  maxResults?: number;
 }
 
 export interface SearchResult {

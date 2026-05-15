@@ -22,6 +22,8 @@ export interface SubstructureSearchParams {
   from: number;
   limit: number;
   timeoutMs: number;
+  maxCandidates: number;
+  maxResults: number;
 }
 
 function sortByMassDiff(
@@ -54,6 +56,8 @@ export function runSubstructureSearch(
     from,
     limit,
     timeoutMs,
+    maxCandidates,
+    maxResults,
   } = params;
   const { Molecule, SSSearcherWithIndex } = ocl;
   const mwSelectCol = mwColumn ? `, e.${mwColumn} AS mw` : '';
@@ -82,13 +86,22 @@ export function runSubstructureSearch(
 
   const queryIndex = mol.getIndex();
   const prefilter = buildSSPrefilter(queryIndex);
+  // Fetch maxCandidates+1 rows so we can detect truncation without a COUNT query.
+  const fetchLimit =
+    maxCandidates === Number.MAX_SAFE_INTEGER
+      ? maxCandidates
+      : maxCandidates + 1;
   const stmt = db.prepare(
-    `SELECT ${selectCols}${mwSelectCol}, ${ssIndexCols} FROM ${entriesTable} e ${ssJoin} WHERE ${prefilter.sql}`,
+    `SELECT ${selectCols}${mwSelectCol}, ${ssIndexCols} FROM ${entriesTable} e ${ssJoin} WHERE ${prefilter.sql} LIMIT ?`,
   );
   stmt.setReadBigInts?.(true);
-  const candidates = stmt.all(...prefilter.params) as Array<
+  const allCandidates = stmt.all(...prefilter.params, fetchLimit) as Array<
     Record<string, unknown>
   >;
+  const truncatedByMaxCandidates = allCandidates.length > maxCandidates;
+  const candidates = truncatedByMaxCandidates
+    ? allCandidates.slice(0, maxCandidates)
+    : allCandidates;
 
   const searcher = new SSSearcherWithIndex();
   searcher.setFragment(mol, queryIndex);
@@ -103,13 +116,22 @@ export function runSubstructureSearch(
     const targetIndex = unpackSSIndex(row);
     const targetMol = Molecule.fromIDCode(row.id_code as string);
     searcher.setMolecule(targetMol, targetIndex);
-    if (searcher.isFragmentInMolecule()) results.push(rowToResult(row));
+    if (searcher.isFragmentInMolecule()) {
+      results.push(rowToResult(row));
+      if (results.length >= maxResults) {
+        partial = true;
+        screened = i + 1;
+        break;
+      }
+    }
     if (i % 500 === 499 && Date.now() > deadline) {
       partial = true;
       screened = i + 1;
       break;
     }
   }
+
+  if (truncatedByMaxCandidates) partial = true;
 
   const sorted = mwColumn ? sortByMassDiff(results, queryMw) : results;
   return {

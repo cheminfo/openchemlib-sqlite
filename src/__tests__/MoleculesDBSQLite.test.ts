@@ -411,6 +411,55 @@ test('sortByMassDifference does not mutate the query Molecule instance', () => {
   expect(queryMol.isFragment()).toBe(wasFragment);
 });
 
+// ── maxResults / maxCandidates early-exit options ─────────────────────────
+
+test('maxResults stops after N matches and marks partial:true', () => {
+  const { db, molDB } = makeDB();
+  insertSmiles(db, molDB, 'c1ccccc1');
+  insertSmiles(db, molDB, 'c1ccc(cc1)C(=O)O');
+  insertSmiles(db, molDB, 'Cc1ccccc1');
+
+  const { results, partial } = molDB.search('c1ccccc1', {
+    mode: 'substructure',
+    format: 'smiles',
+    maxResults: 1,
+  });
+
+  expect(results).toHaveLength(1);
+  expect(partial).toBe(true);
+});
+
+test('maxCandidates caps the fingerprint prefilter fetch and marks partial:true', () => {
+  const { db, molDB } = makeDB();
+  insertSmiles(db, molDB, 'c1ccccc1');
+  insertSmiles(db, molDB, 'c1ccc(cc1)C(=O)O');
+  insertSmiles(db, molDB, 'Cc1ccccc1');
+
+  // All three pass the fingerprint prefilter for benzene; cap at 1 candidate.
+  const { partial } = molDB.search('c1ccccc1', {
+    mode: 'substructure',
+    format: 'smiles',
+    maxCandidates: 1,
+  });
+
+  expect(partial).toBe(true);
+});
+
+test('maxCandidates equal to candidate count does not falsely mark partial', () => {
+  const { db, molDB } = makeDB();
+  insertSmiles(db, molDB, 'c1ccccc1');
+  insertSmiles(db, molDB, 'CCO');
+
+  // Only 1 molecule passes the fingerprint prefilter for CCO; maxCandidates=1 must not be a false positive.
+  const { partial } = molDB.search('CCO', {
+    mode: 'substructure',
+    format: 'smiles',
+    maxCandidates: 1,
+  });
+
+  expect(partial).toBe(false);
+});
+
 test('packSSIndex and unpackSSIndex round-trip preserves bit pattern', () => {
   const mol = OCL.Molecule.fromSmiles('c1ccccc1');
   const original = mol.getIndex().map((v) => v >>> 0);

@@ -132,6 +132,8 @@ export class MoleculesDBSQLite {
       limit = Number.MAX_SAFE_INTEGER,
       from = 0,
       timeoutMs = 5000,
+      maxCandidates = Number.MAX_SAFE_INTEGER,
+      maxResults = Number.MAX_SAFE_INTEGER,
     } = options ?? {};
 
     const { entriesTable, idCodeColumn, idCodeNoStereoColumn } = this.#cfg;
@@ -195,6 +197,8 @@ export class MoleculesDBSQLite {
           from,
           limit,
           timeoutMs,
+          maxCandidates,
+          maxResults,
         });
       }
 
