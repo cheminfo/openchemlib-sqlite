@@ -1,5 +1,17 @@
 # Changelog
 
+## [1.2.0](https://github.com/cheminfo/openchemlib-sqlite/compare/v1.1.0...v1.2.0) (2026-05-18)
+
+
+### Features
+
+* add maxCandidates and maxResults early-exit options to substructure search ([7b21fdf](https://github.com/cheminfo/openchemlib-sqlite/commit/7b21fdf26c2d1fcd9db71ad1460c4c1d20d5637d))
+
+
+### Bug Fixes
+
+* return entryId as number instead of BigInt from rowToResult ([d5e74f7](https://github.com/cheminfo/openchemlib-sqlite/commit/d5e74f7a3a8ecafcf7bf13904ff06fab76585738))
+
 ## [1.1.0](https://github.com/cheminfo/openchemlib-sqlite/compare/v1.0.2...v1.1.0) (2026-05-14)
 
 
