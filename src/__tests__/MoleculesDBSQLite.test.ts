@@ -460,6 +460,33 @@ test('maxCandidates equal to candidate count does not falsely mark partial', () 
   expect(partial).toBe(false);
 });
 
+test('entryId is a plain number (not BigInt) for substructure results', () => {
+  const { db, molDB } = makeDB();
+  const { entryId } = insertSmiles(db, molDB, 'c1ccccc1');
+
+  const { results } = molDB.search('c1ccccc1', {
+    mode: 'substructure',
+    format: 'smiles',
+  });
+
+  expect(typeof results[0]?.entryId).toBe('number');
+  expect(results[0]?.entryId).toBe(entryId);
+});
+
+test('entryId is a plain number (not BigInt) for similarity results', () => {
+  const { db, molDB } = makeDB();
+  const { entryId } = insertSmiles(db, molDB, 'c1ccccc1');
+
+  const { results } = molDB.search('c1ccccc1', {
+    mode: 'similarity',
+    format: 'smiles',
+    similarityThreshold: 0.9,
+  });
+
+  expect(typeof results[0]?.entryId).toBe('number');
+  expect(results[0]?.entryId).toBe(entryId);
+});
+
 test('packSSIndex and unpackSSIndex round-trip preserves bit pattern', () => {
   const mol = OCL.Molecule.fromSmiles('c1ccccc1');
   const original = mol.getIndex().map((v) => v >>> 0);

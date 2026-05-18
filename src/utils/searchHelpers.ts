@@ -37,7 +37,10 @@ export function parseMolecule(
  */
 export function rowToResult(row: Record<string, unknown>): SearchResult {
   const result: SearchResult = {
-    entryId: row.entry_id as number,
+    // Number() is required because setReadBigInts(true) — used on fingerprint
+    // scan statements to avoid precision loss on 64-bit ss_index columns —
+    // also makes entry_id return as BigInt even though it is a safe integer.
+    entryId: Number(row.entry_id),
     idCode: row.id_code as string,
   };
   if (row.mw != null) result.mw = row.mw as number;
