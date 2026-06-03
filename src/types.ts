@@ -51,6 +51,17 @@ export interface MoleculesDBConfig {
    * @default null
    */
   mwColumn?: string | null;
+  /**
+   * Number of worker threads used for parallel substructure search. When the
+   * database is file-backed (so the path can be derived from the connection),
+   * the scan's candidates are partitioned across this many worker threads, each
+   * opening its own connection, so a large scan never blocks the calling thread
+   * and is split across CPU cores. For an in-memory database — which a worker
+   * cannot share — the scan always runs synchronously on the calling thread
+   * regardless of this value (and stays browser-compatible).
+   * @default 4
+   */
+  poolSize?: number;
 }
 
 export interface SearchOptions {
@@ -103,6 +114,12 @@ export interface SearchOptions {
    * while a large scan runs — e.g. from inside a worker thread.
    */
   onProgress?: (processed: number, total: number) => void;
+  /**
+   * Restrict the substructure scan to entries whose primary key satisfies
+   * `pk % count === index`. Used internally to partition a parallel search
+   * across worker threads; callers normally omit it.
+   */
+  partition?: { count: number; index: number };
 }
 
 export interface SearchResult {

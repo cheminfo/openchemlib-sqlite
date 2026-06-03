@@ -1,3 +1,6 @@
+import { mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 
 import * as OCL from 'openchemlib';
@@ -40,30 +43,30 @@ function insertSmiles(
   return { entryId, idCode };
 }
 
-test('search accepts a Molecule instance (exact)', () => {
+test('search accepts a Molecule instance (exact)', async () => {
   const { db, molDB } = makeDB();
   const { idCode } = insertSmiles(db, molDB, 'c1ccccc1');
   const queryMol = OCL.Molecule.fromSmiles('c1ccccc1');
 
-  const { results } = molDB.search(queryMol, { mode: 'exact' });
+  const { results } = await molDB.search(queryMol, { mode: 'exact' });
 
   expect(results[0]?.idCode).toBe(idCode);
 });
 
-test('search accepts a Molecule instance (substructure) without mutating the original', () => {
+test('search accepts a Molecule instance (substructure) without mutating the original', async () => {
   const { db, molDB } = makeDB();
   insertSmiles(db, molDB, 'c1ccccc1');
   insertSmiles(db, molDB, 'c1ccc(cc1)C(=O)O');
   const queryMol = OCL.Molecule.fromSmiles('c1ccccc1');
   const wasFragment = queryMol.isFragment();
 
-  const { results } = molDB.search(queryMol, { mode: 'substructure' });
+  const { results } = await molDB.search(queryMol, { mode: 'substructure' });
 
   expect(results).toHaveLength(2);
   expect(queryMol.isFragment()).toBe(wasFragment);
 });
 
-test('insert accepts a Molecule instance', () => {
+test('insert accepts a Molecule instance', async () => {
   const { db, molDB } = makeDB();
   const mol = OCL.Molecule.fromSmiles('c1ccccc1');
   const idCode = mol.getIDCode();
@@ -74,7 +77,7 @@ test('insert accepts a Molecule instance', () => {
     .run(idCode, idCodeNoStereo) as { lastInsertRowid: number };
   molDB.insert(result.lastInsertRowid, mol);
 
-  const { results } = molDB.search('c1ccccc1', {
+  const { results } = await molDB.search('c1ccccc1', {
     mode: 'exact',
     format: 'smiles',
   });
@@ -82,20 +85,20 @@ test('insert accepts a Molecule instance', () => {
   expect(results[0]?.idCode).toBe(idCode);
 });
 
-test('count starts at zero', () => {
+test('count starts at zero', async () => {
   const { molDB } = makeDB();
 
   expect(molDB.count()).toBe(0);
 });
 
-test('insert and count', () => {
+test('insert and count', async () => {
   const { db, molDB } = makeDB();
   insertSmiles(db, molDB, 'Cn1c(=O)c2c(ncn2C)n(C)c1=O');
 
   expect(molDB.count()).toBe(1);
 });
 
-test('re-inserting the same entryId does not throw and keeps count at 1', () => {
+test('re-inserting the same entryId does not throw and keeps count at 1', async () => {
   const { db, molDB } = makeDB();
   const { entryId, idCode } = insertSmiles(db, molDB, 'c1ccccc1');
   molDB.insert(entryId, idCode);
@@ -103,7 +106,7 @@ test('re-inserting the same entryId does not throw and keeps count at 1', () => 
   expect(molDB.count()).toBe(1);
 });
 
-test('exact search finds inserted molecule', () => {
+test('exact search finds inserted molecule', async () => {
   const { db, molDB } = makeDB();
   const { idCode, entryId } = insertSmiles(
     db,
@@ -111,7 +114,7 @@ test('exact search finds inserted molecule', () => {
     'Cn1c(=O)c2c(ncn2C)n(C)c1=O',
   );
 
-  const { results, total } = molDB.search('Cn1c(=O)c2c(ncn2C)n(C)c1=O', {
+  const { results, total } = await molDB.search('Cn1c(=O)c2c(ncn2C)n(C)c1=O', {
     mode: 'exact',
     format: 'smiles',
   });
@@ -122,11 +125,11 @@ test('exact search finds inserted molecule', () => {
   expect(results[0]?.entryId).toBe(entryId);
 });
 
-test('exact search returns empty for non-matching molecule', () => {
+test('exact search returns empty for non-matching molecule', async () => {
   const { db, molDB } = makeDB();
   insertSmiles(db, molDB, 'c1ccccc1');
 
-  const { results, total } = molDB.search('CCO', {
+  const { results, total } = await molDB.search('CCO', {
     mode: 'exact',
     format: 'smiles',
   });
@@ -135,12 +138,12 @@ test('exact search returns empty for non-matching molecule', () => {
   expect(results).toHaveLength(0);
 });
 
-test('exactNoStereo search ignores stereocenters', () => {
+test('exactNoStereo search ignores stereocenters', async () => {
   const { db, molDB } = makeDB();
   insertSmiles(db, molDB, 'N[C@@H](C)C(=O)O');
   insertSmiles(db, molDB, 'N[C@H](C)C(=O)O');
 
-  const { results, total } = molDB.search('NC(C)C(=O)O', {
+  const { results, total } = await molDB.search('NC(C)C(=O)O', {
     mode: 'exactNoStereo',
     format: 'smiles',
   });
@@ -149,7 +152,7 @@ test('exactNoStereo search ignores stereocenters', () => {
   expect(results).toHaveLength(2);
 });
 
-test('exactNoStereo throws when column not configured', () => {
+test('exactNoStereo throws when column not configured', async () => {
   const db = new DatabaseSync(':memory:');
   db.exec(
     'CREATE TABLE molecules (id INTEGER PRIMARY KEY, id_code TEXT NOT NULL UNIQUE)',
@@ -157,18 +160,18 @@ test('exactNoStereo throws when column not configured', () => {
   const molDB = new MoleculesDBSQLite(db, OCL, { entriesTable: 'molecules' });
   molDB.migrate();
 
-  expect(() =>
+  await expect(
     molDB.search('NC(C)C(=O)O', { mode: 'exactNoStereo', format: 'smiles' }),
-  ).toThrow('exactNoStereo');
+  ).rejects.toThrow('exactNoStereo');
 });
 
-test('substructure search finds all molecules containing the fragment', () => {
+test('substructure search finds all molecules containing the fragment', async () => {
   const { db, molDB } = makeDB();
   const { idCode: benzeneId } = insertSmiles(db, molDB, 'c1ccccc1');
   const { idCode: benzoicAcidId } = insertSmiles(db, molDB, 'c1ccc(cc1)C(=O)O');
   insertSmiles(db, molDB, 'CCO');
 
-  const { results } = molDB.search('c1ccccc1', {
+  const { results } = await molDB.search('c1ccccc1', {
     mode: 'substructure',
     format: 'smiles',
   });
@@ -178,7 +181,7 @@ test('substructure search finds all molecules containing the fragment', () => {
   );
 });
 
-test('similarity search returns results above threshold with similarity scores', () => {
+test('similarity search returns results above threshold with similarity scores', async () => {
   const { db, molDB } = makeDB();
   const { idCode: caffeineId } = insertSmiles(
     db,
@@ -192,7 +195,7 @@ test('similarity search returns results above threshold with similarity scores',
   );
   insertSmiles(db, molDB, 'CCO');
 
-  const { results } = molDB.search('Cn1c(=O)c2c(ncn2C)n(C)c1=O', {
+  const { results } = await molDB.search('Cn1c(=O)c2c(ncn2C)n(C)c1=O', {
     mode: 'similarity',
     format: 'smiles',
     similarityThreshold: 0.3,
@@ -210,13 +213,13 @@ test('similarity search returns results above threshold with similarity scores',
   }
 });
 
-test('pagination with from and limit', () => {
+test('pagination with from and limit', async () => {
   const { db, molDB } = makeDB();
   for (const smiles of ['c1ccccc1', 'c1ccc(cc1)C(=O)O', 'c1ccc(cc1)N']) {
     insertSmiles(db, molDB, smiles);
   }
 
-  const { results, total } = molDB.search('c1ccccc1', {
+  const { results, total } = await molDB.search('c1ccccc1', {
     mode: 'substructure',
     format: 'smiles',
     limit: 2,
@@ -227,23 +230,26 @@ test('pagination with from and limit', () => {
   expect(results).toHaveLength(2);
 });
 
-test('search parses idCode format', () => {
+test('search parses idCode format', async () => {
   const { db, molDB } = makeDB();
   const { idCode } = insertSmiles(db, molDB, 'c1ccccc1');
 
-  const { results } = molDB.search(idCode, { mode: 'exact', format: 'idCode' });
+  const { results } = await molDB.search(idCode, {
+    mode: 'exact',
+    format: 'idCode',
+  });
 
   expect(results[0]?.idCode).toBe(idCode);
 });
 
-test('search parses molfile format', () => {
+test('search parses molfile format', async () => {
   const { db, molDB } = makeDB();
   const { idCode } = insertSmiles(db, molDB, 'c1ccccc1');
   const mol = OCL.Molecule.fromSmiles('c1ccccc1');
   mol.inventCoordinates();
   const molfile = mol.toMolfile();
 
-  const { results } = molDB.search(molfile, {
+  const { results } = await molDB.search(molfile, {
     mode: 'exact',
     format: 'molfile',
   });
@@ -251,35 +257,35 @@ test('search parses molfile format', () => {
   expect(results[0]?.idCode).toBe(idCode);
 });
 
-test('search throws for unknown format', () => {
+test('search throws for unknown format', async () => {
   const { molDB } = makeDB();
 
-  expect(() =>
+  await expect(
     molDB.search('c1ccccc1', { mode: 'exact', format: 'unknown' as never }),
-  ).toThrow('Unknown format');
+  ).rejects.toThrow('Unknown format');
 });
 
-test('search throws for unknown mode', () => {
+test('search throws for unknown mode', async () => {
   const { molDB } = makeDB();
 
-  expect(() => molDB.search('c1ccccc1', { mode: 'unknown' as never })).toThrow(
-    'Unknown search mode',
-  );
+  await expect(
+    molDB.search('c1ccccc1', { mode: 'unknown' as never }),
+  ).rejects.toThrow('Unknown search mode');
 });
 
-test('search with fragment Molecule instance uses compact copy for exact mode', () => {
+test('search with fragment Molecule instance uses compact copy for exact mode', async () => {
   const { db, molDB } = makeDB();
   const { idCode } = insertSmiles(db, molDB, 'c1ccccc1');
   const queryMol = OCL.Molecule.fromSmiles('c1ccccc1');
   queryMol.setFragment(true);
 
-  const { results } = molDB.search(queryMol, { mode: 'exact' });
+  const { results } = await molDB.search(queryMol, { mode: 'exact' });
 
   expect(results[0]?.idCode).toBe(idCode);
   expect(queryMol.isFragment()).toBe(true);
 });
 
-test('search with Molecule instance for similarity mode', () => {
+test('search with Molecule instance for similarity mode', async () => {
   const { db, molDB } = makeDB();
   const { idCode: caffeineId } = insertSmiles(
     db,
@@ -288,7 +294,7 @@ test('search with Molecule instance for similarity mode', () => {
   );
   const queryMol = OCL.Molecule.fromSmiles('Cn1c(=O)c2c(ncn2C)n(C)c1=O');
 
-  const { results } = molDB.search(queryMol, {
+  const { results } = await molDB.search(queryMol, {
     mode: 'similarity',
     similarityThreshold: 0.9,
   });
@@ -297,13 +303,13 @@ test('search with Molecule instance for similarity mode', () => {
   expect(queryMol.isFragment()).toBe(false);
 });
 
-test('search with Molecule instance for exactNoStereo mode', () => {
+test('search with Molecule instance for exactNoStereo mode', async () => {
   const { db, molDB } = makeDB();
   insertSmiles(db, molDB, 'N[C@@H](C)C(=O)O');
   insertSmiles(db, molDB, 'N[C@H](C)C(=O)O');
   const queryMol = OCL.Molecule.fromSmiles('NC(C)C(=O)O');
 
-  const { total } = molDB.search(queryMol, { mode: 'exactNoStereo' });
+  const { total } = await molDB.search(queryMol, { mode: 'exactNoStereo' });
 
   expect(total).toBe(2);
   expect(queryMol.isFragment()).toBe(false);
@@ -311,14 +317,14 @@ test('search with Molecule instance for exactNoStereo mode', () => {
 
 // ── empty-molecule optimization ────────────────────────────────────────────
 
-test('substructure search with empty molecule returns all entries', () => {
+test('substructure search with empty molecule returns all entries', async () => {
   const { db, molDB } = makeDB();
   insertSmiles(db, molDB, 'c1ccccc1');
   insertSmiles(db, molDB, 'c1ccc(cc1)C(=O)O');
   insertSmiles(db, molDB, 'CCO');
 
   const emptyMol = new OCL.Molecule(0, 0);
-  const { results, total, partial } = molDB.search(emptyMol, {
+  const { results, total, partial } = await molDB.search(emptyMol, {
     mode: 'substructure',
   });
 
@@ -368,7 +374,7 @@ function insertSmilesWithMw(
   return { entryId, idCode, mw };
 }
 
-test('sortByMassDifference puts closest-mass match first in substructure results', () => {
+test('sortByMassDifference puts closest-mass match first in substructure results', async () => {
   const { db, molDB } = makeDBWithMw();
   // benzene MW ~78, benzoic acid MW ~122, toluene MW ~92
   const { idCode: benzeneId, mw: benzeneMw } = insertSmilesWithMw(
@@ -384,7 +390,7 @@ test('sortByMassDifference puts closest-mass match first in substructure results
   const { idCode: tolueneId } = insertSmilesWithMw(db, molDB, 'Cc1ccccc1');
 
   // Query is benzene — all three contain benzene ring; mwColumn is configured so results are sorted by mass diff
-  const { results } = molDB.search('c1ccccc1', {
+  const { results } = await molDB.search('c1ccccc1', {
     mode: 'substructure',
     format: 'smiles',
   });
@@ -400,26 +406,26 @@ test('sortByMassDifference puts closest-mass match first in substructure results
   expect(toluenePos).toBeLessThan(benzoicPos);
 });
 
-test('sortByMassDifference does not mutate the query Molecule instance', () => {
+test('sortByMassDifference does not mutate the query Molecule instance', async () => {
   const { db, molDB } = makeDBWithMw();
   insertSmilesWithMw(db, molDB, 'c1ccccc1');
   const queryMol = OCL.Molecule.fromSmiles('c1ccccc1');
   const wasFragment = queryMol.isFragment();
 
-  molDB.search(queryMol, { mode: 'substructure' });
+  await molDB.search(queryMol, { mode: 'substructure' });
 
   expect(queryMol.isFragment()).toBe(wasFragment);
 });
 
 // ── maxResults / maxCandidates early-exit options ─────────────────────────
 
-test('maxResults stops after N matches and marks partial:true', () => {
+test('maxResults stops after N matches and marks partial:true', async () => {
   const { db, molDB } = makeDB();
   insertSmiles(db, molDB, 'c1ccccc1');
   insertSmiles(db, molDB, 'c1ccc(cc1)C(=O)O');
   insertSmiles(db, molDB, 'Cc1ccccc1');
 
-  const { results, partial } = molDB.search('c1ccccc1', {
+  const { results, partial } = await molDB.search('c1ccccc1', {
     mode: 'substructure',
     format: 'smiles',
     maxResults: 1,
@@ -429,14 +435,14 @@ test('maxResults stops after N matches and marks partial:true', () => {
   expect(partial).toBe(true);
 });
 
-test('substructure search reports progress and ends at processed === total', () => {
+test('substructure search reports progress and ends at processed === total', async () => {
   const { db, molDB } = makeDB();
   insertSmiles(db, molDB, 'c1ccccc1');
   insertSmiles(db, molDB, 'Cc1ccccc1');
   insertSmiles(db, molDB, 'c1ccc(cc1)C(=O)O');
 
   const calls: Array<[number, number]> = [];
-  const { screened } = molDB.search('c1ccccc1', {
+  const { screened } = await molDB.search('c1ccccc1', {
     mode: 'substructure',
     format: 'smiles',
     onProgress: (processed, total) => calls.push([processed, total]),
@@ -450,14 +456,14 @@ test('substructure search reports progress and ends at processed === total', () 
   expect(last?.[0]).toBe(last?.[1]);
 });
 
-test('maxCandidates caps the fingerprint prefilter fetch and marks partial:true', () => {
+test('maxCandidates caps the fingerprint prefilter fetch and marks partial:true', async () => {
   const { db, molDB } = makeDB();
   insertSmiles(db, molDB, 'c1ccccc1');
   insertSmiles(db, molDB, 'c1ccc(cc1)C(=O)O');
   insertSmiles(db, molDB, 'Cc1ccccc1');
 
   // All three pass the fingerprint prefilter for benzene; cap at 1 candidate.
-  const { partial } = molDB.search('c1ccccc1', {
+  const { partial } = await molDB.search('c1ccccc1', {
     mode: 'substructure',
     format: 'smiles',
     maxCandidates: 1,
@@ -466,13 +472,13 @@ test('maxCandidates caps the fingerprint prefilter fetch and marks partial:true'
   expect(partial).toBe(true);
 });
 
-test('maxCandidates equal to candidate count does not falsely mark partial', () => {
+test('maxCandidates equal to candidate count does not falsely mark partial', async () => {
   const { db, molDB } = makeDB();
   insertSmiles(db, molDB, 'c1ccccc1');
   insertSmiles(db, molDB, 'CCO');
 
   // Only 1 molecule passes the fingerprint prefilter for CCO; maxCandidates=1 must not be a false positive.
-  const { partial } = molDB.search('CCO', {
+  const { partial } = await molDB.search('CCO', {
     mode: 'substructure',
     format: 'smiles',
     maxCandidates: 1,
@@ -481,11 +487,11 @@ test('maxCandidates equal to candidate count does not falsely mark partial', () 
   expect(partial).toBe(false);
 });
 
-test('entryId is a plain number (not BigInt) for substructure results', () => {
+test('entryId is a plain number (not BigInt) for substructure results', async () => {
   const { db, molDB } = makeDB();
   const { entryId } = insertSmiles(db, molDB, 'c1ccccc1');
 
-  const { results } = molDB.search('c1ccccc1', {
+  const { results } = await molDB.search('c1ccccc1', {
     mode: 'substructure',
     format: 'smiles',
   });
@@ -494,11 +500,11 @@ test('entryId is a plain number (not BigInt) for substructure results', () => {
   expect(results[0]?.entryId).toBe(entryId);
 });
 
-test('entryId is a plain number (not BigInt) for similarity results', () => {
+test('entryId is a plain number (not BigInt) for similarity results', async () => {
   const { db, molDB } = makeDB();
   const { entryId } = insertSmiles(db, molDB, 'c1ccccc1');
 
-  const { results } = molDB.search('c1ccccc1', {
+  const { results } = await molDB.search('c1ccccc1', {
     mode: 'similarity',
     format: 'smiles',
     similarityThreshold: 0.9,
@@ -508,7 +514,82 @@ test('entryId is a plain number (not BigInt) for similarity results', () => {
   expect(results[0]?.entryId).toBe(entryId);
 });
 
-test('packSSIndex and unpackSSIndex round-trip preserves bit pattern', () => {
+test('parallel substructure search across workers matches the sync result', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'ocl-sqlite-pool-'));
+  const dbPath = join(dir, 'mols.db');
+  const db = new DatabaseSync(dbPath);
+  db.exec('PRAGMA journal_mode=WAL');
+  db.exec(`
+    CREATE TABLE molecules (
+      id                INTEGER PRIMARY KEY,
+      id_code           TEXT NOT NULL UNIQUE,
+      id_code_no_stereo TEXT NOT NULL,
+      mw                REAL NOT NULL
+    )
+  `);
+  const baseConfig = {
+    entriesTable: 'molecules',
+    idCodeNoStereoColumn: 'id_code_no_stereo',
+    mwColumn: 'mw',
+  };
+  const indexer = new MoleculesDBSQLite(db, OCL, baseConfig);
+  indexer.migrate();
+
+  // Eight rows so a poolSize of 3 partitions them unevenly across workers.
+  const smiles = [
+    'c1ccccc1',
+    'Cc1ccccc1',
+    'Oc1ccccc1',
+    'CCO',
+    'c1ccc(cc1)C(=O)O',
+    'C1CCCCC1',
+    'c1ccncc1',
+    'Cn1c(=O)c2c(ncn2C)n(C)c1=O',
+  ];
+  const insert = db.prepare(
+    'INSERT INTO molecules (id_code, id_code_no_stereo, mw) VALUES (?, ?, ?)',
+  );
+  for (const smi of smiles) {
+    const mol = OCL.Molecule.fromSmiles(smi);
+    const idCode = mol.getIDCode();
+    const mw = mol.getMolecularFormula().relativeWeight;
+    mol.stripStereoInformation();
+    const { lastInsertRowid } = insert.run(idCode, mol.getIDCode(), mw) as {
+      lastInsertRowid: number;
+    };
+    indexer.insert(lastInsertRowid, idCode);
+  }
+
+  const sync = await indexer.search('c1ccccc1', {
+    mode: 'substructure',
+    format: 'smiles',
+  });
+
+  // No dbPath here: it is derived from the connection (PRAGMA database_list).
+  const parallel = new MoleculesDBSQLite(db, OCL, {
+    ...baseConfig,
+    poolSize: 3,
+  });
+  const progress: Array<[number, number]> = [];
+  const result = await parallel.search('c1ccccc1', {
+    mode: 'substructure',
+    format: 'smiles',
+    onProgress: (processed, total) => progress.push([processed, total]),
+  });
+  await parallel.close();
+  db.close();
+  rmSync(dir, { recursive: true, force: true });
+
+  // Same matches and same mass-proximity ordering as the single-thread scan.
+  expect(result.total).toBe(sync.total);
+  expect(result.results.map((r) => r.entryId)).toStrictEqual(
+    sync.results.map((r) => r.entryId),
+  );
+  expect(result.total).toBe(4);
+  expect(progress.length).toBeGreaterThan(0);
+});
+
+test('packSSIndex and unpackSSIndex round-trip preserves bit pattern', async () => {
   const mol = OCL.Molecule.fromSmiles('c1ccccc1');
   const original = mol.getIndex().map((v) => v >>> 0);
   const packed = packSSIndex(original);

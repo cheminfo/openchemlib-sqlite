@@ -17,6 +17,8 @@ export interface SubstructureSearchParams {
   ssIndexCols: string;
   ssJoin: string;
   mwColumn: string | null;
+  /** Primary-key column of the entries table, for partitioned scans. */
+  pkColumn: string;
   /** Fragment flag must already be set to true before passing. */
   mol: OCLMolecule;
   from: number;
@@ -25,6 +27,8 @@ export interface SubstructureSearchParams {
   maxCandidates: number;
   maxResults: number;
   onProgress?: (processed: number, total: number) => void;
+  /** Restrict to entries where `pk % count === index` (parallel partition). */
+  partition?: { count: number; index: number };
 }
 
 function sortByMassDiff(
@@ -60,14 +64,21 @@ export function runSubstructureSearch(
     maxCandidates,
     maxResults,
     onProgress,
+    partition,
+    pkColumn,
   } = params;
   const { Molecule, SSSearcherWithIndex } = ocl;
   const mwSelectCol = mwColumn ? `, e.${mwColumn} AS mw` : '';
+  // Partitioned scan: only entries whose pk falls in this worker's slice. count
+  // and index are trusted integers (set by the pool); coerced defensively.
+  const partitionCond = partition
+    ? `(e.${pkColumn} % ${Math.trunc(partition.count)} = ${Math.trunc(partition.index)})`
+    : '';
 
   // Optimization: empty fragment matches every molecule — skip fingerprint prefilter and OCL check.
   if (mol.getAllAtoms() === 0) {
     const stmt = db.prepare(
-      `SELECT ${selectCols}${mwSelectCol} FROM ${entriesTable} e ${ssJoin}`,
+      `SELECT ${selectCols}${mwSelectCol} FROM ${entriesTable} e ${ssJoin}${partitionCond ? ` WHERE ${partitionCond}` : ''}`,
     );
     const allRows = stmt.all() as Array<Record<string, unknown>>;
     return {
@@ -94,7 +105,7 @@ export function runSubstructureSearch(
       ? maxCandidates
       : maxCandidates + 1;
   const stmt = db.prepare(
-    `SELECT ${selectCols}${mwSelectCol}, ${ssIndexCols} FROM ${entriesTable} e ${ssJoin} WHERE ${prefilter.sql} LIMIT ?`,
+    `SELECT ${selectCols}${mwSelectCol}, ${ssIndexCols} FROM ${entriesTable} e ${ssJoin} WHERE ${prefilter.sql}${partitionCond ? ` AND ${partitionCond}` : ''} LIMIT ?`,
   );
   stmt.setReadBigInts?.(true);
   const allCandidates = stmt.all(...prefilter.params, fetchLimit) as Array<

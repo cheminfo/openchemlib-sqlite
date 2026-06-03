@@ -1,6 +1,9 @@
 import type * as OpenChemLib from 'openchemlib';
 
+import type { SearchWorkerPool } from './SearchWorkerPool.ts';
 import { buildSchemaSql } from './schema.ts';
+// Type-only: erased at build, so node:worker_threads is never pulled into the
+// synchronous/browser path. The pool is loaded lazily via dynamic import.
 import type {
   MoleculesDBConfig,
   SQLiteDatabase,
@@ -21,6 +24,7 @@ interface ResolvedConfig {
   idCodeColumn: string;
   idCodeNoStereoColumn: string | null;
   mwColumn: string | null;
+  poolSize: number;
 }
 
 function resolveConfig(config: MoleculesDBConfig): ResolvedConfig {
@@ -30,7 +34,18 @@ function resolveConfig(config: MoleculesDBConfig): ResolvedConfig {
     idCodeColumn: config.idCodeColumn ?? 'id_code',
     idCodeNoStereoColumn: config.idCodeNoStereoColumn ?? null,
     mwColumn: config.mwColumn ?? null,
+    poolSize: config.poolSize ?? 4,
   };
+}
+
+// The path of the main database file, derived from the connection itself (empty
+// for an in-memory or temporary database). Workers reopen the file at this path,
+// so the caller never has to pass it separately.
+function databaseFilePath(db: SQLiteDatabase): string {
+  const row = db
+    .prepare("SELECT file FROM pragma_database_list WHERE name = 'main'")
+    .get() as { file?: string } | undefined;
+  return row?.file ?? '';
 }
 
 /**
@@ -66,11 +81,14 @@ export class MoleculesDBSQLite {
   #ssIndexCols: string;
   #ssJoin: string;
   #selectCols: string;
+  #dbPath: string;
+  #pool: SearchWorkerPool | undefined;
 
   constructor(db: SQLiteDatabase, ocl: OCLLibrary, config: MoleculesDBConfig) {
     this.#db = db;
     this.#ocl = ocl;
     this.#cfg = resolveConfig(config);
+    this.#dbPath = databaseFilePath(db);
 
     const { pkColumn, idCodeColumn } = this.#cfg;
     this.#ssIndexCols =
@@ -117,14 +135,20 @@ export class MoleculesDBSQLite {
 
   /**
    * Search the database for molecules matching a query.
-   * Substructure and similarity searches scan all candidate rows and may be
-   * slow on large databases; use timeoutMs to cap execution time.
+   *
+   * Substructure search runs in a pool of worker threads when the instance was
+   * created with a `dbPath` (see {@link MoleculesDBConfig}), so a large scan
+   * never blocks the calling thread and is split across cores; otherwise it runs
+   * synchronously on the calling thread. Either way the call is asynchronous.
    * @param query - Query molecule as an OCL Molecule instance or as a string
    *   parsed according to options.format (ignored when a Molecule is passed).
    * @param options - Search options.
    * @returns Search response containing results and metadata.
    */
-  search(query: string | OCLMolecule, options?: SearchOptions): SearchResponse {
+  async search(
+    query: string | OCLMolecule,
+    options?: SearchOptions,
+  ): Promise<SearchResponse> {
     const {
       mode = 'exact',
       format = 'smiles',
@@ -135,9 +159,11 @@ export class MoleculesDBSQLite {
       maxCandidates = Number.MAX_SAFE_INTEGER,
       maxResults = Number.MAX_SAFE_INTEGER,
       onProgress,
+      partition,
     } = options ?? {};
 
-    const { entriesTable, idCodeColumn, idCodeNoStereoColumn } = this.#cfg;
+    const { entriesTable, idCodeColumn, idCodeNoStereoColumn, pkColumn } =
+      this.#cfg;
     const { Molecule, SSSearcherWithIndex } = this.#ocl;
 
     const fromInstance = typeof query !== 'string';
@@ -186,6 +212,29 @@ export class MoleculesDBSQLite {
       case 'substructure': {
         const mol = withFragment(baseMol, true, fromInstance);
         const { mwColumn } = this.#cfg;
+
+        // Parallel path: split the scan across worker threads. Skipped when this
+        // call is itself a worker's partition (`partition` set) to avoid nesting.
+        if (partition === undefined && this.#canParallelize()) {
+          let queryMw = 0;
+          if (mwColumn) {
+            const mwMol = mol.getCompactCopy();
+            mwMol.setFragment(false);
+            queryMw = mwMol.getMolecularFormula().relativeWeight;
+          }
+          const pool = await this.#ensurePool();
+          // Pass the query as an idCode so it is cheap to transfer to workers.
+          return pool.runSubstructure(mol.getIDCode(), {
+            format: 'idCode',
+            from,
+            limit,
+            timeoutMs,
+            queryMw,
+            sortByMw: mwColumn !== null,
+            onProgress,
+          });
+        }
+
         return runSubstructureSearch({
           db: this.#db,
           ocl: this.#ocl,
@@ -194,6 +243,7 @@ export class MoleculesDBSQLite {
           ssIndexCols: this.#ssIndexCols,
           ssJoin: this.#ssJoin,
           mwColumn,
+          pkColumn,
           mol,
           from,
           limit,
@@ -201,6 +251,7 @@ export class MoleculesDBSQLite {
           maxCandidates,
           maxResults,
           onProgress,
+          partition,
         });
       }
 
@@ -245,5 +296,35 @@ export class MoleculesDBSQLite {
       default:
         throw new Error(`Unknown search mode: ${String(mode)}`);
     }
+  }
+
+  /**
+   * Terminate the substructure worker pool, if one was started. Call on
+   * shutdown so the process can exit cleanly. A no-op when no pool exists.
+   */
+  async close(): Promise<void> {
+    await this.#pool?.close();
+    this.#pool = undefined;
+  }
+
+  // Parallel substructure search needs a file path each worker can open; an
+  // in-memory or temporary database (empty path) cannot be shared across threads.
+  #canParallelize(): boolean {
+    return this.#dbPath !== '';
+  }
+
+  // Lazily create the worker pool. The pool module (and node:worker_threads) is
+  // dynamically imported so the synchronous/browser path never loads it.
+  async #ensurePool(): Promise<SearchWorkerPool> {
+    if (!this.#pool) {
+      const { SearchWorkerPool } = await import('./SearchWorkerPool.ts');
+      const { poolSize, ...workerConfig } = this.#cfg;
+      this.#pool = new SearchWorkerPool({
+        dbPath: this.#dbPath,
+        config: workerConfig,
+        poolSize,
+      });
+    }
+    return this.#pool;
   }
 }
