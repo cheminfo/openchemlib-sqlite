@@ -1,5 +1,23 @@
 # Changelog
 
+## [2.0.0](https://github.com/cheminfo/openchemlib-sqlite/compare/v1.2.0...v2.0.0) (2026-06-03)
+
+
+### ⚠ BREAKING CHANGES
+
+* `MoleculesDBSQLite.search()` is now asynchronous and returns a `Promise<SearchResponse>`; callers must await it. New `MoleculesDBConfig` options `dbPath` and `poolSize` enable the worker pool, and a new `close()` method tears it down.
+
+### Features
+
+* default poolSize to 4 in SearchWorkerPoolOptions ([1f1b406](https://github.com/cheminfo/openchemlib-sqlite/commit/1f1b40650cc8bd30aeb57ab25e0a1e4281c06242))
+* report substructure scan progress via an onProgress callback ([ac5f682](https://github.com/cheminfo/openchemlib-sqlite/commit/ac5f682309611ba8cffb4ff84e66321378475e82))
+* run substructure search in a worker pool (async, multicore, progress) ([02db276](https://github.com/cheminfo/openchemlib-sqlite/commit/02db276df06a73f35b68c775d4dcb2fea6d0cd57))
+
+
+### Bug Fixes
+
+* skip 2D coordinate invention when parsing substructure candidates ([163bd44](https://github.com/cheminfo/openchemlib-sqlite/commit/163bd4416139e26a708b59edae646b72af0dc2d2))
+
 ## [1.2.0](https://github.com/cheminfo/openchemlib-sqlite/compare/v1.1.0...v1.2.0) (2026-05-18)
 
 
