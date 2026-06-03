@@ -13,8 +13,11 @@ export interface SearchWorkerPoolOptions {
   dbPath: string;
   /** Column config (no `dbPath`/`poolSize`) for the worker's index. */
   config: MoleculesDBConfig;
-  /** Number of worker threads (clamped to >= 1). */
-  poolSize: number;
+  /**
+   * Number of worker threads (clamped to >= 1).
+   * @default 4
+   */
+  poolSize?: number;
 }
 
 /** Options for one parallel substructure scan. */
@@ -69,7 +72,7 @@ export class SearchWorkerPool {
   constructor(options: SearchWorkerPoolOptions) {
     this.#dbPath = options.dbPath;
     this.#config = options.config;
-    this.#size = Math.max(1, Math.trunc(options.poolSize));
+    this.#size = Math.max(1, Math.trunc(options.poolSize ?? 4));
   }
 
   /**
