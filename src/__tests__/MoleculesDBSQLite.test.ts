@@ -429,6 +429,27 @@ test('maxResults stops after N matches and marks partial:true', () => {
   expect(partial).toBe(true);
 });
 
+test('substructure search reports progress and ends at processed === total', () => {
+  const { db, molDB } = makeDB();
+  insertSmiles(db, molDB, 'c1ccccc1');
+  insertSmiles(db, molDB, 'Cc1ccccc1');
+  insertSmiles(db, molDB, 'c1ccc(cc1)C(=O)O');
+
+  const calls: Array<[number, number]> = [];
+  const { screened } = molDB.search('c1ccccc1', {
+    mode: 'substructure',
+    format: 'smiles',
+    onProgress: (processed, total) => calls.push([processed, total]),
+  });
+
+  expect(calls.length).toBeGreaterThan(0);
+
+  const last = calls.at(-1);
+
+  expect(last?.[0]).toBe(screened);
+  expect(last?.[0]).toBe(last?.[1]);
+});
+
 test('maxCandidates caps the fingerprint prefilter fetch and marks partial:true', () => {
   const { db, molDB } = makeDB();
   insertSmiles(db, molDB, 'c1ccccc1');

@@ -134,6 +134,7 @@ export class MoleculesDBSQLite {
       timeoutMs = 5000,
       maxCandidates = Number.MAX_SAFE_INTEGER,
       maxResults = Number.MAX_SAFE_INTEGER,
+      onProgress,
     } = options ?? {};
 
     const { entriesTable, idCodeColumn, idCodeNoStereoColumn } = this.#cfg;
@@ -199,6 +200,7 @@ export class MoleculesDBSQLite {
           timeoutMs,
           maxCandidates,
           maxResults,
+          onProgress,
         });
       }
 

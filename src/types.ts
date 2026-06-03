@@ -96,6 +96,13 @@ export interface SearchOptions {
    * @default Number.MAX_SAFE_INTEGER
    */
   maxResults?: number;
+  /**
+   * Progress callback for the substructure scan, invoked periodically (and once
+   * at the end) with the number of screened candidates processed so far and the
+   * total to process. Lets a caller report progress or drive a progress bar
+   * while a large scan runs — e.g. from inside a worker thread.
+   */
+  onProgress?: (processed: number, total: number) => void;
 }
 
 export interface SearchResult {

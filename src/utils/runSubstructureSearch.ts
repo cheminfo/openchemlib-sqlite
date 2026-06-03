@@ -24,6 +24,7 @@ export interface SubstructureSearchParams {
   timeoutMs: number;
   maxCandidates: number;
   maxResults: number;
+  onProgress?: (processed: number, total: number) => void;
 }
 
 function sortByMassDiff(
@@ -58,6 +59,7 @@ export function runSubstructureSearch(
     timeoutMs,
     maxCandidates,
     maxResults,
+    onProgress,
   } = params;
   const { Molecule, SSSearcherWithIndex } = ocl;
   const mwSelectCol = mwColumn ? `, e.${mwColumn} AS mw` : '';
@@ -127,12 +129,16 @@ export function runSubstructureSearch(
         break;
       }
     }
-    if (i % 500 === 499 && Date.now() > deadline) {
-      partial = true;
-      screened = i + 1;
-      break;
+    if (i % 500 === 499) {
+      onProgress?.(i + 1, candidates.length);
+      if (Date.now() > deadline) {
+        partial = true;
+        screened = i + 1;
+        break;
+      }
     }
   }
+  onProgress?.(screened, candidates.length);
 
   if (truncatedByMaxCandidates) partial = true;
 
