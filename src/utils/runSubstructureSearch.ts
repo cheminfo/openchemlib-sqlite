@@ -114,7 +114,10 @@ export function runSubstructureSearch(
     const row = candidates[i];
     if (!row) continue;
     const targetIndex = unpackSSIndex(row);
-    const targetMol = Molecule.fromIDCode(row.id_code as string);
+    // Skip 2D-coordinate invention: it is the dominant cost when parsing every
+    // candidate (6-14x on large databases) and substructure matching only needs
+    // the atom/bond graph, never coordinates.
+    const targetMol = Molecule.fromIDCode(row.id_code as string, false);
     searcher.setMolecule(targetMol, targetIndex);
     if (searcher.isFragmentInMolecule()) {
       results.push(rowToResult(row));
