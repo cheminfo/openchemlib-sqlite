@@ -1,5 +1,12 @@
 # Changelog
 
+## [2.1.0](https://github.com/cheminfo/openchemlib-sqlite/compare/v2.0.0...v2.1.0) (2026-06-08)
+
+
+### Features
+
+* run substructure search on a self-contained workerpool pool ([664a775](https://github.com/cheminfo/openchemlib-sqlite/commit/664a77510ade58dcb983f5860663248c3cf30b18))
+
 ## [2.0.0](https://github.com/cheminfo/openchemlib-sqlite/compare/v1.2.0...v2.0.0) (2026-06-03)
 
 
