@@ -4,7 +4,8 @@
   "description": "SQLite-backed molecular database with substructure, exact, and similarity search using OpenChemLib",
   "type": "module",
   "exports": {
-    ".": "./lib/index.js"
+    ".": "./lib/index.js",
+    "./worker": "./lib/searchWorker.js"
   },
   "files": [
     "lib",
@@ -57,5 +58,8 @@
     "rimraf": "^6.1.3",
     "typescript": "^5.9.3",
     "vitest": "^4.1.6"
+  },
+  "dependencies": {
+    "workerpool": "^9.3.4"
   }
 }

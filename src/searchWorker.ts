@@ -1,77 +1,84 @@
-import { DatabaseSync } from 'node:sqlite';
-import { parentPort, workerData } from 'node:worker_threads';
-
 import * as OCL from 'openchemlib';
+import { workerEmit } from 'workerpool';
 
 import { MoleculesDBSQLite } from './MoleculesDBSQLite.ts';
-import type { InputFormat, MoleculesDBConfig } from './types.ts';
+import type { InputFormat, MoleculesDBConfig, SearchResult } from './types.ts';
 
-/** Spawn-time data for a search worker. */
-interface SearchWorkerData {
+/** One partition of a parallel substructure scan, sent to a worker. */
+export interface PartitionTask {
+  /** Specifier the worker re-imports this module from (set by the pool). */
+  workerModule: string;
+  /** Path of the SQLite file this worker opens. */
   dbPath: string;
-  /** Column config only — no `dbPath`/`poolSize`, so the worker runs in-thread. */
+  /** Column config (no `poolSize`) describing the entries table and index. */
   config: MoleculesDBConfig;
-}
-
-/** A partitioned substructure scan request. */
-interface ScanRequest {
-  id: number;
+  /** Query as an OCL idCode (cheap to transfer). */
   query: string;
+  /** Input format of `query`. */
   format: InputFormat;
+  /** Maximum matches this partition may return. */
   limit: number;
+  /** Scan timeout in milliseconds. */
   timeoutMs: number;
+  /** This partition's slice of the entries (`pk % count === index`). */
   partition: { count: number; index: number };
 }
 
-const port = parentPort;
-if (!port) throw new Error('searchWorker must run as a worker thread');
+/** Partial result returned by one worker, merged by the pool. */
+export interface PartitionResult {
+  results: SearchResult[];
+  total: number;
+  screened: number;
+  partial: boolean;
+}
 
-const { dbPath, config } = workerData as SearchWorkerData;
+// One connection + MoleculesDBSQLite per database file, reused across every scan
+// this worker handles. Module scope lives for the worker's whole lifetime, so the
+// heavy OpenChemLib load and the SQLite connection are paid once per worker.
+const databases = new Map<string, MoleculesDBSQLite>();
 
-// Each worker owns a private connection to the same database file and only ever
-// reads from it (substructure search just screens fingerprints and matches
-// structures). It is opened read-write rather than read-only because a read-only
-// connection to a WAL database needs write access to the -shm file and can fail;
-// read-write avoids that while still issuing no writes.
-const connection = new DatabaseSync(dbPath);
-connection.exec('PRAGMA busy_timeout=30000');
-// `config` has no `dbPath`, so this instance runs the scan synchronously on this
-// worker thread (no nested pool).
-const moleculesDB = new MoleculesDBSQLite(connection, OCL, config);
+/**
+ * Run one partition of a substructure scan. Imported and invoked inside a
+ * workerpool worker; never call it on the main thread.
+ *
+ * The SQLite connection is opened lazily (and only here) so this module stays
+ * loadable in environments without `node:sqlite` — a future WebAssembly SQLite
+ * build only needs to swap this one connection-opening step.
+ * @param task - The partition descriptor.
+ * @returns This partition's matches and scan metadata.
+ */
+export async function runSearchPartition(
+  task: PartitionTask,
+): Promise<PartitionResult> {
+  let moleculesDB = databases.get(task.dbPath);
+  if (!moleculesDB) {
+    const { DatabaseSync } = await import('node:sqlite');
+    const connection = new DatabaseSync(task.dbPath);
+    connection.exec('PRAGMA busy_timeout=30000');
+    moleculesDB = new MoleculesDBSQLite(connection, OCL, task.config);
+    databases.set(task.dbPath, moleculesDB);
+  }
 
-port.on('message', (request: ScanRequest) => {
-  moleculesDB
-    .search(request.query, {
-      mode: 'substructure',
-      format: request.format,
-      from: 0,
-      limit: request.limit,
-      timeoutMs: request.timeoutMs,
-      partition: request.partition,
-      onProgress: (processed, total) =>
-        port.postMessage({
-          type: 'progress',
-          id: request.id,
-          index: request.partition.index,
-          processed,
-          total,
-        }),
-    })
-    .then((response) =>
-      port.postMessage({
-        type: 'done',
-        id: request.id,
-        results: response.results,
-        total: response.total,
-        screened: response.screened ?? 0,
-        partial: response.partial ?? false,
+  const response = await moleculesDB.search(task.query, {
+    mode: 'substructure',
+    format: task.format,
+    from: 0,
+    limit: task.limit,
+    timeoutMs: task.timeoutMs,
+    partition: task.partition,
+    onProgress: (processed, total) =>
+      workerEmit({
+        type: 'progress',
+        index: task.partition.index,
+        processed,
+        total,
       }),
-    )
-    .catch((error: unknown) =>
-      port.postMessage({
-        type: 'error',
-        id: request.id,
-        message: error instanceof Error ? error.message : String(error),
-      }),
-    );
-});
+  });
+
+  return {
+    results: response.results,
+    total: response.total,
+    screened: response.screened ?? 0,
+    partial: response.partial ?? false,
+  };
+}

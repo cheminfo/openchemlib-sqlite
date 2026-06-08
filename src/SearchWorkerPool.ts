@@ -1,5 +1,7 @@
-import { Worker } from 'node:worker_threads';
+import type { Pool } from 'workerpool';
+import { pool } from 'workerpool';
 
+import type { PartitionResult, PartitionTask } from './searchWorker.ts';
 import type {
   InputFormat,
   MoleculesDBConfig,
@@ -33,37 +35,59 @@ export interface PoolScanOptions {
   onProgress?: (processed: number, total: number) => void;
 }
 
-interface WorkerMessage {
-  type: 'progress' | 'done' | 'error';
-  id: number;
-  index?: number;
-  processed?: number;
-  total?: number;
-  results?: SearchResult[];
-  screened?: number;
-  partial?: boolean;
-  message?: string;
+interface ProgressEvent {
+  type: 'progress';
+  index: number;
+  processed: number;
+  total: number;
 }
 
-// The worker file sits next to this module; its extension matches whether we run
-// from source (.ts) or the built package (.js) — `new URL` is not rewritten by
-// the TypeScript build, so the extension is derived from this module's own URL.
-const WORKER_EXT = import.meta.url.endsWith('.ts') ? '.ts' : '.js';
-const WORKER_URL = new URL(`searchWorker${WORKER_EXT}`, import.meta.url);
+/** The subset of the worker module the offloaded bootstrap calls. */
+interface SearchWorkerModule {
+  runSearchPartition: (task: PartitionTask) => Promise<PartitionResult>;
+}
+
+// Where each worker re-imports the partition logic from. From the published
+// package (this module is `.js` inside node_modules) a bare subpath specifier
+// keeps the worker self-contained and survives bundling; from source (`.ts`) we
+// point at the sibling file and strip types in the worker thread. Either way the
+// worker code ships inside the package — there is no loose file to discover.
+const FROM_SOURCE = import.meta.url.endsWith('.ts');
+const WORKER_MODULE = FROM_SOURCE
+  ? new URL('searchWorker.ts', import.meta.url).href
+  : 'openchemlib-sqlite/worker';
+const WORKER_EXEC_ARGV = FROM_SOURCE ? ['--experimental-strip-types'] : [];
+
+// Offloaded to each workerpool worker. It is stringified and re-evaluated in the
+// worker, so it must be fully self-contained: it only reads `task` and imports
+// the worker module by the specifier the pool chose. Keeping it to a single
+// import + call avoids any reliance on this module's scope.
+function runPartition(task: PartitionTask): Promise<PartitionResult> {
+  // Build the dynamic import through `new Function` so bundlers (Vite, esbuild,
+  // …) cannot see or rewrite the `import()` — this function is stringified and
+  // re-evaluated in a bare worker where only the native `import()` exists, not a
+  // bundler's internal helper.
+  // eslint-disable-next-line no-new-func, @typescript-eslint/no-implied-eval -- intentional: hide import() from bundlers
+  const importModule = new Function(
+    'specifier',
+    'return import(specifier);',
+  ) as (specifier: string) => Promise<SearchWorkerModule>;
+  return importModule(task.workerModule).then((module) =>
+    module.runSearchPartition(task),
+  );
+}
 
 /**
  * Pool of worker threads that run a substructure scan in parallel by partitioning
  * the entries across workers (`pk % poolSize`). Each worker opens its own
- * read-only connection, so the calling thread is never blocked. Scans are
- * serialized through the pool, so progress and results never interleave.
+ * connection, so the calling thread is never blocked. The pool itself is managed
+ * by `workerpool`, which runs on both Node.js and the browser.
  */
 export class SearchWorkerPool {
   readonly #dbPath: string;
   readonly #config: MoleculesDBConfig;
   readonly #size: number;
-  #workers: Worker[] | undefined;
-  #nextId = 1;
-  #queue: Promise<unknown> = Promise.resolve();
+  #pool: Pool | undefined;
 
   /**
    * Create a pool (workers are spawned lazily on first search).
@@ -81,131 +105,90 @@ export class SearchWorkerPool {
    * @param options - Format, pagination, mw sort key, and progress callback.
    * @returns The merged, sorted, paginated search response.
    */
-  runSubstructure(
+  async runSubstructure(
     query: string,
     options: PoolScanOptions,
   ): Promise<SearchResponse> {
-    // Serialize scans so one scan's messages never interleave with another's.
-    const run = this.#queue.then(() => this.#scanOnce(query, options));
-    this.#queue = run.then(
-      () => undefined,
-      () => undefined,
-    );
-    return run;
-  }
-
-  /** Terminate every worker. Safe to call when none were spawned. */
-  async close(): Promise<void> {
-    const workers = this.#workers;
-    this.#workers = undefined;
-    if (workers) await Promise.all(workers.map((worker) => worker.terminate()));
-  }
-
-  #ensureWorkers(): Worker[] {
-    if (this.#workers) return this.#workers;
-    this.#workers = Array.from(
-      { length: this.#size },
-      () =>
-        new Worker(WORKER_URL, {
-          workerData: { dbPath: this.#dbPath, config: this.#config },
-          // The parent may run under flags a worker cannot inherit (e.g.
-          // --watch); pass only type stripping so a .ts worker still loads.
-          execArgv: WORKER_EXT === '.ts' ? ['--experimental-strip-types'] : [],
-        }),
-    );
-    return this.#workers;
-  }
-
-  #scanOnce(query: string, options: PoolScanOptions): Promise<SearchResponse> {
-    const workers = this.#ensureWorkers();
-    const size = workers.length;
-    const id = this.#nextId++;
+    const workerPool = this.#ensurePool();
+    const size = this.#size;
     const { from, limit, timeoutMs, format, queryMw, sortByMw, onProgress } =
       options;
 
-    // All mutable state for this scan lives in one const object so the message
-    // handler (defined once, outside the worker loop) closes over a stable
-    // binding rather than per-iteration `let`s.
-    const state = {
-      progress: Array.from({ length: size }, () => ({ p: 0, t: 0 })),
-      merged: [] as SearchResult[],
-      listeners: new Map<Worker, (message: WorkerMessage) => void>(),
+    const progress = Array.from({ length: size }, () => ({
+      processed: 0,
       total: 0,
-      screened: 0,
-      partial: false,
-      remaining: size,
-      settled: false,
-    };
-
-    const cleanup = () => {
-      for (const [worker, listener] of state.listeners) {
-        worker.off('message', listener);
-      }
-    };
-
-    return new Promise<SearchResponse>((resolve, reject) => {
-      const handle = (index: number, message: WorkerMessage) => {
-        if (message.id !== id) return;
-        if (message.type === 'progress') {
-          state.progress[index] = {
-            p: message.processed ?? 0,
-            t: message.total ?? 0,
+    }));
+    const reportProgress = onProgress
+      ? (payload: ProgressEvent) => {
+          if (payload.type !== 'progress') return;
+          progress[payload.index] = {
+            processed: payload.processed,
+            total: payload.total,
           };
-          if (onProgress) {
-            let processed = 0;
-            let totalCandidates = 0;
-            for (const entry of state.progress) {
-              processed += entry.p;
-              totalCandidates += entry.t;
-            }
-            onProgress(processed, totalCandidates);
+          let processed = 0;
+          let total = 0;
+          for (const entry of progress) {
+            processed += entry.processed;
+            total += entry.total;
           }
-          return;
+          onProgress(processed, total);
         }
-        if (state.settled) return;
-        if (message.type === 'error') {
-          state.settled = true;
-          cleanup();
-          reject(new Error(message.message ?? 'substructure worker failed'));
-          return;
-        }
-        state.merged.push(...(message.results ?? []));
-        state.total += message.total ?? 0;
-        state.screened += message.screened ?? 0;
-        state.partial = state.partial || (message.partial ?? false);
-        state.remaining -= 1;
-        if (state.remaining === 0) {
-          state.settled = true;
-          cleanup();
-          const sorted = sortByMw
-            ? state.merged.toSorted(
-                (a, b) =>
-                  Math.abs((a.mw ?? 0) - queryMw) -
-                  Math.abs((b.mw ?? 0) - queryMw),
-              )
-            : state.merged;
-          resolve({
-            results: sorted.slice(from, from + limit),
-            total: state.total,
-            screened: state.screened,
-            partial: state.partial,
-          });
-        }
-      };
+      : undefined;
 
-      for (const [index, worker] of workers.entries()) {
-        const listener = (message: WorkerMessage) => handle(index, message);
-        state.listeners.set(worker, listener);
-        worker.on('message', listener);
-        worker.postMessage({
-          id,
+    const partials = await Promise.all(
+      Array.from({ length: size }, (_unused, index) => {
+        const task: PartitionTask = {
+          workerModule: WORKER_MODULE,
+          dbPath: this.#dbPath,
+          config: this.#config,
           query,
           format,
           limit: Number.MAX_SAFE_INTEGER,
           timeoutMs,
           partition: { count: size, index },
-        });
-      }
+        };
+        return workerPool.exec(runPartition, [task], { on: reportProgress });
+      }),
+    );
+
+    const merged: SearchResult[] = [];
+    let total = 0;
+    let screened = 0;
+    let partial = false;
+    for (const result of partials) {
+      merged.push(...result.results);
+      total += result.total;
+      screened += result.screened;
+      partial = partial || result.partial;
+    }
+
+    const sorted = sortByMw
+      ? merged.toSorted(
+          (a, b) =>
+            Math.abs((a.mw ?? 0) - queryMw) - Math.abs((b.mw ?? 0) - queryMw),
+        )
+      : merged;
+
+    return {
+      results: sorted.slice(from, from + limit),
+      total,
+      screened,
+      partial,
+    };
+  }
+
+  /** Terminate every worker. Safe to call when none were spawned. */
+  async close(): Promise<void> {
+    const workerPool = this.#pool;
+    this.#pool = undefined;
+    if (workerPool) await workerPool.terminate();
+  }
+
+  #ensurePool(): Pool {
+    this.#pool ??= pool({
+      maxWorkers: this.#size,
+      workerThreadOpts: { execArgv: WORKER_EXEC_ARGV },
     });
+    return this.#pool;
   }
 }
