@@ -20,8 +20,12 @@ export interface PartitionTask {
   limit: number;
   /** Scan timeout in milliseconds. */
   timeoutMs: number;
-  /** This partition's slice of the entries (`pk % count === index`). */
-  partition: { count: number; index: number };
+  /** Max confirmed matches to collect before stopping early. */
+  maxResults: number;
+  /** This partition's entry_id range, half-open `[lo, hi)`. */
+  partition: { lo: number; hi: number };
+  /** This worker's position in the pool, used to aggregate progress. */
+  partitionIndex: number;
 }
 
 /** Partial result returned by one worker, merged by the pool. */
@@ -29,6 +33,8 @@ export interface PartitionResult {
   results: SearchResult[];
   total: number;
   screened: number;
+  matched: number;
+  elapsedMs: number;
   partial: boolean;
 }
 
@@ -55,6 +61,13 @@ export async function runSearchPartition(
     const { DatabaseSync } = await import('node:sqlite');
     const connection = new DatabaseSync(task.dbPath);
     connection.exec('PRAGMA busy_timeout=30000');
+    // Read-only scan: mmap the whole index so the fingerprint prescreen reads
+    // from the OS page cache instead of read() syscalls. Capped to the build's
+    // SQLITE_MAX_MMAP_SIZE (~2 GiB).
+    connection.exec('PRAGMA query_only=1');
+    connection.exec('PRAGMA mmap_size=2147418112');
+    connection.exec('PRAGMA cache_size=-65536');
+    connection.exec('PRAGMA temp_store=MEMORY');
     moleculesDB = new MoleculesDBSQLite(connection, OCL, task.config);
     databases.set(task.dbPath, moleculesDB);
   }
@@ -65,11 +78,12 @@ export async function runSearchPartition(
     from: 0,
     limit: task.limit,
     timeoutMs: task.timeoutMs,
+    maxResults: task.maxResults,
     partition: task.partition,
     onProgress: (processed, total) =>
       workerEmit({
         type: 'progress',
-        index: task.partition.index,
+        index: task.partitionIndex,
         processed,
         total,
       }),
@@ -79,6 +93,8 @@ export async function runSearchPartition(
     results: response.results,
     total: response.total,
     screened: response.screened ?? 0,
+    matched: response.matched ?? 0,
+    elapsedMs: response.elapsedMs ?? 0,
     partial: response.partial ?? false,
   };
 }

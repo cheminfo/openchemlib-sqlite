@@ -28,10 +28,14 @@ export interface PoolScanOptions {
   from: number;
   limit: number;
   timeoutMs: number;
+  /** Max confirmed matches each worker collects before stopping early. */
+  maxResults: number;
   /** Query molecular weight, for the merge sort (when the DB has an mw column). */
   queryMw: number;
   /** Whether to sort the merged results by mass proximity to `queryMw`. */
   sortByMw: boolean;
+  /** Min/max entry_id, used to split the scan into per-worker PK ranges. */
+  idRange: { min: number; max: number };
   onProgress?: (processed: number, total: number) => void;
 }
 
@@ -111,8 +115,28 @@ export class SearchWorkerPool {
   ): Promise<SearchResponse> {
     const workerPool = this.#ensurePool();
     const size = this.#size;
-    const { from, limit, timeoutMs, format, queryMw, sortByMw, onProgress } =
-      options;
+    const {
+      from,
+      limit,
+      timeoutMs,
+      maxResults,
+      format,
+      queryMw,
+      sortByMw,
+      idRange,
+      onProgress,
+    } = options;
+
+    // Split [min, max] into `size` contiguous entry_id ranges so each worker
+    // scans only its slice (sargable on the ocl_ss_index PK) instead of every
+    // worker scanning all rows.
+    const span = Math.max(0, idRange.max - idRange.min + 1);
+    const step = Math.max(1, Math.ceil(span / size));
+    const rangeFor = (index: number): { lo: number; hi: number } => ({
+      lo: idRange.min + index * step,
+      hi:
+        index === size - 1 ? idRange.max + 1 : idRange.min + (index + 1) * step,
+    });
 
     const progress = Array.from({ length: size }, () => ({
       processed: 0,
@@ -145,7 +169,9 @@ export class SearchWorkerPool {
           format,
           limit: Number.MAX_SAFE_INTEGER,
           timeoutMs,
-          partition: { count: size, index },
+          maxResults,
+          partition: rangeFor(index),
+          partitionIndex: index,
         };
         return workerPool.exec(runPartition, [task], { on: reportProgress });
       }),
@@ -154,11 +180,15 @@ export class SearchWorkerPool {
     const merged: SearchResult[] = [];
     let total = 0;
     let screened = 0;
+    let matched = 0;
+    let elapsedMs = 0;
     let partial = false;
     for (const result of partials) {
       merged.push(...result.results);
       total += result.total;
       screened += result.screened;
+      matched += result.matched;
+      elapsedMs = Math.max(elapsedMs, result.elapsedMs);
       partial = partial || result.partial;
     }
 
@@ -173,6 +203,8 @@ export class SearchWorkerPool {
       results: sorted.slice(from, from + limit),
       total,
       screened,
+      matched,
+      elapsedMs,
       partial,
     };
   }

@@ -8,6 +8,8 @@ export interface SQLiteStatement {
   all(...params: unknown[]): unknown[];
   get(...params: unknown[]): unknown | undefined;
   run(...params: unknown[]): StatementResult;
+  /** Stream rows lazily so a scan can stop early (node:sqlite + better-sqlite3). */
+  iterate?(...params: unknown[]): IterableIterator<unknown>;
   /** node:sqlite: call before all()/get() to return INTEGER columns as BigInt. */
   setReadBigInts?(flag: boolean): void;
 }
@@ -115,11 +117,12 @@ export interface SearchOptions {
    */
   onProgress?: (processed: number, total: number) => void;
   /**
-   * Restrict the substructure scan to entries whose primary key satisfies
-   * `pk % count === index`. Used internally to partition a parallel search
-   * across worker threads; callers normally omit it.
+   * Restrict the substructure scan to entries whose primary key is in the
+   * half-open range `[lo, hi)`. Used internally to partition a parallel search
+   * across worker threads by entry-id range (sargable on the ocl_ss_index PK),
+   * so each worker scans only its slice of the rows; callers normally omit it.
    */
-  partition?: { count: number; index: number };
+  partition?: { lo: number; hi: number };
 }
 
 export interface SearchResult {
@@ -140,4 +143,8 @@ export interface SearchResponse {
   partial?: boolean;
   /** Number of candidate rows screened (substructure mode only). */
   screened?: number;
+  /** Number of confirmed substructure matches found (substructure mode only). */
+  matched?: number;
+  /** Wall-clock time spent in the scan, in ms (substructure mode only). */
+  elapsedMs?: number;
 }

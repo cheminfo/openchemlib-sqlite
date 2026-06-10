@@ -472,6 +472,42 @@ test('maxCandidates caps the fingerprint prefilter fetch and marks partial:true'
   expect(partial).toBe(true);
 });
 
+test('maxResults stops the streaming scan early and marks partial:true', async () => {
+  const { db, molDB } = makeDB();
+  insertSmiles(db, molDB, 'c1ccccc1');
+  insertSmiles(db, molDB, 'Cc1ccccc1');
+  insertSmiles(db, molDB, 'Oc1ccccc1');
+
+  // Three benzene-containing molecules, but stop after the first two matches.
+  const res = await molDB.search('c1ccccc1', {
+    mode: 'substructure',
+    format: 'smiles',
+    maxResults: 2,
+  });
+
+  expect(res.results).toHaveLength(2);
+  expect(res.matched).toBe(2);
+  expect(res.partial).toBe(true);
+});
+
+test('substructure response reports matched, screened and elapsedMs', async () => {
+  const { db, molDB } = makeDB();
+  insertSmiles(db, molDB, 'c1ccccc1');
+  insertSmiles(db, molDB, 'CCO');
+
+  const res = await molDB.search('c1ccccc1', {
+    mode: 'substructure',
+    format: 'smiles',
+  });
+
+  expect(res.matched).toBe(1); // only benzene contains the benzene fragment
+  expect(res.screened).toBeGreaterThanOrEqual(1);
+  expect(typeof res.elapsedMs).toBe('number');
+  expect(res.results[0]?.idCode).toBe(
+    OCL.Molecule.fromSmiles('c1ccccc1').getIDCode(),
+  );
+});
+
 test('maxCandidates equal to candidate count does not falsely mark partial', async () => {
   const { db, molDB } = makeDB();
   insertSmiles(db, molDB, 'c1ccccc1');

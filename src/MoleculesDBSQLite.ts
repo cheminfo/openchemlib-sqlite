@@ -229,8 +229,10 @@ export class MoleculesDBSQLite {
             from,
             limit,
             timeoutMs,
+            maxResults,
             queryMw,
             sortByMw: mwColumn !== null,
+            idRange: this.#ssIndexIdRange(),
             onProgress,
           });
         }
@@ -239,11 +241,10 @@ export class MoleculesDBSQLite {
           db: this.#db,
           ocl: this.#ocl,
           entriesTable,
-          selectCols: this.#selectCols,
           ssIndexCols: this.#ssIndexCols,
-          ssJoin: this.#ssJoin,
           mwColumn,
           pkColumn,
+          idCodeColumn,
           mol,
           from,
           limit,
@@ -311,6 +312,16 @@ export class MoleculesDBSQLite {
   // in-memory or temporary database (empty path) cannot be shared across threads.
   #canParallelize(): boolean {
     return this.#dbPath !== '';
+  }
+
+  // Min/max entry_id, so the pool can split the scan into sargable PK ranges.
+  #ssIndexIdRange(): { min: number; max: number } {
+    const row = this.#db
+      .prepare(
+        'SELECT MIN(entry_id) AS lo, MAX(entry_id) AS hi FROM ocl_ss_index',
+      )
+      .get() as { lo: number | null; hi: number | null } | undefined;
+    return { min: row?.lo ?? 0, max: row?.hi ?? 0 };
   }
 
   // Lazily create the worker pool. The pool module (and node:worker_threads) is
