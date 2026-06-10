@@ -1,5 +1,12 @@
 # Changelog
 
+## [2.2.0](https://github.com/cheminfo/openchemlib-sqlite/compare/v2.1.0...v2.2.0) (2026-06-10)
+
+
+### Features
+
+* stream substructure search with early-stop at maxResults ([dddaa4b](https://github.com/cheminfo/openchemlib-sqlite/commit/dddaa4bc58593cfc9bec19e82e7522e79e74dd6a))
+
 ## [2.1.0](https://github.com/cheminfo/openchemlib-sqlite/compare/v2.0.0...v2.1.0) (2026-06-08)
 
 
