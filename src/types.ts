@@ -64,6 +64,15 @@ export interface MoleculesDBConfig {
    * @default 4
    */
   poolSize?: number;
+  /**
+   * Number of recent structure searches (substructure / similarity) whose full
+   * result set is kept in an in-memory LRU cache, keyed by the query. A repeated
+   * search for the same structure — e.g. paging through results — then returns
+   * instantly instead of re-running the scan. The cache is cleared whenever
+   * `insert()` changes the data. Set to 0 to disable caching.
+   * @default 100
+   */
+  searchCacheSize?: number;
 }
 
 export interface SearchOptions {

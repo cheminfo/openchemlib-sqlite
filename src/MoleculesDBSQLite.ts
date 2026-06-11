@@ -1,3 +1,4 @@
+import { LRUCache } from 'lru-cache';
 import type * as OpenChemLib from 'openchemlib';
 
 import type { SearchWorkerPool } from './SearchWorkerPool.ts';
@@ -25,6 +26,7 @@ interface ResolvedConfig {
   idCodeNoStereoColumn: string | null;
   mwColumn: string | null;
   poolSize: number;
+  searchCacheSize: number;
 }
 
 function resolveConfig(config: MoleculesDBConfig): ResolvedConfig {
@@ -35,7 +37,17 @@ function resolveConfig(config: MoleculesDBConfig): ResolvedConfig {
     idCodeNoStereoColumn: config.idCodeNoStereoColumn ?? null,
     mwColumn: config.mwColumn ?? null,
     poolSize: config.poolSize ?? 4,
+    searchCacheSize: config.searchCacheSize ?? 100,
   };
+}
+
+/** A cached full (unsliced) structure-scan result, paginated on each hit. */
+interface CachedScan {
+  results: SearchResult[];
+  screened: number;
+  matched: number;
+  partial: boolean;
+  elapsedMs: number;
 }
 
 // The path of the main database file, derived from the connection itself (empty
@@ -83,12 +95,17 @@ export class MoleculesDBSQLite {
   #selectCols: string;
   #dbPath: string;
   #pool: SearchWorkerPool | undefined;
+  #searchCache: LRUCache<string, CachedScan> | undefined;
 
   constructor(db: SQLiteDatabase, ocl: OCLLibrary, config: MoleculesDBConfig) {
     this.#db = db;
     this.#ocl = ocl;
     this.#cfg = resolveConfig(config);
     this.#dbPath = databaseFilePath(db);
+    this.#searchCache =
+      this.#cfg.searchCacheSize > 0
+        ? new LRUCache<string, CachedScan>({ max: this.#cfg.searchCacheSize })
+        : undefined;
 
     const { pkColumn, idCodeColumn } = this.#cfg;
     this.#ssIndexCols =
@@ -131,6 +148,13 @@ export class MoleculesDBSQLite {
         'INSERT OR REPLACE INTO ocl_ss_index (entry_id, ss_index0, ss_index1, ss_index2, ss_index3, ss_index4, ss_index5, ss_index6, ss_index7) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)',
       )
       .run(entryId, ...packed);
+    // The data changed, so cached search results are stale.
+    this.#searchCache?.clear();
+  }
+
+  /** Clear the in-memory structure-search result cache. */
+  clearSearchCache(): void {
+    this.#searchCache?.clear();
   }
 
   /**
@@ -162,9 +186,14 @@ export class MoleculesDBSQLite {
       partition,
     } = options ?? {};
 
-    const { entriesTable, idCodeColumn, idCodeNoStereoColumn, pkColumn } =
-      this.#cfg;
-    const { Molecule, SSSearcherWithIndex } = this.#ocl;
+    const {
+      entriesTable,
+      idCodeColumn,
+      idCodeNoStereoColumn,
+      pkColumn,
+      mwColumn,
+    } = this.#cfg;
+    const { Molecule } = this.#ocl;
 
     const fromInstance = typeof query !== 'string';
     const baseMol: OCLMolecule =
@@ -211,86 +240,67 @@ export class MoleculesDBSQLite {
 
       case 'substructure': {
         const mol = withFragment(baseMol, true, fromInstance);
-        const { mwColumn } = this.#cfg;
 
-        // Parallel path: split the scan across worker threads. Skipped when this
-        // call is itself a worker's partition (`partition` set) to avoid nesting.
-        if (partition === undefined && this.#canParallelize()) {
-          let queryMw = 0;
-          if (mwColumn) {
-            const mwMol = mol.getCompactCopy();
-            mwMol.setFragment(false);
-            queryMw = mwMol.getMolecularFormula().relativeWeight;
-          }
-          const pool = await this.#ensurePool();
-          // Pass the query as an idCode so it is cheap to transfer to workers.
-          return pool.runSubstructure(mol.getIDCode(), {
-            format: 'idCode',
+        // Worker partition calls run directly (internal, never cached) to avoid
+        // nesting a pool inside a worker.
+        if (partition !== undefined) {
+          return runSubstructureSearch({
+            db: this.#db,
+            ocl: this.#ocl,
+            entriesTable,
+            ssIndexCols: this.#ssIndexCols,
+            mwColumn,
+            pkColumn,
+            idCodeColumn,
+            mol,
             from,
             limit,
             timeoutMs,
+            maxCandidates,
             maxResults,
-            queryMw,
-            sortByMw: mwColumn !== null,
-            idRange: this.#ssIndexIdRange(),
             onProgress,
+            partition,
           });
         }
 
-        return runSubstructureSearch({
-          db: this.#db,
-          ocl: this.#ocl,
-          entriesTable,
-          ssIndexCols: this.#ssIndexCols,
-          mwColumn,
-          pkColumn,
-          idCodeColumn,
-          mol,
-          from,
-          limit,
-          timeoutMs,
-          maxCandidates,
-          maxResults,
-          onProgress,
-          partition,
-        });
+        const queryIdCode = mol.getIDCode();
+        const scan = await this.#cachedScan(
+          `sub|${queryIdCode}|${maxResults}|${maxCandidates}`,
+          () =>
+            this.#scanSubstructureFull(
+              mol,
+              queryIdCode,
+              maxResults,
+              maxCandidates,
+              timeoutMs,
+              onProgress,
+            ),
+        );
+        return {
+          results: scan.results.slice(from, from + limit),
+          total: scan.results.length,
+          screened: scan.screened,
+          matched: scan.matched,
+          partial: scan.partial,
+          elapsedMs: scan.elapsedMs,
+        };
       }
 
       case 'similarity': {
         const mol = withFragment(baseMol, false, fromInstance);
-        const queryIndex = mol.getIndex();
-        const stmt = this.#db.prepare(
-          `SELECT ${this.#selectCols}, ${this.#ssIndexCols} FROM ${entriesTable} e ${this.#ssJoin}`,
+        const queryIdCode = mol.getIDCode();
+        const scan = await this.#cachedScan(
+          `sim|${queryIdCode}|${similarityThreshold}`,
+          () =>
+            Promise.resolve(
+              this.#scanSimilarityFull(mol, similarityThreshold, timeoutMs),
+            ),
         );
-        stmt.setReadBigInts?.(true);
-        const rows = stmt.all() as Array<Record<string, unknown>>;
-
-        const deadline = Date.now() + timeoutMs;
-        const withSim: Array<SearchResult & { similarity: number }> = [];
-        let partial = false;
-
-        for (let i = 0; i < rows.length; i++) {
-          const row = rows[i];
-          if (!row) continue;
-          const targetIndex = unpackSSIndex(row);
-          const sim = SSSearcherWithIndex.getSimilarityTanimoto(
-            queryIndex,
-            targetIndex,
-          );
-          if (sim >= similarityThreshold) {
-            withSim.push({ ...rowToResult(row), similarity: sim });
-          }
-          if (i % 500 === 499 && Date.now() > deadline) {
-            partial = true;
-            break;
-          }
-        }
-
-        const sorted = withSim.toSorted((a, b) => b.similarity - a.similarity);
         return {
-          results: sorted.slice(from, from + limit),
-          total: sorted.length,
-          partial,
+          results: scan.results.slice(from, from + limit),
+          total: scan.results.length,
+          partial: scan.partial,
+          elapsedMs: scan.elapsedMs,
         };
       }
 
@@ -312,6 +322,128 @@ export class MoleculesDBSQLite {
   // in-memory or temporary database (empty path) cannot be shared across threads.
   #canParallelize(): boolean {
     return this.#dbPath !== '';
+  }
+
+  // Get the full (unsliced) result set for a structure query from the cache, or
+  // compute it via `computeFull` and store it, so subsequent pages are instant.
+  async #cachedScan(
+    key: string,
+    computeFull: () => Promise<CachedScan>,
+  ): Promise<CachedScan> {
+    const hit = this.#searchCache?.get(key);
+    if (hit) return hit;
+    const scan = await computeFull();
+    this.#searchCache?.set(key, scan);
+    return scan;
+  }
+
+  // Run a full substructure scan (no pagination): parallel across workers when
+  // the database is file-backed, otherwise synchronously on the calling thread.
+  async #scanSubstructureFull(
+    mol: OCLMolecule,
+    queryIdCode: string,
+    maxResults: number,
+    maxCandidates: number,
+    timeoutMs: number,
+    onProgress: SearchOptions['onProgress'],
+  ): Promise<CachedScan> {
+    const { mwColumn, entriesTable, pkColumn, idCodeColumn } = this.#cfg;
+    const limit = Number.MAX_SAFE_INTEGER;
+    if (this.#canParallelize()) {
+      let queryMw = 0;
+      if (mwColumn) {
+        const mwMol = mol.getCompactCopy();
+        mwMol.setFragment(false);
+        queryMw = mwMol.getMolecularFormula().relativeWeight;
+      }
+      const pool = await this.#ensurePool();
+      const r = await pool.runSubstructure(queryIdCode, {
+        format: 'idCode',
+        from: 0,
+        limit,
+        timeoutMs,
+        maxResults,
+        queryMw,
+        sortByMw: mwColumn !== null,
+        idRange: this.#ssIndexIdRange(),
+        onProgress,
+      });
+      return {
+        results: r.results,
+        screened: r.screened ?? 0,
+        matched: r.matched ?? 0,
+        partial: r.partial ?? false,
+        elapsedMs: r.elapsedMs ?? 0,
+      };
+    }
+    const r = runSubstructureSearch({
+      db: this.#db,
+      ocl: this.#ocl,
+      entriesTable,
+      ssIndexCols: this.#ssIndexCols,
+      mwColumn,
+      pkColumn,
+      idCodeColumn,
+      mol,
+      from: 0,
+      limit,
+      timeoutMs,
+      maxCandidates,
+      maxResults,
+      onProgress,
+    });
+    return {
+      results: r.results,
+      screened: r.screened ?? 0,
+      matched: r.matched ?? 0,
+      partial: r.partial ?? false,
+      elapsedMs: r.elapsedMs ?? 0,
+    };
+  }
+
+  // Run a full similarity scan (no pagination): Tanimoto over every indexed row.
+  #scanSimilarityFull(
+    mol: OCLMolecule,
+    similarityThreshold: number,
+    timeoutMs: number,
+  ): CachedScan {
+    const { SSSearcherWithIndex } = this.#ocl;
+    const start = Date.now();
+    const queryIndex = mol.getIndex();
+    const stmt = this.#db.prepare(
+      `SELECT ${this.#selectCols}, ${this.#ssIndexCols} FROM ${this.#cfg.entriesTable} e ${this.#ssJoin}`,
+    );
+    stmt.setReadBigInts?.(true);
+    const rows = stmt.all() as Array<Record<string, unknown>>;
+    const deadline = Date.now() + timeoutMs;
+    const withSim: Array<SearchResult & { similarity: number }> = [];
+    let partial = false;
+    let screened = 0;
+    for (let i = 0; i < rows.length; i++) {
+      const row = rows[i];
+      if (!row) continue;
+      screened++;
+      const targetIndex = unpackSSIndex(row);
+      const sim = SSSearcherWithIndex.getSimilarityTanimoto(
+        queryIndex,
+        targetIndex,
+      );
+      if (sim >= similarityThreshold) {
+        withSim.push({ ...rowToResult(row), similarity: sim });
+      }
+      if (i % 500 === 499 && Date.now() > deadline) {
+        partial = true;
+        break;
+      }
+    }
+    const results = withSim.toSorted((a, b) => b.similarity - a.similarity);
+    return {
+      results,
+      screened,
+      matched: results.length,
+      partial,
+      elapsedMs: Date.now() - start,
+    };
   }
 
   // Min/max entry_id, so the pool can split the scan into sargable PK ranges.

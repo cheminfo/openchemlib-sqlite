@@ -508,6 +508,72 @@ test('substructure response reports matched, screened and elapsedMs', async () =
   );
 });
 
+test('substructure results are cached and invalidated by insert', async () => {
+  const { db, molDB } = makeDB();
+  const benzene = insertSmiles(db, molDB, 'c1ccccc1');
+  const toluene = insertSmiles(db, molDB, 'Cc1ccccc1');
+  insertSmiles(db, molDB, 'Oc1ccccc1'); // phenol
+
+  const first = await molDB.search('c1ccccc1', {
+    mode: 'substructure',
+    format: 'smiles',
+  });
+
+  expect(first.total).toBe(3);
+
+  // Delete two matches directly, bypassing insert() so the cache is NOT cleared.
+  for (const id of [benzene.entryId, toluene.entryId]) {
+    db.prepare('DELETE FROM ocl_ss_index WHERE entry_id = ?').run(id);
+    db.prepare('DELETE FROM molecules WHERE id = ?').run(id);
+  }
+
+  // Served from cache → still the stale count, proving the result was cached.
+  const cached = await molDB.search('c1ccccc1', {
+    mode: 'substructure',
+    format: 'smiles',
+  });
+
+  expect(cached.total).toBe(3);
+
+  // A real insert() clears the cache; the next scan reflects the two deletions.
+  insertSmiles(db, molDB, 'CCO'); // ethanol — not a benzene match
+  const fresh = await molDB.search('c1ccccc1', {
+    mode: 'substructure',
+    format: 'smiles',
+  });
+
+  expect(fresh.total).toBe(1); // only phenol remains
+});
+
+test('searchCacheSize 0 disables the result cache', async () => {
+  const db = new DatabaseSync(':memory:');
+  db.exec(
+    'CREATE TABLE molecules (id INTEGER PRIMARY KEY, id_code TEXT NOT NULL UNIQUE, id_code_no_stereo TEXT NOT NULL)',
+  );
+  const molDB = new MoleculesDBSQLite(db, OCL, {
+    entriesTable: 'molecules',
+    idCodeNoStereoColumn: 'id_code_no_stereo',
+    searchCacheSize: 0,
+  });
+  molDB.migrate();
+  const benzene = insertSmiles(db, molDB, 'c1ccccc1');
+
+  await molDB.search('c1ccccc1', { mode: 'substructure', format: 'smiles' });
+
+  // Delete directly; with caching disabled the next search must re-scan.
+  db.prepare('DELETE FROM ocl_ss_index WHERE entry_id = ?').run(
+    benzene.entryId,
+  );
+  db.prepare('DELETE FROM molecules WHERE id = ?').run(benzene.entryId);
+
+  const res = await molDB.search('c1ccccc1', {
+    mode: 'substructure',
+    format: 'smiles',
+  });
+
+  expect(res.total).toBe(0);
+});
+
 test('maxCandidates equal to candidate count does not falsely mark partial', async () => {
   const { db, molDB } = makeDB();
   insertSmiles(db, molDB, 'c1ccccc1');
