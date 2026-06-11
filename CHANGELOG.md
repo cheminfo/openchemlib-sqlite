@@ -1,5 +1,12 @@
 # Changelog
 
+## [2.3.0](https://github.com/cheminfo/openchemlib-sqlite/compare/v2.2.0...v2.3.0) (2026-06-11)
+
+
+### Features
+
+* cache recent structure searches for instant pagination ([14ad23a](https://github.com/cheminfo/openchemlib-sqlite/commit/14ad23a812f6ec7c27b371188c3dd10efc809a63))
+
 ## [2.2.0](https://github.com/cheminfo/openchemlib-sqlite/compare/v2.1.0...v2.2.0) (2026-06-10)
 
 
