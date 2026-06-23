@@ -1,5 +1,21 @@
 # Changelog
 
+## [3.0.0](https://github.com/cheminfo/openchemlib-sqlite/compare/v2.3.0...v3.0.0) (2026-06-23)
+
+
+### ⚠ BREAKING CHANGES
+
+* the ocl_ss_index schema changed (added an mw column and clustered the table by it), so existing indexes must be rebuilt. mw is taken from the configured mwColumn at insert time, or derived from the molecule when mwColumn is unset.
+
+### Features
+
+* cluster ocl_ss_index by molecular weight ([407af01](https://github.com/cheminfo/openchemlib-sqlite/commit/407af012b6d544f623a423d64c3654465c01588b))
+
+
+### Bug Fixes
+
+* default mw to 0 when the configured mwColumn is null ([3f89c29](https://github.com/cheminfo/openchemlib-sqlite/commit/3f89c29c721b1fb124706ebbaaab9f5677880cc6))
+
 ## [2.3.0](https://github.com/cheminfo/openchemlib-sqlite/compare/v2.2.0...v2.3.0) (2026-06-11)
 
 
