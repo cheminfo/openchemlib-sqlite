@@ -197,12 +197,23 @@ const { results, total } = molDB.search(query, {
 `migrate()` creates one table:
 
 ```sql
-ocl_ss_index (entry_id, ss_index0 .. ss_index7)
+ocl_ss_index (mw, entry_id, ss_index0 .. ss_index7)
 ```
 
-`entry_id` is the primary key and a foreign-key reference to your entries table's primary key column.
-The eight `ss_indexN` columns store the 512-bit OCL fingerprint packed as signed 64-bit integers for
-efficient SQL bitwise prefiltering.
+The table is **clustered by molecular weight** (`WITHOUT ROWID`, primary key `(mw, entry_id)`), with a
+secondary unique index on `entry_id`. `entry_id` is a foreign-key reference to your entries table's
+primary key column. The eight `ss_indexN` columns store the 512-bit OCL fingerprint packed as signed
+64-bit integers for efficient SQL bitwise prefiltering. `mw` is computed from the molecule at `insert()`,
+so the index is self-contained and substructure scans visit the lightest candidates first.
+
+### Upgrading an existing database
+
+Databases indexed by a version of this package from **before** molecular-weight clustering have an
+`ocl_ss_index` with `entry_id` as the primary key and no `mw` column. `migrate()` detects that legacy
+shape and rebuilds it in place automatically — every stored fingerprint is preserved and each row's `mw`
+is recomputed from its molecule — so simply updating the package and calling `migrate()` as usual is
+enough. The one-time rebuild runs in small committed batches and is resumable if interrupted. To run it
+explicitly (e.g. to learn how many rows were migrated), call the exported `migrateLegacyIndexToMw(db, ocl, { entriesTable, pkColumn, idCodeColumn })`.
 
 ## Using a different SQLite driver
 

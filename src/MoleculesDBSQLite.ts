@@ -12,6 +12,7 @@ import type {
   SearchResponse,
   SearchResult,
 } from './types.ts';
+import { migrateLegacyIndexToMw } from './utils/migrateLegacyIndex.ts';
 import { packSSIndex, unpackSSIndex } from './utils/packSSIndex.ts';
 import { runSubstructureSearch } from './utils/runSubstructureSearch.ts';
 import { parseMolecule, rowToResult } from './utils/searchHelpers.ts';
@@ -112,8 +113,22 @@ export class MoleculesDBSQLite {
     this.#selectCols = `e.${pkColumn} AS entry_id, e.${idCodeColumn} AS id_code`;
   }
 
-  /** Create the ocl_ss_index table (idempotent). */
+  /**
+   * Create the ocl_ss_index table (idempotent).
+   *
+   * An index written by a pre-molecular-weight version of this package (no `mw`
+   * column) is detected and rebuilt into the current mw-clustered schema before
+   * the table is ensured, so upgrading the package keeps existing databases
+   * working. The one-time rebuild recomputes each row's weight from its molecule
+   * in small committed batches; see {@link migrateLegacyIndexToMw}.
+   */
   migrate(): void {
+    const { entriesTable, pkColumn, idCodeColumn } = this.#cfg;
+    migrateLegacyIndexToMw(this.#db, this.#ocl, {
+      entriesTable,
+      pkColumn,
+      idCodeColumn,
+    });
     this.#db.exec(buildSchemaSql(this.#cfg));
   }
 

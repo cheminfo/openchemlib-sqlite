@@ -7,6 +7,7 @@ import * as OCL from 'openchemlib';
 import { expect, test } from 'vitest';
 
 import { MoleculesDBSQLite } from '../MoleculesDBSQLite.ts';
+import { migrateLegacyIndexToMw } from '../utils/migrateLegacyIndex.ts';
 import { packSSIndex, unpackSSIndex } from '../utils/packSSIndex.ts';
 
 function makeDB() {
@@ -743,6 +744,160 @@ test('insert computes the molecular weight from the molecule, ignoring entries-t
   expect(results.map((r) => r.entryId)).toStrictEqual([2, 1]);
   expect(results[0]?.mw).toBeCloseTo(benzeneMw, 5);
   expect(results[1]?.mw).toBeCloseTo(tolueneMw, 5);
+});
+
+// ── legacy (pre-mw) index migration ─────────────────────────────────────────
+
+const LEGACY_SCHEMA = `
+  CREATE TABLE ocl_ss_index (
+    entry_id  INTEGER PRIMARY KEY REFERENCES molecules(id),
+    ss_index0 INTEGER NOT NULL DEFAULT 0,
+    ss_index1 INTEGER NOT NULL DEFAULT 0,
+    ss_index2 INTEGER NOT NULL DEFAULT 0,
+    ss_index3 INTEGER NOT NULL DEFAULT 0,
+    ss_index4 INTEGER NOT NULL DEFAULT 0,
+    ss_index5 INTEGER NOT NULL DEFAULT 0,
+    ss_index6 INTEGER NOT NULL DEFAULT 0,
+    ss_index7 INTEGER NOT NULL DEFAULT 0
+  )
+`;
+
+function seedLegacyDB(smilesList: string[]) {
+  const db = new DatabaseSync(':memory:');
+  db.exec(
+    'CREATE TABLE molecules (id INTEGER PRIMARY KEY, id_code TEXT NOT NULL UNIQUE)',
+  );
+  db.exec(LEGACY_SCHEMA);
+  const insertEntry = db.prepare('INSERT INTO molecules (id_code) VALUES (?)');
+  const insertLegacy = db.prepare(
+    'INSERT INTO ocl_ss_index (entry_id, ss_index0, ss_index1, ss_index2, ss_index3, ss_index4, ss_index5, ss_index6, ss_index7) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)',
+  );
+  const expected = smilesList.map((smiles) => {
+    const mol = OCL.Molecule.fromSmiles(smiles);
+    const idCode = mol.getIDCode();
+    const { lastInsertRowid: entryId } = insertEntry.run(idCode) as {
+      lastInsertRowid: number;
+    };
+    insertLegacy.run(entryId, ...packSSIndex(mol.getIndex()));
+    return { entryId, idCode, mw: mol.getMolecularFormula().relativeWeight };
+  });
+  return { db, expected };
+}
+
+test('migrate upgrades a legacy (pre-mw) ocl_ss_index in place', async () => {
+  // Insert heaviest-first so insertion order is the opposite of mw order.
+  const { db, expected } = seedLegacyDB([
+    'CCCc1ccccc1', // propylbenzene ~120
+    'Cc1ccccc1', // toluene ~92
+    'c1ccccc1', // benzene ~78
+  ]);
+  const byMw = expected.toSorted((a, b) => a.mw - b.mw);
+
+  const molDB = new MoleculesDBSQLite(db, OCL, { entriesTable: 'molecules' });
+  molDB.migrate();
+
+  // The legacy table is gone and every row was carried over.
+  const leftover = db
+    .prepare(
+      "SELECT name FROM sqlite_master WHERE name = 'ocl_ss_index_legacy'",
+    )
+    .get();
+
+  expect(leftover).toBeUndefined();
+  expect(molDB.count()).toBe(3);
+
+  // mw is now stored, recomputed from each molecule, lightest first.
+  const indexed = db
+    .prepare(
+      'SELECT entry_id AS entryId, mw FROM ocl_ss_index ORDER BY mw, entry_id',
+    )
+    .all() as Array<{ entryId: number; mw: number }>;
+
+  expect(indexed.map((r) => r.entryId)).toStrictEqual(
+    byMw.map((e) => e.entryId),
+  );
+  expect(indexed[0]?.mw).toBeCloseTo(byMw[0]?.mw ?? 0, 5);
+
+  // Substructure search works again and is mass-ordered (lightest match first).
+  const { results } = await molDB.search('c1ccccc1', {
+    mode: 'substructure',
+    format: 'smiles',
+  });
+
+  expect(results.map((r) => r.idCode)).toStrictEqual(byMw.map((e) => e.idCode));
+});
+
+test('migrate is idempotent: a second call on the upgraded index changes nothing', async () => {
+  const { db, expected } = seedLegacyDB(['c1ccccc1', 'Cc1ccccc1']);
+  const molDB = new MoleculesDBSQLite(db, OCL, { entriesTable: 'molecules' });
+
+  molDB.migrate();
+  const afterFirst = db
+    .prepare('SELECT entry_id, mw FROM ocl_ss_index ORDER BY entry_id')
+    .all();
+  molDB.migrate();
+  const afterSecond = db
+    .prepare('SELECT entry_id, mw FROM ocl_ss_index ORDER BY entry_id')
+    .all();
+
+  expect(afterSecond).toStrictEqual(afterFirst);
+  expect(molDB.count()).toBe(expected.length);
+});
+
+test('migrateLegacyIndexToMw resumes a migration interrupted partway', async () => {
+  const { db, expected } = seedLegacyDB(['c1ccccc1', 'Cc1ccccc1', 'Oc1ccccc1']);
+
+  // Simulate a crash after the new table was created and one row migrated:
+  // entry_id 1 has moved across, the rest still sit in the renamed legacy table.
+  db.exec('ALTER TABLE ocl_ss_index RENAME TO ocl_ss_index_legacy');
+  db.exec(`
+    CREATE TABLE ocl_ss_index (
+      mw        REAL    NOT NULL,
+      entry_id  INTEGER NOT NULL REFERENCES molecules(id),
+      ss_index0 INTEGER NOT NULL DEFAULT 0,
+      ss_index1 INTEGER NOT NULL DEFAULT 0,
+      ss_index2 INTEGER NOT NULL DEFAULT 0,
+      ss_index3 INTEGER NOT NULL DEFAULT 0,
+      ss_index4 INTEGER NOT NULL DEFAULT 0,
+      ss_index5 INTEGER NOT NULL DEFAULT 0,
+      ss_index6 INTEGER NOT NULL DEFAULT 0,
+      ss_index7 INTEGER NOT NULL DEFAULT 0,
+      PRIMARY KEY (mw, entry_id)
+    ) WITHOUT ROWID;
+    CREATE UNIQUE INDEX idx_ocl_ss_entry ON ocl_ss_index (entry_id);
+  `);
+  const first = expected[0];
+  db.prepare(
+    'INSERT INTO ocl_ss_index (mw, entry_id, ss_index0, ss_index1, ss_index2, ss_index3, ss_index4, ss_index5, ss_index6, ss_index7) SELECT ?, entry_id, ss_index0, ss_index1, ss_index2, ss_index3, ss_index4, ss_index5, ss_index6, ss_index7 FROM ocl_ss_index_legacy WHERE entry_id = ?',
+  ).run(first?.mw ?? 0, first?.entryId ?? 0);
+  db.prepare('DELETE FROM ocl_ss_index_legacy WHERE entry_id = ?').run(
+    first?.entryId ?? 0,
+  );
+
+  const migrated = migrateLegacyIndexToMw(db, OCL, {
+    entriesTable: 'molecules',
+    pkColumn: 'id',
+    idCodeColumn: 'id_code',
+  });
+
+  // Only the two not-yet-migrated rows are drained; nothing is duplicated.
+  expect(migrated).toBe(2);
+
+  const leftover = db
+    .prepare(
+      "SELECT name FROM sqlite_master WHERE name = 'ocl_ss_index_legacy'",
+    )
+    .get();
+
+  expect(leftover).toBeUndefined();
+
+  const rows = db
+    .prepare('SELECT entry_id AS entryId FROM ocl_ss_index ORDER BY entry_id')
+    .all() as Array<{ entryId: number }>;
+
+  expect(rows.map((r) => r.entryId)).toStrictEqual(
+    expected.map((e) => e.entryId),
+  );
 });
 
 test('packSSIndex and unpackSSIndex round-trip preserves bit pattern', async () => {
