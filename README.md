@@ -61,7 +61,6 @@ molDB.migrate(); // creates ocl_ss_index (idempotent)
 | `pkColumn` | `'id'` | Primary key column name |
 | `idCodeColumn` | `'id_code'` | Column holding the OCL idCode |
 | `idCodeNoStereoColumn` | `null` | Column for stereo-stripped idCode; required for `exactNoStereo` mode |
-| `mwColumn` | `null` | Column holding the molecular weight (REAL); enables automatic mass-difference sorting in substructure search |
 
 ## Inserting molecules
 
@@ -158,19 +157,15 @@ A 512-bit fingerprint prefilter (bitwise AND) discards non-candidates before run
 
 ### Substructure search sorted by mass difference
 
-When `mwColumn` is configured, substructure results are **automatically** ranked by ascending `|queryMw − resultMw|`. A molecule whose mass equals the query mass (an exact structural match) therefore appears first, with no extra option required:
+The `ocl_ss_index` is clustered by molecular weight (the weight is computed from each molecule at `insert()`), so substructure results are **always** ranked by ascending `|queryMw − resultMw|`. A molecule whose mass equals the query mass (an exact structural match) therefore appears first, with no extra option required:
 
 ```js
-// Schema must include a molecular-weight column, e.g.:
-//   mw REAL NOT NULL
-// Construct MoleculesDBSQLite with mwColumn: 'mw' to enable automatic sorting.
-
 const { results } = molDB.search('c1ccccc1', {
   mode: 'substructure',
   format: 'smiles',
 });
 // results[0] is the molecule whose mass is closest to benzene's MW (~78 Da).
-// Each result carries a .mw field with the value from the database.
+// Each result carries a .mw field with the molecular weight.
 ```
 
 The molecular weight of the query is computed with `fragment = false` on a temporary copy so the original `Molecule` instance is never mutated.

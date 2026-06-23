@@ -48,16 +48,6 @@ export interface MoleculesDBConfig {
    */
   idCodeNoStereoColumn?: string | null;
   /**
-   * Column on the entries table holding each molecule's weight (REAL). The
-   * ocl_ss_index is clustered by molecular weight, so this column is read once
-   * per entry at `insert()` to populate the index's own `mw`; when it is null,
-   * `insert()` instead derives the weight from the molecule. Either way the
-   * index is mw-ordered, so substructure results are always ordered by ascending
-   * |queryMw − resultMw| and each carries a `mw` field.
-   * @default null
-   */
-  mwColumn?: string | null;
-  /**
    * Number of worker threads used for parallel substructure search. When the
    * database is file-backed (so the path can be derived from the connection),
    * the scan's candidates are partitioned across this many worker threads, each
@@ -117,8 +107,8 @@ export interface SearchOptions {
   maxCandidates?: number;
   /**
    * Maximum number of confirmed substructure matches to collect before stopping.
-   * Once this many matches are found the scan stops, sorts them by MW proximity
-   * (when mwColumn is configured), and returns them with `partial: true`.
+   * Once this many matches are found the scan stops, sorts them by MW proximity,
+   * and returns them with `partial: true`.
    * @default Number.MAX_SAFE_INTEGER
    */
   maxResults?: number;

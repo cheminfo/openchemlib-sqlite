@@ -348,7 +348,6 @@ function makeDBWithMw() {
   const molDB = new MoleculesDBSQLite(db, OCL, {
     entriesTable: 'molecules',
     idCodeNoStereoColumn: 'id_code_no_stereo',
-    mwColumn: 'mw',
   });
   molDB.migrate();
   return { db, molDB };
@@ -389,7 +388,7 @@ test('sortByMassDifference puts closest-mass match first in substructure results
   );
   const { idCode: tolueneId } = insertSmilesWithMw(db, molDB, 'Cc1ccccc1');
 
-  // Query is benzene — all three contain benzene ring; mwColumn is configured so results are sorted by mass diff
+  // Query is benzene — all three contain benzene ring; the mw-clustered index always sorts by mass diff
   const { results } = await molDB.search('c1ccccc1', {
     mode: 'substructure',
     format: 'smiles',
@@ -632,7 +631,6 @@ test('parallel substructure search across workers matches the sync result', asyn
   const baseConfig = {
     entriesTable: 'molecules',
     idCodeNoStereoColumn: 'id_code_no_stereo',
-    mwColumn: 'mw',
   };
   const indexer = new MoleculesDBSQLite(db, OCL, baseConfig);
   indexer.migrate();
@@ -711,21 +709,26 @@ test('substructure partial results are the lightest matches, not the first inser
   expect(results[0]?.mw).toBeLessThan(results[1]?.mw ?? 0);
 });
 
-test('insert reads the molecular weight from the configured mwColumn', async () => {
+test('insert computes the molecular weight from the molecule, ignoring entries-table columns', async () => {
   const db = new DatabaseSync(':memory:');
   db.exec(
     'CREATE TABLE molecules (id INTEGER PRIMARY KEY, id_code TEXT NOT NULL UNIQUE, mw REAL)',
   );
   const molDB = new MoleculesDBSQLite(db, OCL, {
     entriesTable: 'molecules',
-    mwColumn: 'mw',
   });
   molDB.migrate();
 
-  const toluene = OCL.Molecule.fromSmiles('Cc1ccccc1').getIDCode();
-  const benzene = OCL.Molecule.fromSmiles('c1ccccc1').getIDCode();
-  // Deliberately fake, reversed weights so only "mw read from the column"
-  // explains the order: heavier-looking benzene (id 2) must still come first.
+  const tolueneMol = OCL.Molecule.fromSmiles('Cc1ccccc1');
+  const benzeneMol = OCL.Molecule.fromSmiles('c1ccccc1');
+  const toluene = tolueneMol.getIDCode();
+  const benzene = benzeneMol.getIDCode();
+  const tolueneMw = tolueneMol.getMolecularFormula().relativeWeight;
+  const benzeneMw = benzeneMol.getMolecularFormula().relativeWeight;
+
+  // Deliberately fake, reversed weights in the entries table: insert must ignore
+  // them and recompute from the molecule, so the lighter benzene (id 2) comes
+  // first despite its column value being smaller-looking than toluene's.
   db.prepare('INSERT INTO molecules (id, id_code, mw) VALUES (1, ?, 999)').run(
     toluene,
   );
@@ -737,10 +740,9 @@ test('insert reads the molecular weight from the configured mwColumn', async () 
 
   const { results } = await molDB.search('c1ccccc1', { mode: 'substructure' });
 
-  expect(results.map((r) => [r.entryId, r.mw])).toStrictEqual([
-    [2, 5],
-    [1, 999],
-  ]);
+  expect(results.map((r) => r.entryId)).toStrictEqual([2, 1]);
+  expect(results[0]?.mw).toBeCloseTo(benzeneMw, 5);
+  expect(results[1]?.mw).toBeCloseTo(tolueneMw, 5);
 });
 
 test('packSSIndex and unpackSSIndex round-trip preserves bit pattern', async () => {

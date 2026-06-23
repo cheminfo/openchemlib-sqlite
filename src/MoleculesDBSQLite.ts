@@ -24,7 +24,6 @@ interface ResolvedConfig {
   pkColumn: string;
   idCodeColumn: string;
   idCodeNoStereoColumn: string | null;
-  mwColumn: string | null;
   poolSize: number;
   searchCacheSize: number;
 }
@@ -35,7 +34,6 @@ function resolveConfig(config: MoleculesDBConfig): ResolvedConfig {
     pkColumn: config.pkColumn ?? 'id',
     idCodeColumn: config.idCodeColumn ?? 'id_code',
     idCodeNoStereoColumn: config.idCodeNoStereoColumn ?? null,
-    mwColumn: config.mwColumn ?? null,
     poolSize: config.poolSize ?? 4,
     searchCacheSize: config.searchCacheSize ?? 100,
   };
@@ -142,29 +140,21 @@ export class MoleculesDBSQLite {
         ? this.#ocl.Molecule.fromIDCode(molecule)
         : molecule;
     const packed = packSSIndex(mol.getIndex());
-    const { mwColumn, entriesTable, pkColumn } = this.#cfg;
 
-    if (mwColumn) {
-      // Take mw from the entries table so the clustered order matches whatever
-      // a bulk index path stores; the entry already exists there.
-      this.#db
-        .prepare(
-          `INSERT OR REPLACE INTO ocl_ss_index (mw, entry_id, ss_index0, ss_index1, ss_index2, ss_index3, ss_index4, ss_index5, ss_index6, ss_index7) VALUES ((SELECT COALESCE(${mwColumn}, 0) FROM ${entriesTable} WHERE ${pkColumn} = ?), ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-        )
-        .run(entryId, entryId, ...packed);
-    } else {
-      let mw = 0;
-      try {
-        mw = mol.getMolecularFormula().relativeWeight;
-      } catch {
-        // a molecule with no computable formula sorts first (mw = 0)
-      }
-      this.#db
-        .prepare(
-          'INSERT OR REPLACE INTO ocl_ss_index (mw, entry_id, ss_index0, ss_index1, ss_index2, ss_index3, ss_index4, ss_index5, ss_index6, ss_index7) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
-        )
-        .run(mw, entryId, ...packed);
+    // The molecular weight is recomputed from the molecule on every insert —
+    // it is cheap, and it keeps the mw-clustered index self-contained instead of
+    // depending on a column in the entries table.
+    let mw = 0;
+    try {
+      mw = mol.getMolecularFormula().relativeWeight;
+    } catch {
+      // a molecule with no computable formula sorts first (mw = 0)
     }
+    this.#db
+      .prepare(
+        'INSERT OR REPLACE INTO ocl_ss_index (mw, entry_id, ss_index0, ss_index1, ss_index2, ss_index3, ss_index4, ss_index5, ss_index6, ss_index7) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
+      )
+      .run(mw, entryId, ...packed);
     // The data changed, so cached search results are stale.
     this.#searchCache?.clear();
   }
