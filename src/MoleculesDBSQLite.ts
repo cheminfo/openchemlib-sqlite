@@ -142,12 +142,29 @@ export class MoleculesDBSQLite {
         ? this.#ocl.Molecule.fromIDCode(molecule)
         : molecule;
     const packed = packSSIndex(mol.getIndex());
+    const { mwColumn, entriesTable, pkColumn } = this.#cfg;
 
-    this.#db
-      .prepare(
-        'INSERT OR REPLACE INTO ocl_ss_index (entry_id, ss_index0, ss_index1, ss_index2, ss_index3, ss_index4, ss_index5, ss_index6, ss_index7) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)',
-      )
-      .run(entryId, ...packed);
+    if (mwColumn) {
+      // Take mw from the entries table so the clustered order matches whatever
+      // a bulk index path stores; the entry already exists there.
+      this.#db
+        .prepare(
+          `INSERT OR REPLACE INTO ocl_ss_index (mw, entry_id, ss_index0, ss_index1, ss_index2, ss_index3, ss_index4, ss_index5, ss_index6, ss_index7) VALUES ((SELECT ${mwColumn} FROM ${entriesTable} WHERE ${pkColumn} = ?), ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        )
+        .run(entryId, entryId, ...packed);
+    } else {
+      let mw = 0;
+      try {
+        mw = mol.getMolecularFormula().relativeWeight;
+      } catch {
+        // a molecule with no computable formula sorts first (mw = 0)
+      }
+      this.#db
+        .prepare(
+          'INSERT OR REPLACE INTO ocl_ss_index (mw, entry_id, ss_index0, ss_index1, ss_index2, ss_index3, ss_index4, ss_index5, ss_index6, ss_index7) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
+        )
+        .run(mw, entryId, ...packed);
+    }
     // The data changed, so cached search results are stale.
     this.#searchCache?.clear();
   }
@@ -186,13 +203,8 @@ export class MoleculesDBSQLite {
       partition,
     } = options ?? {};
 
-    const {
-      entriesTable,
-      idCodeColumn,
-      idCodeNoStereoColumn,
-      pkColumn,
-      mwColumn,
-    } = this.#cfg;
+    const { entriesTable, idCodeColumn, idCodeNoStereoColumn, pkColumn } =
+      this.#cfg;
     const { Molecule } = this.#ocl;
 
     const fromInstance = typeof query !== 'string';
@@ -249,7 +261,6 @@ export class MoleculesDBSQLite {
             ocl: this.#ocl,
             entriesTable,
             ssIndexCols: this.#ssIndexCols,
-            mwColumn,
             pkColumn,
             idCodeColumn,
             mol,
@@ -347,14 +358,17 @@ export class MoleculesDBSQLite {
     timeoutMs: number,
     onProgress: SearchOptions['onProgress'],
   ): Promise<CachedScan> {
-    const { mwColumn, entriesTable, pkColumn, idCodeColumn } = this.#cfg;
+    const { entriesTable, pkColumn, idCodeColumn } = this.#cfg;
     const limit = Number.MAX_SAFE_INTEGER;
     if (this.#canParallelize()) {
+      // The index is always mw-clustered, so the query mw is always meaningful.
       let queryMw = 0;
-      if (mwColumn) {
+      try {
         const mwMol = mol.getCompactCopy();
         mwMol.setFragment(false);
         queryMw = mwMol.getMolecularFormula().relativeWeight;
+      } catch {
+        // query with no computable formula — ordering falls back to mw asc
       }
       const pool = await this.#ensurePool();
       const r = await pool.runSubstructure(queryIdCode, {
@@ -364,8 +378,8 @@ export class MoleculesDBSQLite {
         timeoutMs,
         maxResults,
         queryMw,
-        sortByMw: mwColumn !== null,
-        idRange: this.#ssIndexIdRange(),
+        sortByMw: true,
+        mwRange: this.#ssIndexMwRange(),
         onProgress,
       });
       return {
@@ -381,7 +395,6 @@ export class MoleculesDBSQLite {
       ocl: this.#ocl,
       entriesTable,
       ssIndexCols: this.#ssIndexCols,
-      mwColumn,
       pkColumn,
       idCodeColumn,
       mol,
@@ -446,12 +459,11 @@ export class MoleculesDBSQLite {
     };
   }
 
-  // Min/max entry_id, so the pool can split the scan into sargable PK ranges.
-  #ssIndexIdRange(): { min: number; max: number } {
+  // Min/max mw, so the pool can split the scan into sargable mw bands. The table
+  // is clustered by mw, so MIN/MAX are O(1) lookups on the primary key.
+  #ssIndexMwRange(): { min: number; max: number } {
     const row = this.#db
-      .prepare(
-        'SELECT MIN(entry_id) AS lo, MAX(entry_id) AS hi FROM ocl_ss_index',
-      )
+      .prepare('SELECT MIN(mw) AS lo, MAX(mw) AS hi FROM ocl_ss_index')
       .get() as { lo: number | null; hi: number | null } | undefined;
     return { min: row?.lo ?? 0, max: row?.hi ?? 0 };
   }

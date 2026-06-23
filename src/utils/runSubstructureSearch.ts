@@ -18,7 +18,6 @@ export interface SubstructureSearchParams {
   ocl: OCLLibrary;
   entriesTable: string;
   ssIndexCols: string;
-  mwColumn: string | null;
   /** Primary-key column of the entries table. */
   pkColumn: string;
   /** idCode column of the entries table (fetched lazily per tested candidate). */
@@ -31,7 +30,11 @@ export interface SubstructureSearchParams {
   maxCandidates: number;
   maxResults: number;
   onProgress?: (processed: number, total: number) => void;
-  /** Restrict to entries whose pk is in the half-open range [lo, hi). */
+  /**
+   * Restrict to entries whose molecular weight is in the half-open range
+   * `[lo, hi)`. Used to partition a parallel scan into contiguous mw bands
+   * (sargable on the clustered ocl_ss_index primary key).
+   */
   partition?: { lo: number; hi: number };
 }
 
@@ -65,14 +68,14 @@ function streamRows(
 /**
  * Run a substructure search against the OCL index table.
  *
- * The fingerprint prescreen scans the narrow `ocl_ss_index` table alone
- * (covering — no join to the wide entries table) and is consumed as a lazy
- * stream: for each candidate the idCode is fetched on demand, parsed, and
- * matched, and the scan stops as soon as `maxResults` confirmed matches are
- * collected (or the timeout / `maxCandidates` cap is hit). For a common
- * substructure this reads only a small prefix of the table instead of screening
- * every candidate. Results are sorted by ascending |queryMw − resultMw| when
- * mwColumn is configured.
+ * `ocl_ss_index` is clustered by molecular weight, so the fingerprint prescreen
+ * scans it in ascending-mw order and is consumed as a lazy stream: for each
+ * candidate the idCode is fetched on demand, parsed, and matched, and the scan
+ * stops as soon as `maxResults` confirmed matches are collected (or the timeout
+ * / `maxCandidates` cap is hit). Because the lightest molecules are visited
+ * first, an early-stopped partial result holds the smallest superstructures —
+ * the matches closest to the query. `mw` is read straight from the index (no
+ * join), and results are returned ordered by ascending |queryMw − resultMw|.
  * @param params - Search parameters; params.mol.fragment must already be set to true.
  * @returns Search response, including `screened`, `matched`, and `elapsedMs`.
  */
@@ -84,7 +87,6 @@ export function runSubstructureSearch(
     ocl,
     entriesTable,
     ssIndexCols,
-    mwColumn,
     pkColumn,
     idCodeColumn,
     mol,
@@ -97,21 +99,15 @@ export function runSubstructureSearch(
     partition,
   } = params;
   const { Molecule, SSSearcherWithIndex } = ocl;
-  const mwSelectCol = mwColumn ? `, e.${mwColumn} AS mw` : '';
-  // Partitioned scan: only entries whose pk falls in this worker's range. The
-  // ocl_ss_index PK is entry_id, so a range is sargable and each worker reads
-  // only its slice. Bounds are trusted integers (set by the pool); coerced.
-  const rangeCond = partition
-    ? ` AND s.entry_id >= ${Math.trunc(partition.lo)} AND s.entry_id < ${Math.trunc(partition.hi)}`
-    : '';
-  const rangeWhere = partition
-    ? ` WHERE s.entry_id >= ${Math.trunc(partition.lo)} AND s.entry_id < ${Math.trunc(partition.hi)}`
-    : '';
 
-  // Fetch idCode (+ mw) for one candidate by primary key — an indexed lookup
-  // paid only for candidates actually tested, not for every scanned row.
+  // mw band for this worker; sargable on the clustered (mw, entry_id) PK.
+  const mwBound = partition ? ' s.mw >= ? AND s.mw < ?' : '';
+  const mwParams = partition ? [partition.lo, partition.hi] : [];
+
+  // Fetch idCode for one candidate by primary key — an indexed lookup paid only
+  // for candidates actually tested. mw comes from the index scan, not here.
   const fetchStmt = db.prepare(
-    `SELECT e.${idCodeColumn} AS id_code${mwSelectCol} FROM ${entriesTable} e WHERE e.${pkColumn} = ?`,
+    `SELECT e.${idCodeColumn} AS id_code FROM ${entriesTable} e WHERE e.${pkColumn} = ?`,
   );
 
   const start = Date.now();
@@ -121,13 +117,14 @@ export function runSubstructureSearch(
   const deadline = Date.now() + timeoutMs;
 
   // Empty fragment matches every molecule — skip the fingerprint prefilter and
-  // OCL check; just collect entries up to maxResults.
+  // OCL check; just collect the lightest entries up to maxResults.
   if (mol.getAllAtoms() === 0) {
+    const where = partition ? ` WHERE${mwBound}` : '';
     const scanStmt = db.prepare(
-      `SELECT s.entry_id FROM ocl_ss_index s${rangeWhere}`,
+      `SELECT s.entry_id, s.mw FROM ocl_ss_index s${where}`,
     );
     scanStmt.setReadBigInts?.(true);
-    for (const row of streamRows(scanStmt, [])) {
+    for (const row of streamRows(scanStmt, mwParams)) {
       screened++;
       const entryId = Number(row.entry_id);
       const entry = fetchStmt.get(entryId) as Record<string, unknown>;
@@ -135,7 +132,7 @@ export function runSubstructureSearch(
         entryId,
         idCode: entry.id_code as string,
       };
-      if (entry.mw != null) result.mw = entry.mw as number;
+      if (row.mw != null) result.mw = Number(row.mw);
       results.push(result);
       if (results.length >= maxResults) {
         partial = true;
@@ -155,23 +152,26 @@ export function runSubstructureSearch(
 
   // mol has fragment=true; getMolecularFormula needs fragment=false — use a copy.
   let queryMw = 0;
-  if (mwColumn) {
+  try {
     const mwMol = mol.getCompactCopy();
     mwMol.setFragment(false);
     queryMw = mwMol.getMolecularFormula().relativeWeight;
+  } catch {
+    // query with no computable formula — mass ordering falls back to mw asc
   }
 
   const queryIndex = mol.getIndex();
   const prefilter = buildSSPrefilter(queryIndex);
+  const rangeCond = partition ? ` AND${mwBound}` : '';
   const scanStmt = db.prepare(
-    `SELECT s.entry_id, ${ssIndexCols} FROM ocl_ss_index s WHERE ${prefilter.sql}${rangeCond}`,
+    `SELECT s.entry_id, s.mw, ${ssIndexCols} FROM ocl_ss_index s WHERE ${prefilter.sql}${rangeCond}`,
   );
   scanStmt.setReadBigInts?.(true);
 
   const searcher = new SSSearcherWithIndex();
   searcher.setFragment(mol, queryIndex);
 
-  for (const row of streamRows(scanStmt, prefilter.params)) {
+  for (const row of streamRows(scanStmt, [...prefilter.params, ...mwParams])) {
     if (screened >= maxCandidates) {
       partial = true;
       break;
@@ -186,7 +186,7 @@ export function runSubstructureSearch(
     searcher.setMolecule(targetMol, targetIndex);
     if (searcher.isFragmentInMolecule()) {
       const result: SearchResult = { entryId, idCode: entry.id_code as string };
-      if (entry.mw != null) result.mw = entry.mw as number;
+      if (row.mw != null) result.mw = Number(row.mw);
       results.push(result);
       if (results.length >= maxResults) {
         partial = true;
@@ -203,7 +203,7 @@ export function runSubstructureSearch(
   }
   onProgress?.(screened, screened);
 
-  const sorted = mwColumn ? sortByMassDiff(results, queryMw) : results;
+  const sorted = sortByMassDiff(results, queryMw);
   return {
     results: sorted.slice(from, from + limit),
     total: sorted.length,

@@ -22,7 +22,7 @@ export interface PartitionTask {
   timeoutMs: number;
   /** Max confirmed matches to collect before stopping early. */
   maxResults: number;
-  /** This partition's entry_id range, half-open `[lo, hi)`. */
+  /** This partition's molecular-weight band, half-open `[lo, hi)`. */
   partition: { lo: number; hi: number };
   /** This worker's position in the pool, used to aggregate progress. */
   partitionIndex: number;

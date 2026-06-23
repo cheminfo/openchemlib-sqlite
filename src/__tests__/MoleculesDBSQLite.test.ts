@@ -691,6 +691,58 @@ test('parallel substructure search across workers matches the sync result', asyn
   expect(progress.length).toBeGreaterThan(0);
 });
 
+test('substructure partial results are the lightest matches, not the first inserted', async () => {
+  const { db, molDB } = makeDB();
+  // Insert heaviest-first so entry_id order is the OPPOSITE of molecular-weight
+  // order — proving the scan visits by mw, not by insertion order.
+  insertSmiles(db, molDB, 'CCCc1ccccc1'); // propylbenzene ~120
+  insertSmiles(db, molDB, 'CCc1ccccc1'); // ethylbenzene ~106
+  const { idCode: tolueneId } = insertSmiles(db, molDB, 'Cc1ccccc1'); // ~92
+  const { idCode: benzeneId } = insertSmiles(db, molDB, 'c1ccccc1'); // ~78
+
+  const { results, partial } = await molDB.search('c1ccccc1', {
+    mode: 'substructure',
+    maxResults: 2,
+  });
+
+  expect(partial).toBe(true);
+  // The two lightest superstructures, although they were inserted last.
+  expect(results.map((r) => r.idCode)).toStrictEqual([benzeneId, tolueneId]);
+  expect(results[0]?.mw).toBeLessThan(results[1]?.mw ?? 0);
+});
+
+test('insert reads the molecular weight from the configured mwColumn', async () => {
+  const db = new DatabaseSync(':memory:');
+  db.exec(
+    'CREATE TABLE molecules (id INTEGER PRIMARY KEY, id_code TEXT NOT NULL UNIQUE, mw REAL)',
+  );
+  const molDB = new MoleculesDBSQLite(db, OCL, {
+    entriesTable: 'molecules',
+    mwColumn: 'mw',
+  });
+  molDB.migrate();
+
+  const toluene = OCL.Molecule.fromSmiles('Cc1ccccc1').getIDCode();
+  const benzene = OCL.Molecule.fromSmiles('c1ccccc1').getIDCode();
+  // Deliberately fake, reversed weights so only "mw read from the column"
+  // explains the order: heavier-looking benzene (id 2) must still come first.
+  db.prepare('INSERT INTO molecules (id, id_code, mw) VALUES (1, ?, 999)').run(
+    toluene,
+  );
+  db.prepare('INSERT INTO molecules (id, id_code, mw) VALUES (2, ?, 5)').run(
+    benzene,
+  );
+  molDB.insert(1, toluene);
+  molDB.insert(2, benzene);
+
+  const { results } = await molDB.search('c1ccccc1', { mode: 'substructure' });
+
+  expect(results.map((r) => [r.entryId, r.mw])).toStrictEqual([
+    [2, 5],
+    [1, 999],
+  ]);
+});
+
 test('packSSIndex and unpackSSIndex round-trip preserves bit pattern', async () => {
   const mol = OCL.Molecule.fromSmiles('c1ccccc1');
   const original = mol.getIndex().map((v) => v >>> 0);

@@ -34,8 +34,8 @@ export interface PoolScanOptions {
   queryMw: number;
   /** Whether to sort the merged results by mass proximity to `queryMw`. */
   sortByMw: boolean;
-  /** Min/max entry_id, used to split the scan into per-worker PK ranges. */
-  idRange: { min: number; max: number };
+  /** Min/max molecular weight, used to split the scan into per-worker mw bands. */
+  mwRange: { min: number; max: number };
   onProgress?: (processed: number, total: number) => void;
 }
 
@@ -123,19 +123,21 @@ export class SearchWorkerPool {
       format,
       queryMw,
       sortByMw,
-      idRange,
+      mwRange,
       onProgress,
     } = options;
 
-    // Split [min, max] into `size` contiguous entry_id ranges so each worker
-    // scans only its slice (sargable on the ocl_ss_index PK) instead of every
-    // worker scanning all rows.
-    const span = Math.max(0, idRange.max - idRange.min + 1);
-    const step = Math.max(1, Math.ceil(span / size));
+    // Split [min, max] into `size` contiguous mw bands so each worker scans only
+    // its slice (sargable on the mw-clustered ocl_ss_index PK) in ascending-mw
+    // order, instead of every worker scanning all rows. The merge then keeps the
+    // globally lightest matches. The last band's upper bound is widened so the
+    // half-open `mw < hi` still includes the heaviest molecule.
+    const span = Math.max(0, mwRange.max - mwRange.min);
+    const step = span / size;
     const rangeFor = (index: number): { lo: number; hi: number } => ({
-      lo: idRange.min + index * step,
+      lo: mwRange.min + index * step,
       hi:
-        index === size - 1 ? idRange.max + 1 : idRange.min + (index + 1) * step,
+        index === size - 1 ? mwRange.max + 1 : mwRange.min + (index + 1) * step,
     });
 
     const progress = Array.from({ length: size }, () => ({

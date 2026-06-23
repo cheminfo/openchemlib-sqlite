@@ -48,8 +48,12 @@ export interface MoleculesDBConfig {
    */
   idCodeNoStereoColumn?: string | null;
   /**
-   * Column containing the molecular weight (REAL). When set, substructure results are automatically sorted by
-   * ascending |queryMw − resultMw|, and each result includes a `mw` field.
+   * Column on the entries table holding each molecule's weight (REAL). The
+   * ocl_ss_index is clustered by molecular weight, so this column is read once
+   * per entry at `insert()` to populate the index's own `mw`; when it is null,
+   * `insert()` instead derives the weight from the molecule. Either way the
+   * index is mw-ordered, so substructure results are always ordered by ascending
+   * |queryMw − resultMw| and each carries a `mw` field.
    * @default null
    */
   mwColumn?: string | null;
@@ -126,10 +130,11 @@ export interface SearchOptions {
    */
   onProgress?: (processed: number, total: number) => void;
   /**
-   * Restrict the substructure scan to entries whose primary key is in the
+   * Restrict the substructure scan to entries whose molecular weight is in the
    * half-open range `[lo, hi)`. Used internally to partition a parallel search
-   * across worker threads by entry-id range (sargable on the ocl_ss_index PK),
-   * so each worker scans only its slice of the rows; callers normally omit it.
+   * across worker threads by mw band (sargable on the mw-clustered ocl_ss_index
+   * primary key), so each worker scans only its slice of the rows in
+   * ascending-mw order; callers normally omit it.
    */
   partition?: { lo: number; hi: number };
 }
@@ -140,7 +145,7 @@ export interface SearchResult {
   idCode: string;
   /** Only present for similarity mode. */
   similarity?: number;
-  /** Molecular weight from the entries table. Present when mwColumn is configured and mode is 'substructure'. */
+  /** Molecular weight (from the mw-clustered index). Present in 'substructure' mode. */
   mw?: number;
 }
 
