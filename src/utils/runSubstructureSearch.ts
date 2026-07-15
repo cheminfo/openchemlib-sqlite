@@ -3,6 +3,7 @@ import type * as OpenChemLib from 'openchemlib';
 import type {
   SQLiteDatabase,
   SQLiteStatement,
+  SearchCandidates,
   SearchResponse,
   SearchResult,
 } from '../types.ts';
@@ -36,6 +37,39 @@ export interface SubstructureSearchParams {
    * (sargable on the clustered ocl_ss_index primary key).
    */
   partition?: { lo: number; hi: number };
+  /**
+   * Restrict the scan to the entries returned by this subquery. Inlined as the
+   * driving table of the scan and streamed, so nothing is materialised.
+   */
+  candidates?: SearchCandidates;
+}
+
+/**
+ * Build the FROM clause of the index scan, plus the parameters its subquery
+ * binds. Without candidates the scan reads `ocl_ss_index` alone, in its natural
+ * (mw-clustered) order. With candidates, the subquery drives the scan through a
+ * CROSS JOIN: the join order is forced because a caller's subquery has no
+ * statistics, and letting SQLite choose it makes the whole index get scanned.
+ *
+ * The scan does not join the entries table to read `idCode`: it is fetched per
+ * tested candidate instead. Joining it would cost a secondary-index hop per row
+ * (`ocl_ss_index` is WITHOUT ROWID, clustered by `(mw, entry_id)`), and no
+ * measured win justified the change.
+ * @param candidates - The entries subquery restricting the scan, if any.
+ * @returns The FROM clause and the named parameters to bind.
+ */
+function buildScanFrom(candidates?: SearchCandidates): {
+  from: string;
+  params: unknown[];
+} {
+  if (!candidates) {
+    return { from: 'ocl_ss_index s', params: [] };
+  }
+  return {
+    from: `(${candidates.sql}) c
+       CROSS JOIN ocl_ss_index s ON s.entry_id = c.entry_id`,
+    params: candidates.params ? [candidates.params] : [],
+  };
 }
 
 function sortByMassDiff(
@@ -97,12 +131,15 @@ export function runSubstructureSearch(
     maxResults,
     onProgress,
     partition,
+    candidates,
   } = params;
   const { Molecule, SSSearcherWithIndex } = ocl;
 
   // mw band for this worker; sargable on the clustered (mw, entry_id) PK.
   const mwBound = partition ? ' s.mw >= ? AND s.mw < ?' : '';
   const mwParams = partition ? [partition.lo, partition.hi] : [];
+
+  const scanFrom = buildScanFrom(candidates);
 
   // Fetch idCode for one candidate by primary key — an indexed lookup paid only
   // for candidates actually tested. mw comes from the index scan, not here.
@@ -121,10 +158,10 @@ export function runSubstructureSearch(
   if (mol.getAllAtoms() === 0) {
     const where = partition ? ` WHERE${mwBound}` : '';
     const scanStmt = db.prepare(
-      `SELECT s.entry_id, s.mw FROM ocl_ss_index s${where}`,
+      `SELECT s.entry_id, s.mw FROM ${scanFrom.from}${where}`,
     );
     scanStmt.setReadBigInts?.(true);
-    for (const row of streamRows(scanStmt, mwParams)) {
+    for (const row of streamRows(scanStmt, [...scanFrom.params, ...mwParams])) {
       screened++;
       const entryId = Number(row.entry_id);
       const entry = fetchStmt.get(entryId) as Record<string, unknown>;
@@ -164,14 +201,18 @@ export function runSubstructureSearch(
   const prefilter = buildSSPrefilter(queryIndex);
   const rangeCond = partition ? ` AND${mwBound}` : '';
   const scanStmt = db.prepare(
-    `SELECT s.entry_id, s.mw, ${ssIndexCols} FROM ocl_ss_index s WHERE ${prefilter.sql}${rangeCond}`,
+    `SELECT s.entry_id, s.mw, ${ssIndexCols} FROM ${scanFrom.from} WHERE ${prefilter.sql}${rangeCond}`,
   );
   scanStmt.setReadBigInts?.(true);
 
   const searcher = new SSSearcherWithIndex();
   searcher.setFragment(mol, queryIndex);
 
-  for (const row of streamRows(scanStmt, [...prefilter.params, ...mwParams])) {
+  for (const row of streamRows(scanStmt, [
+    ...scanFrom.params,
+    ...prefilter.params,
+    ...mwParams,
+  ])) {
     if (screened >= maxCandidates) {
       partial = true;
       break;
@@ -180,12 +221,13 @@ export function runSubstructureSearch(
     const entryId = Number(row.entry_id);
     const targetIndex = unpackSSIndex(row);
     const entry = fetchStmt.get(entryId) as Record<string, unknown>;
+    const idCode = entry.id_code as string;
     // Skip 2D-coordinate invention: it is the dominant cost when parsing every
     // candidate and substructure matching only needs the atom/bond graph.
-    const targetMol = Molecule.fromIDCode(entry.id_code as string, false);
+    const targetMol = Molecule.fromIDCode(idCode, false);
     searcher.setMolecule(targetMol, targetIndex);
     if (searcher.isFragmentInMolecule()) {
-      const result: SearchResult = { entryId, idCode: entry.id_code as string };
+      const result: SearchResult = { entryId, idCode };
       if (row.mw != null) result.mw = Number(row.mw);
       results.push(result);
       if (results.length >= maxResults) {

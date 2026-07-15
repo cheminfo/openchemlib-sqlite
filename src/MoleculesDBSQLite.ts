@@ -8,6 +8,7 @@ import { buildSchemaSql } from './schema.ts';
 import type {
   MoleculesDBConfig,
   SQLiteDatabase,
+  SearchCandidates,
   SearchOptions,
   SearchResponse,
   SearchResult,
@@ -84,6 +85,17 @@ function withFragment(
   }
   mol.setFragment(fragment);
   return mol;
+}
+
+/**
+ * Identify a candidates subquery inside a search-cache key, so a restricted
+ * search never returns another subset's — or the unrestricted — cached results.
+ * @param candidates - The subquery restricting the search, if any.
+ * @returns A key fragment identifying the subquery and its bound values.
+ */
+function candidatesKey(candidates: SearchCandidates | undefined): string {
+  if (!candidates) return '';
+  return `${candidates.sql}|${JSON.stringify(candidates.params ?? {})}`;
 }
 
 export class MoleculesDBSQLite {
@@ -201,11 +213,19 @@ export class MoleculesDBSQLite {
       maxResults = Number.MAX_SAFE_INTEGER,
       onProgress,
       partition,
+      candidates,
     } = options ?? {};
 
     const { entriesTable, idCodeColumn, idCodeNoStereoColumn, pkColumn } =
       this.#cfg;
     const { Molecule } = this.#ocl;
+
+    // Restricting the entries table to the candidate subquery. Every mode
+    // honours it, so a caller can never get unfiltered results by picking one.
+    const candidateJoin = candidates
+      ? `JOIN (${candidates.sql}) c ON c.entry_id = e.${pkColumn}`
+      : '';
+    const candidateParams = candidates?.params ? [candidates.params] : [];
 
     const fromInstance = typeof query !== 'string';
     const baseMol: OCLMolecule =
@@ -219,9 +239,9 @@ export class MoleculesDBSQLite {
         const idCode = mol.getIDCode();
         const rows = this.#db
           .prepare(
-            `SELECT ${this.#selectCols} FROM ${entriesTable} e ${this.#ssJoin} WHERE e.${idCodeColumn} = ?`,
+            `SELECT ${this.#selectCols} FROM ${entriesTable} e ${this.#ssJoin} ${candidateJoin} WHERE e.${idCodeColumn} = ?`,
           )
-          .all(idCode) as Array<Record<string, unknown>>;
+          .all(...candidateParams, idCode) as Array<Record<string, unknown>>;
         return {
           results: rows.slice(from, from + limit).map(rowToResult),
           total: rows.length,
@@ -241,9 +261,11 @@ export class MoleculesDBSQLite {
         const idCodeNoStereo = mol.getIDCode();
         const rows = this.#db
           .prepare(
-            `SELECT ${this.#selectCols} FROM ${entriesTable} e ${this.#ssJoin} WHERE e.${idCodeNoStereoColumn} = ?`,
+            `SELECT ${this.#selectCols} FROM ${entriesTable} e ${this.#ssJoin} ${candidateJoin} WHERE e.${idCodeNoStereoColumn} = ?`,
           )
-          .all(idCodeNoStereo) as Array<Record<string, unknown>>;
+          .all(...candidateParams, idCodeNoStereo) as Array<
+          Record<string, unknown>
+        >;
         return {
           results: rows.slice(from, from + limit).map(rowToResult),
           total: rows.length,
@@ -271,12 +293,13 @@ export class MoleculesDBSQLite {
             maxResults,
             onProgress,
             partition,
+            candidates,
           });
         }
 
         const queryIdCode = mol.getIDCode();
         const scan = await this.#cachedScan(
-          `sub|${queryIdCode}|${maxResults}|${maxCandidates}`,
+          `sub|${queryIdCode}|${maxResults}|${maxCandidates}|${candidatesKey(candidates)}`,
           () =>
             this.#scanSubstructureFull(
               mol,
@@ -285,6 +308,7 @@ export class MoleculesDBSQLite {
               maxCandidates,
               timeoutMs,
               onProgress,
+              candidates,
             ),
         );
         return {
@@ -301,10 +325,15 @@ export class MoleculesDBSQLite {
         const mol = withFragment(baseMol, false, fromInstance);
         const queryIdCode = mol.getIDCode();
         const scan = await this.#cachedScan(
-          `sim|${queryIdCode}|${similarityThreshold}`,
+          `sim|${queryIdCode}|${similarityThreshold}|${candidatesKey(candidates)}`,
           () =>
             Promise.resolve(
-              this.#scanSimilarityFull(mol, similarityThreshold, timeoutMs),
+              this.#scanSimilarityFull(
+                mol,
+                similarityThreshold,
+                timeoutMs,
+                candidates,
+              ),
             ),
         );
         return {
@@ -357,6 +386,7 @@ export class MoleculesDBSQLite {
     maxCandidates: number,
     timeoutMs: number,
     onProgress: SearchOptions['onProgress'],
+    candidates?: SearchCandidates,
   ): Promise<CachedScan> {
     const { entriesTable, pkColumn, idCodeColumn } = this.#cfg;
     const limit = Number.MAX_SAFE_INTEGER;
@@ -379,8 +409,9 @@ export class MoleculesDBSQLite {
         maxResults,
         queryMw,
         sortByMw: true,
-        mwRange: this.#ssIndexMwRange(),
+        mwRange: this.#ssIndexMwRange(candidates),
         onProgress,
+        candidates,
       });
       return {
         results: r.results,
@@ -404,6 +435,7 @@ export class MoleculesDBSQLite {
       maxCandidates,
       maxResults,
       onProgress,
+      candidates,
     });
     return {
       results: r.results,
@@ -419,15 +451,21 @@ export class MoleculesDBSQLite {
     mol: OCLMolecule,
     similarityThreshold: number,
     timeoutMs: number,
+    candidates?: SearchCandidates,
   ): CachedScan {
     const { SSSearcherWithIndex } = this.#ocl;
     const start = Date.now();
     const queryIndex = mol.getIndex();
+    const candidateJoin = candidates
+      ? `JOIN (${candidates.sql}) c ON c.entry_id = e.${this.#cfg.pkColumn ?? 'id'}`
+      : '';
     const stmt = this.#db.prepare(
-      `SELECT ${this.#selectCols}, ${this.#ssIndexCols} FROM ${this.#cfg.entriesTable} e ${this.#ssJoin}`,
+      `SELECT ${this.#selectCols}, ${this.#ssIndexCols} FROM ${this.#cfg.entriesTable} e ${this.#ssJoin} ${candidateJoin}`,
     );
     stmt.setReadBigInts?.(true);
-    const rows = stmt.all() as Array<Record<string, unknown>>;
+    const rows = stmt.all(
+      ...(candidates?.params ? [candidates.params] : []),
+    ) as Array<Record<string, unknown>>;
     const deadline = Date.now() + timeoutMs;
     const withSim: Array<SearchResult & { similarity: number }> = [];
     let partial = false;
@@ -461,10 +499,20 @@ export class MoleculesDBSQLite {
 
   // Min/max mw, so the pool can split the scan into sargable mw bands. The table
   // is clustered by mw, so MIN/MAX are O(1) lookups on the primary key.
-  #ssIndexMwRange(): { min: number; max: number } {
+  //
+  // With candidates, the range is measured over the candidates rather than the
+  // whole index: bands cut from the full range would mostly fall outside the
+  // subset, leaving workers with nothing to do while one scans everything.
+  #ssIndexMwRange(candidates?: SearchCandidates): { min: number; max: number } {
+    const sql = candidates
+      ? `SELECT MIN(s.mw) AS lo, MAX(s.mw) AS hi FROM (${candidates.sql}) c
+         JOIN ocl_ss_index s ON s.entry_id = c.entry_id`
+      : 'SELECT MIN(mw) AS lo, MAX(mw) AS hi FROM ocl_ss_index';
     const row = this.#db
-      .prepare('SELECT MIN(mw) AS lo, MAX(mw) AS hi FROM ocl_ss_index')
-      .get() as { lo: number | null; hi: number | null } | undefined;
+      .prepare(sql)
+      .get(...(candidates?.params ? [candidates.params] : [])) as
+      | { lo: number | null; hi: number | null }
+      | undefined;
     return { min: row?.lo ?? 0, max: row?.hi ?? 0 };
   }
 

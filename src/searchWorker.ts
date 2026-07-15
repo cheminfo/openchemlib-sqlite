@@ -2,7 +2,12 @@ import * as OCL from 'openchemlib';
 import { workerEmit } from 'workerpool';
 
 import { MoleculesDBSQLite } from './MoleculesDBSQLite.ts';
-import type { InputFormat, MoleculesDBConfig, SearchResult } from './types.ts';
+import type {
+  InputFormat,
+  MoleculesDBConfig,
+  SearchCandidates,
+  SearchResult,
+} from './types.ts';
 
 /** One partition of a parallel substructure scan, sent to a worker. */
 export interface PartitionTask {
@@ -24,6 +29,12 @@ export interface PartitionTask {
   maxResults: number;
   /** This partition's molecular-weight band, half-open `[lo, hi)`. */
   partition: { lo: number; hi: number };
+  /**
+   * Subquery restricting the scan to a subset of the entries table. Only its
+   * SQL and bound values cross the thread boundary; the worker runs it against
+   * its own connection, inside this partition's band.
+   */
+  candidates?: SearchCandidates;
   /** This worker's position in the pool, used to aggregate progress. */
   partitionIndex: number;
 }
@@ -80,6 +91,7 @@ export async function runSearchPartition(
     timeoutMs: task.timeoutMs,
     maxResults: task.maxResults,
     partition: task.partition,
+    candidates: task.candidates,
     onProgress: (processed, total) =>
       workerEmit({
         type: 'progress',

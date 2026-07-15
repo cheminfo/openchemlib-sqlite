@@ -1,3 +1,5 @@
+import { availableParallelism } from 'node:os';
+
 import type { Pool } from 'workerpool';
 import { pool } from 'workerpool';
 
@@ -5,6 +7,7 @@ import type { PartitionResult, PartitionTask } from './searchWorker.ts';
 import type {
   InputFormat,
   MoleculesDBConfig,
+  SearchCandidates,
   SearchResponse,
   SearchResult,
 } from './types.ts';
@@ -17,7 +20,7 @@ export interface SearchWorkerPoolOptions {
   config: MoleculesDBConfig;
   /**
    * Number of worker threads (clamped to >= 1).
-   * @default 4
+   * @default availableParallelism()
    */
   poolSize?: number;
 }
@@ -37,6 +40,13 @@ export interface PoolScanOptions {
   /** Min/max molecular weight, used to split the scan into per-worker mw bands. */
   mwRange: { min: number; max: number };
   onProgress?: (processed: number, total: number) => void;
+  /**
+   * Subquery restricting the scan to a subset of the entries table. Passed to
+   * every worker, which applies it within its own mw band. Only its SQL and
+   * bound values cross the thread boundary — each worker runs it against its
+   * own connection.
+   */
+  candidates?: SearchCandidates;
 }
 
 interface ProgressEvent {
@@ -100,7 +110,10 @@ export class SearchWorkerPool {
   constructor(options: SearchWorkerPoolOptions) {
     this.#dbPath = options.dbPath;
     this.#config = options.config;
-    this.#size = Math.max(1, Math.trunc(options.poolSize ?? 4));
+    this.#size = Math.max(
+      1,
+      Math.trunc(options.poolSize ?? availableParallelism()),
+    );
   }
 
   /**
@@ -125,6 +138,7 @@ export class SearchWorkerPool {
       sortByMw,
       mwRange,
       onProgress,
+      candidates,
     } = options;
 
     // Split [min, max] into `size` contiguous mw bands so each worker scans only
@@ -174,6 +188,7 @@ export class SearchWorkerPool {
           maxResults,
           partition: rangeFor(index),
           partitionIndex: index,
+          candidates,
         };
         return workerPool.exec(runPartition, [task], { on: reportProgress });
       }),
