@@ -1,5 +1,30 @@
 # Changelog
 
+## [3.0.0](https://github.com/cheminfo/openchemlib-sqlite/compare/v2.3.0...v3.0.0) (2026-07-16)
+
+
+### ⚠ BREAKING CHANGES
+
+* the internal `partition` search option is gone — there are no mw bands left to partition. `poolSize` now defaults to availableParallelism() rather than 4, and a new `batchSize` option (default 128) sets how many candidates a verifier gets per batch.
+* the ocl_ss_index schema changed (added an mw column and clustered the table by it), so existing indexes must be rebuilt. mw is taken from the configured mwColumn at insert time, or derived from the molecule when mwColumn is unset.
+
+### Features
+
+* cluster ocl_ss_index by molecular weight ([407af01](https://github.com/cheminfo/openchemlib-sqlite/commit/407af012b6d544f623a423d64c3654465c01588b))
+* restrict a search to candidates via a streamed subquery ([fe8781f](https://github.com/cheminfo/openchemlib-sqlite/commit/fe8781f8fd2d4a97e6faed3915f58ba34587be01))
+* upgrade an existing database in place, with a versioned schema ([b23e587](https://github.com/cheminfo/openchemlib-sqlite/commit/b23e5874e32521e545b04400556c862e72c651a2))
+
+
+### Bug Fixes
+
+* default mw to 0 when the configured mwColumn is null ([3f89c29](https://github.com/cheminfo/openchemlib-sqlite/commit/3f89c29c721b1fb124706ebbaaab9f5677880cc6))
+* do not invent 2D coordinates when indexing from an idCode ([2dc70cb](https://github.com/cheminfo/openchemlib-sqlite/commit/2dc70cb8e0d43e4f95a375718fcd6a82a689045a))
+
+
+### Performance Improvements
+
+* prescreen once and verify on a pool of stateless workers ([89a052a](https://github.com/cheminfo/openchemlib-sqlite/commit/89a052ab20b17717f8ec466e2d8480e3648bcb92))
+
 ## [2.3.0](https://github.com/cheminfo/openchemlib-sqlite/compare/v2.2.0...v2.3.0) (2026-06-11)
 
 
