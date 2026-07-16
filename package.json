@@ -55,6 +55,7 @@
     "@types/node": "^25.7.0",
     "@vitest/coverage-v8": "^4.1.6",
     "@zakodium/tsconfig": "^1.0.5",
+    "cif-to-json": "^2.0.0",
     "eslint": "^9.39.2",
     "eslint-config-cheminfo-typescript": "^22.0.0",
     "openchemlib": "^9.22.1",
