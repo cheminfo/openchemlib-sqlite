@@ -58,19 +58,31 @@ export interface MoleculesDBConfig {
    */
   mwColumn?: string | null;
   /**
-   * Number of worker threads used for parallel substructure search. When the
-   * database is file-backed (so the path can be derived from the connection),
-   * the scan's candidates are partitioned across this many worker threads, each
-   * opening its own connection, so a large scan never blocks the calling thread
-   * and is split across CPU cores. For an in-memory database — which a worker
-   * cannot share — the scan always runs synchronously on the calling thread
-   * regardless of this value (and stays browser-compatible).
+   * Number of verifier threads used for substructure search.
    *
-   * Defaults to the machine's core count, since a scan is CPU-bound (parsing
-   * and matching each candidate) and idle cores are wasted wall-clock time.
+   * A substructure search is two steps: a fingerprint prescreen in SQL (~3% of
+   * the cost) and then parsing and graph-matching each surviving candidate
+   * (~97%). The prescreen runs once, on the calling thread's connection; only
+   * the verification is spread over this many threads, as batches of idCodes.
+   * The verifiers hold no database connection, so this works for any database —
+   * in-memory and file-backed alike.
+   *
+   * Defaults to the machine's core count, since verification is CPU-bound and
+   * idle cores are wasted wall-clock time. Set to 1 to keep everything on the
+   * calling thread (no worker is ever spawned).
    * @default availableParallelism()
    */
   poolSize?: number;
+  /**
+   * Number of candidates handed to a verifier thread per batch.
+   *
+   * Batches are dispatched to whichever thread is free, so the work self-balances
+   * regardless of how candidates are distributed; smaller batches balance better
+   * but pay more round trips. A scan that never fills a single batch is verified
+   * inline, without spawning any thread.
+   * @default 128
+   */
+  batchSize?: number;
   /**
    * Number of recent structure searches (substructure / similarity) whose full
    * result set is kept in an in-memory LRU cache, keyed by the query. A repeated
@@ -133,32 +145,20 @@ export interface SearchOptions {
    */
   onProgress?: (processed: number, total: number) => void;
   /**
-   * Restrict the substructure scan to entries whose molecular weight is in the
-   * half-open range `[lo, hi)`. Used internally to partition a parallel search
-   * across worker threads by mw band (sargable on the mw-clustered ocl_ss_index
-   * primary key), so each worker scans only its slice of the rows in
-   * ascending-mw order; callers normally omit it.
-   */
-  partition?: { lo: number; hi: number };
-  /**
    * Restrict the search to the entries returned by a subquery, so the scan only
    * considers rows the caller already knows are relevant.
    *
    * A scan's cost is dominated by parsing and matching each candidate molecule,
    * so narrowing the candidate set is by far the most effective way to speed one
-   * up: on a 45 k-molecule database, restricting a substructure scan from every
-   * row to the 6 k matching an attribute filter takes it from ~1470 ms to
-   * ~210 ms, and the gap widens with the table size. Prefer this over filtering
-   * the results afterwards, which pays for the full scan first.
+   * up. Prefer this over filtering the results afterwards, which pays for the
+   * full scan first.
    *
-   * The subquery is inlined into the scan and streamed — nothing is
-   * materialised, so a candidate set of any size costs no extra memory — and it
-   * composes with `partition`, each worker applying the same subquery within its
-   * own mw band.
+   * The subquery becomes a membership test on the single prescreen, so it is
+   * executed exactly once per search however many verifier threads are running.
    *
    * `sql` must select exactly one column, named `entry_id`, holding primary keys
    * of the entries table. Bound values go in `params` and must be **named**
-   * parameters (`:name`), because the scan binds its own anonymous ones.
+   * parameters (`:name`), because the prescreen binds its own anonymous ones.
    * @example
    * ```js
    * // only search ligands whose name contains "acetate"

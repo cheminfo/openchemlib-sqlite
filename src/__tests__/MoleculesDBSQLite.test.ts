@@ -667,10 +667,12 @@ test('parallel substructure search across workers matches the sync result', asyn
     format: 'smiles',
   });
 
-  // No dbPath here: it is derived from the connection (PRAGMA database_list).
+  // batchSize 2 so these eight rows really are dispatched to the verifier
+  // threads: a scan that never fills one batch is verified inline instead.
   const parallel = new MoleculesDBSQLite(db, OCL, {
     ...baseConfig,
     poolSize: 3,
+    batchSize: 2,
   });
   const progress: Array<[number, number]> = [];
   const result = await parallel.search('c1ccccc1', {

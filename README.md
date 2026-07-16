@@ -216,18 +216,62 @@ const { results, total } = await molDB.search('c1ccccc1', {
 });
 ```
 
-Measured on 45 000 molecules (8 cores), restricting a benzene scan to the 6 429
-entries matching that filter: **1526 ms → 227 ms (6.7×)**. What you stop paying
-for is the candidates that are never screened, so the gain is proportional and
-grows with the table size.
+What you stop paying for is the candidates that are never verified, so the gain
+is proportional and grows with the table size. Measured on 50 000 CCD ligands
+(8 cores), restricting a phenazine scan to the 9 232 entries matching that
+filter: **199 ms → 50 ms**.
 
 `sql` must select exactly one column, named `entry_id`, and `params` must use
-**named** parameters (`:name`) since the scan binds its own anonymous ones. The
-subquery is inlined into the scan and streamed — nothing is materialised, so a
-candidate set of any size costs no extra memory — and every mode honours it
-(`substructure`, `similarity`, `exact`, `exactNoStereo`). Under the worker pool
-only the SQL and its bound values cross the thread boundary: each worker runs
-the subquery against its own connection, within its own mw band.
+**named** parameters (`:name`) since the prescreen binds its own anonymous ones.
+Every mode honours it (`substructure`, `similarity`, `exact`, `exactNoStereo`).
+Because the prescreen runs once per search, so does the subquery — however many
+verifier threads are running.
+
+## How a substructure search runs
+
+A substructure search is two steps, and they cost very different amounts:
+
+| step | what it does | share of the time |
+| --- | --- | --- |
+| prescreen | one SQL scan of `ocl_ss_index`, keeping rows whose fingerprint is a superset of the query's | ~3% |
+| verify | parse each surviving candidate and run the graph match | ~97% |
+
+So the prescreen is left alone: a single query, on the calling thread's
+connection, streamed. Only the verification is spread over `poolSize` threads,
+which receive the fragment once and then answer batches of idCodes with
+match / no-match. They hold no database connection.
+
+Two properties fall out of that:
+
+- **It self-balances.** Batches go to whichever thread is free, so the split
+  never depends on guessing how candidates are distributed. On 50 000 CCD
+  ligands a full phenazine scan goes 710 ms → 199 ms (1 → 8 threads).
+- **Concurrent searches share the pool.** The verifiers are stateless and cache
+  each fragment they see, so several searches interleave on the same threads
+  instead of each monopolising them.
+
+### Why the index is ordered by molecular weight
+
+`ocl_ss_index` is `WITHOUT ROWID` with primary key `(mw, entry_id)`, so the table
+is *physically* stored lightest-first. Nothing ever has to sort it: scanning it
+is already the right order, and the prescreen is a genuine row-by-row cursor
+rather than a materialised result set. Two things follow.
+
+**`maxResults` really stops the scan.** It is not a slice of a finished result:
+the cursor is abandoned mid-table, so the candidates past it are never read, let
+alone parsed. A benzene scan of 50 000 ligands whose prefilter admits 36 801
+candidates reads only ~1 400 of them and returns in 16 ms instead of 787 ms.
+
+**What survives an early stop is the smallest superstructures** — the matches
+closest to the query — rather than an arbitrary insertion-order subset.
+
+This is why `candidates` uses `+s.entry_id IN (…)`. The unary `+` marks the term
+unusable by an index, which keeps `ocl_ss_index` as the driving table. Without
+it SQLite drives the scan off the subquery — the smaller side, and one with no
+statistics — which throws the physical order away and needs a temp b-tree to
+rebuild it, materialising every candidate before the first row comes out. Forcing
+the clustered scan keeps a restricted search streaming and lightest-first exactly
+like an unrestricted one (24 ms vs 70 ms on the benzene scan above).
 
 ## Schema
 

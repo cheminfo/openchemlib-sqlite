@@ -7,15 +7,26 @@ type OCLMolecule = InstanceType<OCLLibrary['Molecule']>;
 
 /**
  * Parse a molecule string according to the given format.
+ *
+ * `ensureCoordinates` only affects the `idCode` format, where inventing 2D
+ * coordinates costs roughly 20x the parse itself. They are needed **only** to
+ * re-encode the molecule back to a canonical idCode (`getIDCode()`): without
+ * them OCL drops the stereo descriptors, so the re-encoded idCode differs from
+ * the original for every stereo-bearing molecule. Everything that reads the
+ * graph instead — the fingerprint (`getIndex()`), the molecular formula, and
+ * substructure matching — is coordinate-independent and must pass `false`.
  * @param Molecule - OCL Molecule class.
  * @param str - Input string.
  * @param format - Input format.
+ * @param ensureCoordinates - Whether to invent 2D coordinates for an idCode.
+ *   Pass true only when the result will be re-encoded with `getIDCode()`.
  * @returns Parsed OCL Molecule.
  */
 export function parseMolecule(
   Molecule: OCLLibrary['Molecule'],
   str: string,
   format: InputFormat,
+  ensureCoordinates: boolean,
 ): OCLMolecule {
   switch (format) {
     case 'smiles':
@@ -23,7 +34,7 @@ export function parseMolecule(
     case 'molfile':
       return Molecule.fromMolfile(str);
     case 'idCode':
-      return Molecule.fromIDCode(str);
+      return Molecule.fromIDCode(str, ensureCoordinates);
     default:
       throw new Error(`Unknown format: ${String(format)}`);
   }
