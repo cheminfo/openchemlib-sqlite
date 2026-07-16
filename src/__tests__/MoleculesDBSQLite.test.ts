@@ -743,6 +743,35 @@ test('insert reads the molecular weight from the configured mwColumn', async () 
   ]);
 });
 
+test('indexing from an idCode stores the same fingerprint as from a Molecule', async () => {
+  // insert() parses an idCode without inventing 2D coordinates. The fingerprint
+  // and the molecular formula are both derived from the graph alone, so the
+  // stored row must be identical to the one taken from a live Molecule.
+  const fingerprintOf = (molecule: string | OCL.Molecule) => {
+    const db = new DatabaseSync(':memory:');
+    db.exec(
+      'CREATE TABLE molecules (id INTEGER PRIMARY KEY, id_code TEXT NOT NULL UNIQUE)',
+    );
+    const molDB = new MoleculesDBSQLite(db, OCL, { entriesTable: 'molecules' });
+    molDB.migrate();
+    const idCode =
+      typeof molecule === 'string' ? molecule : molecule.getIDCode();
+    db.prepare('INSERT INTO molecules (id_code) VALUES (?)').run(idCode);
+    molDB.insert(1, molecule);
+    const statement = db.prepare(
+      'SELECT mw, ss_index0, ss_index1, ss_index7 FROM ocl_ss_index',
+    );
+    // ss_index columns are 64-bit: read them as BigInt or they overflow.
+    statement.setReadBigInts(true);
+    return statement.get();
+  };
+  // A stereo-bearing molecule, where parsing without coordinates does change
+  // getIDCode() — the fingerprint must be unaffected regardless.
+  const mol = OCL.Molecule.fromSmiles('N[C@@H](C)C(=O)O');
+
+  expect(fingerprintOf(mol.getIDCode())).toStrictEqual(fingerprintOf(mol));
+});
+
 test('packSSIndex and unpackSSIndex round-trip preserves bit pattern', async () => {
   const mol = OCL.Molecule.fromSmiles('c1ccccc1');
   const original = mol.getIndex().map((v) => v >>> 0);

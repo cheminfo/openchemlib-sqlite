@@ -151,7 +151,10 @@ export class MoleculesDBSQLite {
   insert(entryId: number, molecule: string | OCLMolecule): void {
     const mol =
       typeof molecule === 'string'
-        ? this.#ocl.Molecule.fromIDCode(molecule)
+        ? // `false` skips 2D-coordinate invention: this molecule is only read
+          // for its fingerprint and its formula, neither of which uses
+          // coordinates, and inventing them is ~20x the cost of the parse.
+          this.#ocl.Molecule.fromIDCode(molecule, false)
         : molecule;
     const packed = packSSIndex(mol.getIndex());
     const { mwColumn, entriesTable, pkColumn } = this.#cfg;
