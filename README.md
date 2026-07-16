@@ -25,7 +25,7 @@ npm install openchemlib-sqlite openchemlib
 - an `id_code` column holding the OCL idCode string (default column name: `id_code`)
 - optionally an `id_code_no_stereo` column for stereo-insensitive exact search
 
-`migrate()` creates a single `ocl_ss_index` table that stores the 512-bit fingerprint for each indexed entry, referencing the entries table by its primary key.
+`migrate()` creates an `ocl_ss_index` table storing the 512-bit fingerprint for each indexed entry, referencing the entries table by its primary key, plus an `ocl_ss_schema` table recording the schema version. Call it on every startup: it applies whatever a database is missing and upgrades one written by an older release in place — see [Upgrading](#upgrading).
 
 ## Setup
 
@@ -50,18 +50,18 @@ const molDB = new MoleculesDBSQLite(db, OCL, {
   entriesTable: 'molecules',
   idCodeNoStereoColumn: 'id_code_no_stereo', // omit if not needed
 });
-molDB.migrate(); // creates ocl_ss_index (idempotent)
+molDB.migrate(); // creates or upgrades ocl_ss_index (idempotent)
 ```
 
 `MoleculesDBConfig` options:
 
-| Option | Default | Description |
-|---|---|---|
-| `entriesTable` | *(required)* | Name of the existing molecules table |
-| `pkColumn` | `'id'` | Primary key column name |
-| `idCodeColumn` | `'id_code'` | Column holding the OCL idCode |
-| `idCodeNoStereoColumn` | `null` | Column for stereo-stripped idCode; required for `exactNoStereo` mode |
-| `mwColumn` | `null` | Column holding the molecular weight (REAL); enables automatic mass-difference sorting in substructure search |
+| Option                 | Default      | Description                                                                                                  |
+| ---------------------- | ------------ | ------------------------------------------------------------------------------------------------------------ |
+| `entriesTable`         | _(required)_ | Name of the existing molecules table                                                                         |
+| `pkColumn`             | `'id'`       | Primary key column name                                                                                      |
+| `idCodeColumn`         | `'id_code'`  | Column holding the OCL idCode                                                                                |
+| `idCodeNoStereoColumn` | `null`       | Column for stereo-stripped idCode; required for `exactNoStereo` mode                                         |
+| `mwColumn`             | `null`       | Column holding the molecular weight (REAL); enables automatic mass-difference sorting in substructure search |
 
 ## Inserting molecules
 
@@ -125,9 +125,12 @@ const { results } = molDB.search('Cn1c(=O)c2c(ncn2C)n(C)c1=O', {
 });
 
 // Passing a Molecule instance directly:
-const { results } = molDB.search(OCL.Molecule.fromSmiles('Cn1c(=O)c2c(ncn2C)n(C)c1=O'), {
-  mode: 'exact',
-});
+const { results } = molDB.search(
+  OCL.Molecule.fromSmiles('Cn1c(=O)c2c(ncn2C)n(C)c1=O'),
+  {
+    mode: 'exact',
+  },
+);
 ```
 
 ### Exact match ignoring stereocenters
@@ -231,10 +234,10 @@ verifier threads are running.
 
 A substructure search is two steps, and they cost very different amounts:
 
-| step | what it does | share of the time |
-| --- | --- | --- |
-| prescreen | one SQL scan of `ocl_ss_index`, keeping rows whose fingerprint is a superset of the query's | ~3% |
-| verify | parse each surviving candidate and run the graph match | ~97% |
+| step      | what it does                                                                                | share of the time |
+| --------- | ------------------------------------------------------------------------------------------- | ----------------- |
+| prescreen | one SQL scan of `ocl_ss_index`, keeping rows whose fingerprint is a superset of the query's | ~3%               |
+| verify    | parse each surviving candidate and run the graph match                                      | ~97%              |
 
 So the prescreen is left alone: a single query, on the calling thread's
 connection, streamed. Only the verification is spread over `poolSize` threads,
@@ -253,7 +256,7 @@ Two properties fall out of that:
 ### Why the index is ordered by molecular weight
 
 `ocl_ss_index` is `WITHOUT ROWID` with primary key `(mw, entry_id)`, so the table
-is *physically* stored lightest-first. Nothing ever has to sort it: scanning it
+is _physically_ stored lightest-first. Nothing ever has to sort it: scanning it
 is already the right order, and the prescreen is a genuine row-by-row cursor
 rather than a materialised result set. Two things follow.
 
@@ -275,15 +278,60 @@ like an unrestricted one (24 ms vs 70 ms on the benzene scan above).
 
 ## Schema
 
-`migrate()` creates one table:
+`migrate()` creates two tables:
 
 ```sql
-ocl_ss_index (entry_id, ss_index0 .. ss_index7)
+ocl_ss_index  (mw, entry_id, ss_index0 .. ss_index7)  -- WITHOUT ROWID, PK (mw, entry_id)
+ocl_ss_schema (version, applied_at)                   -- which schema version this database is at
 ```
 
-`entry_id` is the primary key and a foreign-key reference to your entries table's primary key column.
-The eight `ss_indexN` columns store the 512-bit OCL fingerprint packed as signed 64-bit integers for
-efficient SQL bitwise prefiltering.
+`entry_id` is a foreign-key reference to your entries table's primary key column, with a unique index
+of its own. The eight `ss_indexN` columns store the 512-bit OCL fingerprint packed as signed 64-bit
+integers for efficient SQL bitwise prefiltering. `mw` leads the primary key so the table is physically
+stored lightest-first — see [above](#why-the-index-is-ordered-by-molecular-weight).
+
+## Upgrading
+
+**Call `migrate()` on every startup.** It is idempotent, it records the schema version it reaches, and
+it applies only what a database is missing — so it does nothing once current and upgrades in place when
+it is not. There is no separate command to run and no dump/reload:
+
+```js
+const molDB = new MoleculesDBSQLite(db, OCL, { entriesTable: 'ligands' });
+
+molDB.migrate({
+  // Upgrading a large index rewrites every row. Log it: a startup that is
+  // working should not look like one that has hung.
+  onMigration: (event) => logger.info(event, 'ocl_ss_index migration'),
+});
+```
+
+`migrate()` returns the versions it applied (`[]` when there was nothing to do), and `onMigration`
+receives a `start` / `progress` / `done` event per version, carrying `done` / `total` rows while a
+version runs and `elapsedMs` when it finishes.
+
+Upgrades reuse whatever the old schema already held rather than recomputing it. Going from the 2.x
+index to the mw-clustered one, for instance, carries the fingerprints over untouched — they are the
+expensive part (~6 ms a molecule) and the schema change does not affect them; only `mw` is new.
+Measured on 49 983 CCD ligands:
+
+|                                                        | time       |
+| ------------------------------------------------------ | ---------- |
+| `mwColumn` configured — weights come straight from SQL | **105 ms** |
+| no `mwColumn` — weights derived from each idCode       | **2.7 s**  |
+
+Compare with ~5 minutes to re-fingerprint the same index from scratch.
+
+Each version is applied in its own transaction, so an interrupted upgrade leaves the database at the
+last version that fully completed — never half-way through one. A migration only ever discards rows it
+cannot carry (an orphaned fingerprint whose entry no longer exists, which no search could return), and
+reports the count as `dropped` rather than dropping it quietly.
+
+### Adding a schema version
+
+Append to `MIGRATIONS` in `src/migrations.ts`; never edit a shipped migration, since it has already run
+on real databases. Databases created before `ocl_ss_schema` existed are recognised once by shape and
+recorded from then on.
 
 ## Using a different SQLite driver
 

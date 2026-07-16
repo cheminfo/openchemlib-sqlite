@@ -20,6 +20,38 @@ export interface SQLiteDatabase {
   exec(sql: string): void;
 }
 
+/** One step of a schema migration, reported to {@link MigrateOptions.onMigration}. */
+export interface MigrationEvent {
+  /** Schema version being applied. */
+  version: number;
+  /** What this version changes. */
+  description: string;
+  /** `start` and `done` bracket a version; `progress` repeats in between. */
+  phase: 'start' | 'progress' | 'done';
+  /** Rows rewritten so far (`progress` only). */
+  done?: number;
+  /** Rows to rewrite in total (`progress` only). */
+  total?: number;
+  /** How long the version took, in ms (`done` only). */
+  elapsedMs?: number;
+  /**
+   * Rows the migration discarded as unusable (`done` only, omitted when none).
+   * Only orphaned fingerprints — ones whose entry no longer exists, which no
+   * search could ever return — are ever dropped.
+   */
+  dropped?: number;
+}
+
+/** Options for the `migrate()` method of `MoleculesDBSQLite`. */
+export interface MigrateOptions {
+  /**
+   * Called as migrations run. Upgrading a large index rewrites every row, which
+   * can take seconds, so wire this to your logger — otherwise a startup that is
+   * working looks exactly like one that has hung.
+   */
+  onMigration?: (event: MigrationEvent) => void;
+}
+
 export type SearchMode =
   | 'substructure'
   | 'exact'

@@ -4,10 +4,11 @@ import { LRUCache } from 'lru-cache';
 import type * as OpenChemLib from 'openchemlib';
 
 import type { SearchWorkerPool } from './SearchWorkerPool.ts';
-import { buildSchemaSql } from './schema.ts';
+import { runMigrations } from './migrations.ts';
 // Type-only: erased at build, so node:worker_threads is never pulled into the
 // synchronous/browser path. The pool is loaded lazily via dynamic import.
 import type {
+  MigrateOptions,
   MoleculesDBConfig,
   SQLiteDatabase,
   SearchCandidates,
@@ -121,9 +122,34 @@ export class MoleculesDBSQLite {
     this.#selectCols = `e.${pkColumn} AS entry_id, e.${idCodeColumn} AS id_code`;
   }
 
-  /** Create the ocl_ss_index table (idempotent). */
-  migrate(): void {
-    this.#db.exec(buildSchemaSql(this.#cfg));
+  /**
+   * Bring the database's schema up to date, creating it if absent.
+   *
+   * Idempotent, and safe to call on every startup: it records the schema version
+   * it reaches, applies only what is missing, and does nothing once current. A
+   * database written by an older release is upgraded in place — an index built
+   * before the mw clustering, for instance, is rewritten rather than rejected,
+   * carrying its fingerprints over instead of recomputing them.
+   *
+   * Call it before searching. A stale schema is not silently tolerated: the
+   * queries reference columns an old index does not have.
+   * @param options - Optional log callback; see {@link MigrateOptions}.
+   * @returns The schema versions applied, in order (empty when already current).
+   */
+  migrate(options: MigrateOptions = {}): number[] {
+    const { entriesTable, pkColumn, idCodeColumn, mwColumn } = this.#cfg;
+    const applied = runMigrations({
+      db: this.#db,
+      ocl: this.#ocl,
+      entriesTable,
+      pkColumn,
+      idCodeColumn,
+      mwColumn,
+      onMigration: options.onMigration,
+    });
+    // A rewritten index invalidates anything cached from the old one.
+    if (applied.length > 0) this.#searchCache?.clear();
+    return applied;
   }
 
   /**
