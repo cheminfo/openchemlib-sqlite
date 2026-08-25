@@ -16,7 +16,7 @@ import type {
   SearchResponse,
   SearchResult,
 } from './types.ts';
-import { createVerifier } from './utils/createVerifier.ts';
+import { verifyIdCodes } from './utils/createVerifier.ts';
 import { packSSIndex, unpackSSIndex } from './utils/packSSIndex.ts';
 import type { PrescreenState } from './utils/prescreen.ts';
 import { prescreen } from './utils/prescreen.ts';
@@ -516,10 +516,13 @@ export class MoleculesDBSQLite {
       if (inFlight.length === 0) {
         // The whole scan fits in one batch: checking a handful of molecules
         // inline is cheaper than spawning a thread to do it.
-        const verify = createVerifier(this.#ocl, mol);
-        for (const [index, idCode] of batch.idCodes.entries()) {
+        for (const index of verifyIdCodes(
+          emptyFragment ? '' : mol.getIDCode(),
+          batch.idCodes,
+          emptyFragment,
+        )) {
           const hit = batch.entries[index];
-          if (hit && verify(idCode)) results.push(hit);
+          if (hit) results.push(hit);
         }
       } else {
         dispatch(batch);
