@@ -1,10 +1,10 @@
-import { SubstructureResult, ssSearch } from 'openchemlib-wasm';
+import { SubstructureResult, ssSearch } from 'openchemlib-search-wasm';
 
 /**
  * Test a batch of prescreened candidates against a fragment — step 2 of a
  * substructure search, and ~97% of its cost.
  *
- * The matching runs in `openchemlib-wasm`: OpenChemLib compiled to WebAssembly, which does exactly
+ * The matching runs in `openchemlib-search-wasm`: OpenChemLib compiled to WebAssembly, which does exactly
  * this work — parse an idCode, match a fragment against the graph — at about twice the speed of the
  * JavaScript build. It takes the whole batch in one call, so the query fragment is parsed once for
  * the batch rather than once per candidate.

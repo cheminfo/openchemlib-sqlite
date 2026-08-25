@@ -48,7 +48,7 @@ export interface SubstructureSearchParams {
  *
  * Used when no verifier pool is available (poolSize 1) or when the candidate set
  * is too small to be worth a round trip to one. It runs the same two steps as the
- * pooled path — the shared {@link prescreen} stream, then `openchemlib-wasm` over each batch of
+ * pooled path — the shared {@link prescreen} stream, then `openchemlib-search-wasm` over each batch of
  * candidates — so both paths return identical results.
  *
  * Candidates arrive lightest-first (the index is clustered by molecular weight),

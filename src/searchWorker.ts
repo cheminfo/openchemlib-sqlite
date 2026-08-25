@@ -23,7 +23,7 @@ export interface VerifyResult {
  * match / not-match function over idCodes, which is the ~97% of a substructure
  * search that actually costs anything.
  *
- * The batch goes to `openchemlib-wasm` in a single call. There is no per-worker searcher cache any
+ * The batch goes to `openchemlib-search-wasm` in a single call. There is no per-worker searcher cache any
  * more: the fragment is parsed once per batch rather than once per candidate, which is what the
  * cache used to save. A batch holds at most `batchSize` candidates (128 by default), and a small
  * `maxResults` shrinks it further, so that trade is closest at the small end.
