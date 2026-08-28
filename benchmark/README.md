@@ -30,3 +30,29 @@ It reports two things:
 The second number is what justifies the architecture: the prescreen is ~3% of
 the scan, so it is left as a single query on one connection and only the
 verification is spread over threads.
+
+## Is `openchemlib-search-wasm` the same answer, faster?
+
+OpenChemLib compiled to WebAssembly does the two expensive things this library
+does — build a fingerprint, match a fragment against a graph. Three scripts ask
+whether it can replace `openchemlib` here: two check that it answers *exactly*
+the same, one measures what that costs.
+
+Any list of idcodes, one per line, works as the dataset.
+
+```sh
+# 1. do the two builds agree, molecule by molecule?
+node --experimental-strip-types benchmark/wasmParity.mjs idcodes.txt
+
+# 2. how much faster is it, on the same candidates, in one process?
+node --experimental-strip-types benchmark/wasmVerify.mjs idcodes.txt 10000
+
+# 3. does the whole search return the same entries, in the same order?
+node --experimental-strip-types benchmark/seedIdCodes.mjs idcodes.txt bench.sqlite 60000
+node --experimental-strip-types benchmark/wasmSearch.mjs bench.sqlite
+```
+
+`wasmParity` compares fingerprints word for word and match positions one by one;
+`wasmSearch` runs the real pipeline — clustered prescreen, batching, `maxResults`
+cutting the scan short — and compares the entry ids in order. Both exit non-zero
+on any disagreement, so they can be run as a gate.
