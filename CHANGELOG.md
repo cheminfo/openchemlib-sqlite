@@ -1,5 +1,16 @@
 # Changelog
 
+## [4.0.0](https://github.com/cheminfo/openchemlib-sqlite/compare/v3.0.0...v4.0.0) (2026-08-28)
+
+
+### ⚠ BREAKING CHANGES
+
+* a substructure query is matched as its idCode on every path, so a molfile bond query feature that getIDCode drops no longer widens the match. The pooled path already behaved this way, so search() answered differently depending on how many candidates filled a batch; it now gives one answer.
+
+### Performance Improvements
+
+* verify and fingerprint with openchemlib-search-wasm ([706f82f](https://github.com/cheminfo/openchemlib-sqlite/commit/706f82f8472168a1cc1f68036334529df932ef18))
+
 ## [3.0.0](https://github.com/cheminfo/openchemlib-sqlite/compare/v2.3.0...v3.0.0) (2026-07-16)
 
 
