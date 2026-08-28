@@ -191,3 +191,72 @@ test('exact search on an idCode matches without re-encoding the query', async ()
   expect(total).toBe(1);
   expect(results[0]?.idCode).toBe(idCode);
 });
+
+test('a molfile bond-query gives one answer at every poolSize and batchSize', async () => {
+  // A ring where one bond is drawn "double or aromatic" (molfile bond type 7).
+  // `getIDCode` delocalizes it, so matching the query as a Molecule and matching
+  // it as an idCode disagree — which is exactly why every path must pick one.
+  const molfile = `
+  Test
+
+  6  6  0  0  0  0  0  0  0  0999 V2000
+    0.0000    0.0000    0.0000 C   0  0
+    1.0000    0.0000    0.0000 C   0  0
+    1.5000    0.8660    0.0000 C   0  0
+    1.0000    1.7320    0.0000 C   0  0
+    0.0000    1.7320    0.0000 C   0  0
+   -0.5000    0.8660    0.0000 C   0  0
+  1  2  7  0  0  0  0
+  2  3  1  0  0  0  0
+  3  4  1  0  0  0  0
+  4  5  1  0  0  0  0
+  5  6  1  0  0  0  0
+  6  1  1  0  0  0  0
+M  END`;
+
+  // batchSize 1 forces the pooled path; a batch wide enough to hold every
+  // candidate forces the inline one. Both must answer the same.
+  const answers: string[][] = [];
+  for (const [poolSize, batchSize] of [
+    [1, 128],
+    [4, 1],
+    [4, 128],
+  ] as const) {
+    const db = new DatabaseSync(':memory:');
+    db.exec(
+      'CREATE TABLE molecules (id INTEGER PRIMARY KEY, id_code TEXT NOT NULL UNIQUE)',
+    );
+    const molDB = new MoleculesDBSQLite(db, OCL, {
+      entriesTable: 'molecules',
+      poolSize,
+      batchSize,
+      searchCacheSize: 0,
+    });
+    molDB.migrate();
+    const insert = db.prepare(
+      'INSERT INTO molecules (id_code) VALUES (?) RETURNING id',
+    );
+    for (const smiles of ['C1CCCCC1', 'C1=CCCCC1', 'c1ccccc1', 'CCO']) {
+      const molecule = OCL.Molecule.fromSmiles(smiles);
+      const row = insert.get(molecule.getIDCode()) as { id: number };
+      molDB.insert(row.id, molecule);
+    }
+
+    // eslint-disable-next-line no-await-in-loop -- intentional: one pool at a time
+    const { results } = await molDB.search(molfile, {
+      mode: 'substructure',
+      format: 'molfile',
+    });
+    answers.push(results.map((result) => result.idCode));
+    // eslint-disable-next-line no-await-in-loop -- intentional: one pool at a time
+    await molDB.close();
+  }
+
+  // Cyclohexene only: the delocalized query bond does not match cyclohexane's
+  // single bond, and benzene's ring is aromatic throughout.
+  const cyclohexene = OCL.Molecule.fromSmiles('C1=CCCCC1').getIDCode();
+
+  expect(answers[0]).toStrictEqual([cyclohexene]);
+  expect(answers[1]).toStrictEqual(answers[0]);
+  expect(answers[2]).toStrictEqual(answers[0]);
+});

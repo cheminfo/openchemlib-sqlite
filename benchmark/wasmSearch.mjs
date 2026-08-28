@@ -1,8 +1,9 @@
-// End-to-end: the whole search, verified by `openchemlib` and by `openchemlib-search-wasm`.
+// End-to-end: does `search()` still return what `openchemlib` alone would return?
 //
-// wasmParity.mjs compares the two matchers on a flat list. This runs the real pipeline instead —
-// the clustered prescreen, the batching, `maxResults` cutting the scan short — and compares what
-// `search()` actually returns: the entry ids, in order, with their molecular weights.
+// The library verifies with `openchemlib-search-wasm`. This runs the real pipeline — the clustered
+// prescreen, the batching, `maxResults` cutting the scan short — against a reference that uses
+// nothing but `openchemlib`, and compares what comes back: the entry ids, in order, with their
+// molecular weights.
 //
 // Order is the point, not just membership. Candidates arrive lightest-first, so a `maxResults`
 // that stops the scan early keeps a *particular* set of matches; two implementations that agree on
@@ -15,7 +16,6 @@
 import { DatabaseSync } from 'node:sqlite';
 
 import * as OCL from 'openchemlib';
-import { substructureSearch } from 'openchemlib-search-wasm';
 
 import { MoleculesDBSQLite } from '../src/index.ts';
 import { prescreen } from '../src/utils/prescreen.ts';
@@ -48,8 +48,6 @@ const QUERIES = [
 // unlimited returns everything, a small cap returns only the lightest matches.
 const MAX_RESULTS = [Number.MAX_SAFE_INTEGER, 500, 25];
 
-const BATCH = 128; // the library's own verification batch size
-
 const db = new DatabaseSync(DB_PATH);
 db.exec('PRAGMA mmap_size=2147418112');
 db.exec('PRAGMA cache_size=-131072');
@@ -60,31 +58,19 @@ const indexed = db.prepare('SELECT COUNT(*) AS n FROM ocl_ss_index').get().n;
 console.log(`${indexed} indexed molecules\n`);
 
 /**
- * The same pipeline `runSubstructureSearch` runs, with the wasm matcher in place of the
- * `SSSearcher` verifier: the same prescreen, in the same order, batched the same way, stopping at
- * the same `maxResults`.
+ * The reference: the same pipeline `runSubstructureSearch` runs — the same prescreen, in the same
+ * order, stopping at the same `maxResults` — but matching with `openchemlib`'s own `SSSearcher`,
+ * one candidate at a time, against the query `Molecule` itself.
+ *
+ * Nothing here touches `openchemlib-search-wasm`, so agreement is real evidence rather than two
+ * spellings of one implementation.
  */
-function wasmSearch(mol, maxResults) {
+function oclSearch(mol, maxResults) {
   const state = { screened: 0, partial: false };
   const results = [];
-  const fragment = mol.getAllAtoms() === 0 ? '' : mol.getIDCode();
-  const emptyFragment = fragment === '';
-  const batch = [];
-  let stop = false;
-
-  const flush = () => {
-    if (batch.length === 0) return;
-    const matches = emptyFragment ? batch : substructureSearch(fragment, batch).matches;
-    for (const match of matches) {
-      results.push(match);
-      if (results.length >= maxResults) {
-        state.partial = true;
-        stop = true;
-        break;
-      }
-    }
-    batch.length = 0;
-  };
+  const emptyFragment = mol.getAllAtoms() === 0;
+  const searcher = new OCL.SSSearcher();
+  if (!emptyFragment) searcher.setFragment(mol);
 
   for (const candidate of prescreen(
     {
@@ -98,13 +84,21 @@ function wasmSearch(mol, maxResults) {
     },
     state,
   )) {
-    batch.push({ entryId: candidate.entryId, idCode: candidate.idCode, mw: candidate.mw });
-    if (batch.length >= Math.max(1, Math.min(BATCH, maxResults - results.length))) {
-      flush();
-      if (stop) break;
+    if (!emptyFragment) {
+      // `false` skips 2D-coordinate invention: a graph match never looks at coordinates.
+      searcher.setMolecule(OCL.Molecule.fromIDCode(candidate.idCode, false));
+      if (!searcher.isFragmentInMolecule()) continue;
+    }
+    results.push({
+      entryId: candidate.entryId,
+      idCode: candidate.idCode,
+      mw: candidate.mw,
+    });
+    if (results.length >= maxResults) {
+      state.partial = true;
+      break;
     }
   }
-  if (!stop) flush();
   return { results, total: results.length, screened: state.screened };
 }
 
@@ -122,7 +116,7 @@ function compare(a, b) {
 }
 
 let failures = 0;
-console.log('  query          maxResults   matches   screened      OCL       wasm   speedup   agree');
+console.log('  query          maxResults   matches   screened      OCL   library   speedup   agree');
 for (const [name, smiles] of QUERIES) {
   const mol = OCL.Molecule.fromSmiles(smiles);
   mol.setFragment(true);
@@ -137,22 +131,22 @@ for (const [name, smiles] of QUERIES) {
       limit: Number.MAX_SAFE_INTEGER,
     };
 
-    const oclStart = performance.now();
+    const libStart = performance.now();
     // eslint-disable-next-line no-await-in-loop -- intentional: one timed search at a time
-    const oclRun = await molDB.search(queryIdCode, options);
+    const libRun = await molDB.search(queryIdCode, options);
+    const libMs = performance.now() - libStart;
+
+    const oclStart = performance.now();
+    const oclRun = oclSearch(mol, maxResults);
     const oclMs = performance.now() - oclStart;
 
-    const wasmStart = performance.now();
-    const wasmRun = wasmSearch(mol, maxResults);
-    const wasmMs = performance.now() - wasmStart;
-
-    const difference = compare(oclRun.results, wasmRun.results);
+    const difference = compare(libRun.results, oclRun.results);
     if (difference) failures++;
     const cap = maxResults === Number.MAX_SAFE_INTEGER ? 'none' : String(maxResults);
     console.log(
-      `  ${name.padEnd(13)} ${cap.padStart(10)}   ${String(oclRun.total).padStart(7)}   ` +
-        `${String(oclRun.screened).padStart(8)}   ${oclMs.toFixed(0).padStart(6)}ms   ` +
-        `${wasmMs.toFixed(0).padStart(6)}ms   ${(oclMs / wasmMs).toFixed(2).padStart(6)}x   ` +
+      `  ${name.padEnd(13)} ${cap.padStart(10)}   ${String(libRun.total).padStart(7)}   ` +
+        `${String(libRun.screened).padStart(8)}   ${oclMs.toFixed(0).padStart(6)}ms   ` +
+        `${libMs.toFixed(0).padStart(6)}ms   ${(oclMs / libMs).toFixed(2).padStart(6)}x   ` +
         `${difference ? `NO (${difference})` : 'yes'}`,
     );
   }

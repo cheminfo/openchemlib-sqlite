@@ -3,7 +3,7 @@
 // Both halves of the search are checked against a real library of molecules:
 //
 //   1. the fingerprint  — wasm `getIndex` vs OCL `Molecule.getIndex()`, word for word
-//   2. the verification — wasm `substructureSearch` vs the OCL `SSSearcher` verifier,
+//   2. the verification — wasm `substructureSearch` vs an OCL `SSSearcher` loop,
 //      over every molecule, for every query
 //
 // A single differing word or position is reported with the idcode that produced it, so a
@@ -18,10 +18,7 @@
 import { readFileSync } from 'node:fs';
 
 import * as OCL from 'openchemlib';
-import { getIndex } from 'openchemlib-search-wasm';
-import { substructureSearch } from 'openchemlib-search-wasm';
-
-import { createVerifier } from '../src/utils/createVerifier.ts';
+import { getIndex, substructureSearch } from 'openchemlib-search-wasm';
 
 const FILE = process.argv[2];
 const COUNT = process.argv[3] ? Number(process.argv[3]) : Infinity;
@@ -110,10 +107,15 @@ for (const [name, smiles] of QUERIES) {
   query.setFragment(true);
   const queryIdCode = query.getIDCode();
 
-  const verify = createVerifier(OCL, query);
+  // The `openchemlib` reference, kept here rather than imported: the library no longer contains
+  // one, and this script exists to check it against something independent of it.
+  const searcher = new OCL.SSSearcher();
+  searcher.setFragment(query);
   const oclMatches = [];
   for (let i = 0; i < idCodes.length; i++) {
-    if (verify(idCodes[i])) oclMatches.push(i);
+    // `false` skips 2D-coordinate invention: a graph match never looks at coordinates.
+    searcher.setMolecule(OCL.Molecule.fromIDCode(idCodes[i], false));
+    if (searcher.isFragmentInMolecule()) oclMatches.push(i);
   }
 
   const wasmMatches = substructureSearch(queryIdCode, idCodes).indexes;

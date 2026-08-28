@@ -2,6 +2,7 @@ import { availableParallelism } from 'node:os';
 
 import { LRUCache } from 'lru-cache';
 import type * as OpenChemLib from 'openchemlib';
+import { getIndex, substructureSearch } from 'openchemlib-search-wasm';
 
 import type { SearchWorkerPool } from './SearchWorkerPool.ts';
 import { runMigrations } from './migrations.ts';
@@ -16,7 +17,6 @@ import type {
   SearchResponse,
   SearchResult,
 } from './types.ts';
-import { createVerifier } from './utils/createVerifier.ts';
 import { packSSIndex, unpackSSIndex } from './utils/packSSIndex.ts';
 import type { PrescreenState } from './utils/prescreen.ts';
 import { prescreen } from './utils/prescreen.ts';
@@ -170,15 +170,16 @@ export class MoleculesDBSQLite {
    * @param molecule - OCL Molecule instance or idCode string.
    */
   insert(entryId: number, molecule: string | OCLMolecule): void {
-    const mol =
-      typeof molecule === 'string'
-        ? // `false` skips 2D-coordinate invention: this molecule is only read
-          // for its fingerprint and its formula, neither of which uses
-          // coordinates, and inventing them is ~20x the cost of the parse.
-          this.#ocl.Molecule.fromIDCode(molecule, false)
-        : molecule;
-    const packed = packSSIndex(mol.getIndex());
     const { mwColumn, entriesTable, pkColumn } = this.#cfg;
+    // Building the fingerprint is ~99% of what indexing an entry costs, so from an idCode it is
+    // built by openchemlib-search-wasm (~920 µs) rather than openchemlib-js (~4491 µs). The words
+    // are the same, bit for bit, and a BigInt64Array over them is already the eight columns below.
+    // A Molecule the caller passed in cannot take that path without being re-encoded, so it keeps
+    // its own fingerprint.
+    const packed =
+      typeof molecule === 'string'
+        ? Array.from(new BigInt64Array(getIndex(molecule).buffer, 0, 8))
+        : packSSIndex(molecule.getIndex());
 
     if (mwColumn) {
       // Take mw from the entries table so the clustered order matches whatever
@@ -189,6 +190,12 @@ export class MoleculesDBSQLite {
         )
         .run(entryId, entryId, ...packed);
     } else {
+      // Only this branch needs the molecule itself. `false` skips 2D-coordinate invention: the
+      // molecular weight never reads a coordinate, and inventing them is ~20x the cost of the parse.
+      const mol =
+        typeof molecule === 'string'
+          ? this.#ocl.Molecule.fromIDCode(molecule, false)
+          : molecule;
       let mw = 0;
       try {
         mw = mol.getMolecularFormula().relativeWeight;
@@ -217,6 +224,12 @@ export class MoleculesDBSQLite {
    * verification over `poolSize` threads (see {@link MoleculesDBConfig}), so a
    * large scan is split across cores and the calling thread is only ever busy
    * for one batch at a time.
+   *
+   * **A substructure query is matched as its idCode**, on every path and at every
+   * `poolSize`, so one query always gives one answer. `getIDCode` does not carry
+   * every molfile bond query feature: a bond drawn "double or aromatic" comes back
+   * delocalized, and such a query then matches a narrower set than the `Molecule`
+   * itself would. SMILES and idCode queries are unaffected.
    * @param query - Query molecule as an OCL Molecule instance or as a string
    *   parsed according to options.format (ignored when a Molecule is passed).
    * @param options - Search options.
@@ -444,17 +457,24 @@ export class MoleculesDBSQLite {
     // Batches dispatched but not yet returned. `results` cannot reflect those, so
     // this is also how far the maxResults check below can lag behind reality.
     const pending = new Set<Promise<void>>();
-    let batch: PrescreenedBatch = { idCodes: [], entries: [] };
+    let batch: SearchResult[] = [];
     // Resolved once, before any batch is dispatched, so concurrent dispatches
     // can never race to create two pools.
     const pool = await this.#ensurePool();
 
-    const dispatch = (current: PrescreenedBatch): void => {
+    // Only the idCodes cross to the worker, and only positions come back: cloning
+    // the candidate objects both ways measures 11x the strings-and-positions
+    // round trip, which is 2% of a verification thrown away to save this map.
+    const dispatch = (current: SearchResult[]): void => {
+      const idCodes = new Array<string>(current.length);
+      for (let i = 0; i < current.length; i++) {
+        idCodes[i] = (current[i] as SearchResult).idCode;
+      }
       const settled: Promise<void> = pool
-        .verify(queryIdCode, current.idCodes)
+        .verify(queryIdCode, idCodes)
         .then((matches) => {
           for (const match of matches) {
-            const hit = current.entries[match];
+            const hit = current[match];
             if (hit) results.push(hit);
           }
         })
@@ -489,11 +509,10 @@ export class MoleculesDBSQLite {
         }
         continue;
       }
-      batch.idCodes.push(candidate.idCode);
-      batch.entries.push(result);
-      if (batch.idCodes.length >= effectiveBatch) {
+      batch.push(result);
+      if (batch.length >= effectiveBatch) {
         dispatch(batch);
-        batch = { idCodes: [], entries: [] };
+        batch = [];
         // Never run further than one batch per thread ahead of the results. Every
         // batch dispatched beyond that is work the maxResults check below cannot
         // yet see, so on a common fragment it is usually work thrown away. This
@@ -512,15 +531,15 @@ export class MoleculesDBSQLite {
         }
       }
     }
-    if (batch.idCodes.length > 0) {
+    if (batch.length > 0) {
       if (inFlight.length === 0) {
         // The whole scan fits in one batch: checking a handful of molecules
         // inline is cheaper than spawning a thread to do it.
-        const verify = createVerifier(this.#ocl, mol);
-        for (const [index, idCode] of batch.idCodes.entries()) {
-          const hit = batch.entries[index];
-          if (hit && verify(idCode)) results.push(hit);
-        }
+        results.push(
+          ...(emptyFragment
+            ? batch
+            : substructureSearch(mol.getIDCode(), batch).matches),
+        );
       } else {
         dispatch(batch);
       }
@@ -604,10 +623,4 @@ export class MoleculesDBSQLite {
     }
     return this.#pool;
   }
-}
-
-/** Candidates buffered on the calling thread until they fill one batch. */
-interface PrescreenedBatch {
-  idCodes: string[];
-  entries: SearchResult[];
 }
