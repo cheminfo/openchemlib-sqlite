@@ -226,10 +226,11 @@ export class MoleculesDBSQLite {
    * for one batch at a time.
    *
    * **A substructure query is matched as its idCode**, on every path and at every
-   * `poolSize`, so one query always gives one answer. `getIDCode` does not carry
-   * every molfile bond query feature: a bond drawn "double or aromatic" comes back
-   * delocalized, and such a query then matches a narrower set than the `Molecule`
-   * itself would. SMILES and idCode queries are unaffected.
+   * `poolSize`, so one query always gives one answer — and for a molfile bond query
+   * feature it is the right one. Setting the fragment flag after parsing a molfile
+   * leaves the drawn bond order allowed alongside the query alternatives, so a bond
+   * drawn "double or aromatic" would match a single bond too; encoding the query to
+   * an idCode normalizes it away.
    * @param query - Query molecule as an OCL Molecule instance or as a string
    *   parsed according to options.format (ignored when a Molecule is passed).
    * @param options - Search options.

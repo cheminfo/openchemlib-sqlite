@@ -194,8 +194,9 @@ test('exact search on an idCode matches without re-encoding the query', async ()
 
 test('a molfile bond-query gives one answer at every poolSize and batchSize', async () => {
   // A ring where one bond is drawn "double or aromatic" (molfile bond type 7).
-  // `getIDCode` delocalizes it, so matching the query as a Molecule and matching
-  // it as an idCode disagree — which is exactly why every path must pick one.
+  // Matching the query as a Molecule also matches a single bond there, because the
+  // fragment flag is set after the molfile is parsed; the idCode encoding drops the
+  // drawn order and leaves only the alternatives, which is what type 7 means.
   const molfile = `
   Test
 
@@ -252,8 +253,9 @@ M  END`;
     await molDB.close();
   }
 
-  // Cyclohexene only: the delocalized query bond does not match cyclohexane's
-  // single bond, and benzene's ring is aromatic throughout.
+  // Cyclohexene only: cyclohexane's bond is single, which "double or aromatic"
+  // excludes, and benzene's other five bonds are aromatic where the query draws
+  // them single.
   const cyclohexene = OCL.Molecule.fromSmiles('C1=CCCCC1').getIDCode();
 
   expect(answers[0]).toStrictEqual([cyclohexene]);
