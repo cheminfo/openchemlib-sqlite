@@ -1,8 +1,11 @@
 import type * as OpenChemLib from 'openchemlib';
 
 import {
+  NO_STEREO_HASH_TABLE,
+  NO_STEREO_TAUTOMER_HASH_TABLE,
   VERSION_TABLE,
   buildEntryIndexSql,
+  buildHashTableSql,
   buildSchemaSqlV1,
   buildSchemaSqlV2,
   buildVersionTableSql,
@@ -59,6 +62,18 @@ export const MIGRATIONS: Migration[] = [
     version: 2,
     description: 'cluster ocl_ss_index by molecular weight',
     up: upgradeToMwClustered,
+  },
+  {
+    version: 3,
+    description: 'create the structure hash tables',
+    up: ({ db, entriesTable, pkColumn }) => {
+      // Only the tables: filling them is minutes to hours of canonization, which
+      // cannot run inside a migration's transaction. `backfillHashes()` does
+      // that, chunked and resumable, whenever the caller chooses.
+      const config = { entriesTable, pkColumn };
+      db.exec(buildHashTableSql(config, NO_STEREO_HASH_TABLE));
+      db.exec(buildHashTableSql(config, NO_STEREO_TAUTOMER_HASH_TABLE));
+    },
   },
 ];
 

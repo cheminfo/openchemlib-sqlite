@@ -56,3 +56,21 @@ node --experimental-strip-types benchmark/wasmSearch.mjs bench.sqlite
 `wasmSearch` runs the real pipeline — clustered prescreen, batching, `maxResults`
 cutting the scan short — and compares the entry ids in order. Both exit non-zero
 on any disagreement, so they can be run as a gate.
+
+## What do the structure hashes cost?
+
+`exactNoStereo` and `exactNoStereoTautomer` match on hashes that have to be built
+for every entry first, and the two are nothing alike: the no-stereo hash costs
+~74 µs a molecule, the tautomer one averages ~22 ms and its slowest take seconds.
+That ~300x gap is why `backfillHashes()` runs them as separate passes with the
+cheap one first, and the tautomer tail is why it caps each molecule at 100 ms.
+
+```sh
+node --experimental-strip-types benchmark/structureHash.mjs idcodes.txt 3000
+```
+
+It prints both hashes' per-molecule distributions, then what several caps give up
+and what they save — including the ~50 ms of destroying a worker and starting a
+fresh one, which is the only way to stop a canonization already running. It also
+checks that hashing one molecule at a time costs the same as a batched call,
+which is what makes a per-molecule cap affordable.

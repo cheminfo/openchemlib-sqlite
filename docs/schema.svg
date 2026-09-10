@@ -1,0 +1,200 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1000" height="760" viewBox="0 0 1000 760" font-family="ui-sans-serif, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif">
+  <title>openchemlib-sqlite — the tables migrate() adds</title>
+  <desc>Four tables created by migrate(), alongside the entries table the caller owns.</desc>
+
+  <defs>
+    <style>
+      .h    { font-size: 19px; font-weight: 700; fill: #16202c; }
+      .sub  { font-size: 12.5px; fill: #5b6875; }
+      .tbl  { font-size: 13.5px; font-weight: 700; fill: #16202c; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+      .col  { font-size: 12px; fill: #16202c; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+      .type { font-size: 11px; fill: #8a96a3; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+      .note { font-size: 11px; fill: #5b6875; }
+      .key  { font-size: 9.5px; font-weight: 700; fill: #ffffff; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+      .lbl  { font-size: 10.5px; fill: #5b6875; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+      .badge{ font-size: 10.5px; font-weight: 600; fill: #0b5754; }
+    </style>
+    <marker id="fk" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0 0 L10 5 L0 10 z" fill="#8a96a3"/>
+    </marker>
+  </defs>
+
+  <rect width="1000" height="760" fill="#ffffff"/>
+
+  <text x="32" y="42" class="h">openchemlib-sqlite — the tables <tspan font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace">migrate()</tspan> adds</text>
+  <text x="32" y="64" class="sub">Four tables, all keyed to the entries table you own. Your table needs an idCode and nothing else.</text>
+
+  <!-- ============ entries table (caller-owned) ============ -->
+  <g>
+    <rect x="32" y="96" width="264" height="126" rx="10" fill="#f5f7fa" stroke="#c3cad3" stroke-width="1.5" stroke-dasharray="6 4"/>
+    <rect x="32" y="96" width="264" height="34" rx="10" fill="#e8ecf1"/>
+    <rect x="32" y="120" width="264" height="10" fill="#e8ecf1"/>
+    <text x="48" y="118" class="tbl">molecules</text>
+    <text x="280" y="118" class="lbl" text-anchor="end">yours</text>
+
+    <rect x="48" y="142" width="22" height="13" rx="3" fill="#5b6875"/>
+    <text x="59" y="152" class="key" text-anchor="middle">PK</text>
+    <text x="78" y="152" class="col">id</text>
+    <text x="280" y="152" class="type" text-anchor="end">INTEGER</text>
+
+    <text x="78" y="176" class="col">id_code</text>
+    <text x="280" y="176" class="type" text-anchor="end">TEXT</text>
+
+    <text x="78" y="200" class="col" fill="#8a96a3">mw</text>
+    <text x="280" y="200" class="type" text-anchor="end">REAL · optional</text>
+
+    <text x="48" y="244" class="note"><tspan font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace">id_code</tspan> is all that is required. You no</text>
+    <text x="48" y="260" class="note">longer store a stereo-stripped idCode —</text>
+    <text x="48" y="276" class="note">the two hashes below replace it.</text>
+  </g>
+
+  <!-- ============ ocl_ss_index ============ -->
+  <g>
+    <rect x="392" y="96" width="300" height="322" rx="10" fill="#ffffff" stroke="#0b5754" stroke-width="1.5"/>
+    <rect x="392" y="96" width="300" height="34" rx="10" fill="#0b5754"/>
+    <rect x="392" y="120" width="300" height="10" fill="#0b5754"/>
+    <text x="408" y="118" class="tbl" fill="#ffffff">ocl_ss_index</text>
+
+    <rect x="408" y="142" width="22" height="13" rx="3" fill="#0b5754"/>
+    <text x="419" y="152" class="key" text-anchor="middle">PK</text>
+    <text x="438" y="152" class="col">mw</text>
+    <text x="676" y="152" class="type" text-anchor="end">REAL NOT NULL</text>
+
+    <rect x="408" y="166" width="22" height="13" rx="3" fill="#0b5754"/>
+    <text x="419" y="176" class="key" text-anchor="middle">PK</text>
+    <rect x="434" y="166" width="22" height="13" rx="3" fill="#8a96a3"/>
+    <text x="445" y="176" class="key" text-anchor="middle">FK</text>
+    <text x="464" y="176" class="col">entry_id</text>
+    <text x="676" y="176" class="type" text-anchor="end">INTEGER NOT NULL</text>
+
+    <line x1="408" y1="190" x2="676" y2="190" stroke="#dfe3e8"/>
+
+    <text x="438" y="212" class="col">ss_index0</text>
+    <text x="676" y="212" class="type" text-anchor="end">INTEGER NOT NULL</text>
+    <text x="438" y="234" class="col">ss_index1</text>
+    <text x="676" y="234" class="type" text-anchor="end">INTEGER NOT NULL</text>
+    <text x="438" y="256" class="col" fill="#8a96a3">⋮</text>
+    <text x="438" y="278" class="col">ss_index7</text>
+    <text x="676" y="278" class="type" text-anchor="end">INTEGER NOT NULL</text>
+
+    <line x1="408" y1="296" x2="676" y2="296" stroke="#dfe3e8"/>
+
+    <text x="408" y="316" class="badge">WITHOUT ROWID · PRIMARY KEY (mw, entry_id)</text>
+    <text x="408" y="336" class="note">Rows are stored physically lightest-first, so a</text>
+    <text x="408" y="352" class="note">substructure prescreen scans in mw order and an</text>
+    <text x="408" y="368" class="note">early stop keeps the smallest superstructures.</text>
+    <text x="408" y="392" class="note">The 512-bit OCL fingerprint, packed as eight</text>
+    <text x="408" y="408" class="note">signed 64-bit ints for SQL bitwise prefiltering.</text>
+  </g>
+
+  <g>
+    <rect x="392" y="432" width="300" height="34" rx="8" fill="#f5f7fa" stroke="#dfe3e8"/>
+    <text x="408" y="453" class="lbl">UNIQUE INDEX idx_ocl_ss_entry (entry_id)</text>
+  </g>
+
+  <!-- ============ the two hash tables ============ -->
+  <g>
+    <rect x="392" y="500" width="300" height="106" rx="10" fill="#ffffff" stroke="#1c6e42" stroke-width="1.5"/>
+    <rect x="392" y="500" width="300" height="34" rx="10" fill="#1c6e42"/>
+    <rect x="392" y="524" width="300" height="10" fill="#1c6e42"/>
+    <text x="408" y="522" class="tbl" fill="#ffffff">ocl_no_stereo_hash</text>
+
+    <rect x="408" y="546" width="22" height="13" rx="3" fill="#1c6e42"/>
+    <text x="419" y="556" class="key" text-anchor="middle">PK</text>
+    <rect x="434" y="546" width="22" height="13" rx="3" fill="#8a96a3"/>
+    <text x="445" y="556" class="key" text-anchor="middle">FK</text>
+    <text x="464" y="556" class="col">entry_id</text>
+    <text x="676" y="556" class="type" text-anchor="end">INTEGER</text>
+
+    <text x="438" y="580" class="col">hash</text>
+    <text x="676" y="580" class="type" text-anchor="end">INTEGER  NULL</text>
+
+    <line x1="408" y1="592" x2="676" y2="592" stroke="#dfe3e8"/>
+    <text x="408" y="601" class="note" font-size="10.5"><tspan font-weight="700" fill="#1c6e42">pass 1</tspan> · ~74 µs a molecule</text>
+  </g>
+
+  <g>
+    <rect x="392" y="622" width="300" height="106" rx="10" fill="#ffffff" stroke="#b45309" stroke-width="1.5"/>
+    <rect x="392" y="622" width="300" height="34" rx="10" fill="#b45309"/>
+    <rect x="392" y="646" width="300" height="10" fill="#b45309"/>
+    <text x="408" y="644" class="tbl" fill="#ffffff">ocl_no_stereo_tautomer_hash</text>
+
+    <rect x="408" y="668" width="22" height="13" rx="3" fill="#b45309"/>
+    <text x="419" y="678" class="key" text-anchor="middle">PK</text>
+    <rect x="434" y="668" width="22" height="13" rx="3" fill="#8a96a3"/>
+    <text x="445" y="678" class="key" text-anchor="middle">FK</text>
+    <text x="464" y="678" class="col">entry_id</text>
+    <text x="676" y="678" class="type" text-anchor="end">INTEGER</text>
+
+    <text x="438" y="702" class="col">hash</text>
+    <text x="676" y="702" class="type" text-anchor="end">INTEGER  NULL</text>
+
+    <line x1="408" y1="714" x2="676" y2="714" stroke="#dfe3e8"/>
+    <text x="408" y="723" class="note" font-size="10.5"><tspan font-weight="700" fill="#b45309">pass 2</tspan> · ~22 ms a molecule, capped at 100 ms</text>
+  </g>
+
+  <!-- ============ ocl_ss_schema ============ -->
+  <g>
+    <rect x="756" y="96" width="212" height="186" rx="10" fill="#ffffff" stroke="#5b6875" stroke-width="1.5"/>
+    <rect x="756" y="96" width="212" height="34" rx="10" fill="#5b6875"/>
+    <rect x="756" y="120" width="212" height="10" fill="#5b6875"/>
+    <text x="772" y="118" class="tbl" fill="#ffffff">ocl_ss_schema</text>
+
+    <text x="772" y="152" class="col">version</text>
+    <text x="952" y="152" class="type" text-anchor="end">INTEGER</text>
+    <text x="772" y="176" class="col">applied_at</text>
+    <text x="952" y="176" class="type" text-anchor="end">TEXT</text>
+
+    <line x1="772" y1="192" x2="952" y2="192" stroke="#dfe3e8"/>
+    <text x="772" y="212" class="note">Which version this database</text>
+    <text x="772" y="228" class="note">is at, so migrate() applies</text>
+    <text x="772" y="244" class="note">only what is missing.</text>
+  </g>
+
+  <!-- ============ backfill order ============ -->
+  <g>
+    <text x="756" y="330" class="sub" font-weight="700" fill="#16202c">backfillHashes()</text>
+    <text x="756" y="350" class="note">Two passes. The cheap hash</text>
+    <text x="756" y="366" class="note">finishes first, so its mode is</text>
+    <text x="756" y="382" class="note">fully searchable while the</text>
+    <text x="756" y="398" class="note">expensive one is still running.</text>
+
+    <line x1="768" y1="424" x2="768" y2="486" stroke="#dfe3e8" stroke-width="2"/>
+    <circle cx="768" cy="430" r="6" fill="#1c6e42"/>
+    <text x="788" y="434" class="note" font-weight="700">1 · no-stereo</text>
+    <text x="788" y="450" class="note">~30 s per 400k</text>
+
+    <circle cx="768" cy="480" r="6" fill="#b45309"/>
+    <text x="788" y="484" class="note" font-weight="700">2 · no-stereo tautomer</text>
+    <text x="788" y="500" class="note">~21 min per 400k, capped</text>
+  </g>
+
+  <!-- ============ the three states of a hash row ============ -->
+  <g>
+    <rect x="32" y="326" width="264" height="180" rx="10" fill="#fdf8f1" stroke="#e8d5b8"/>
+    <text x="48" y="350" class="sub" font-weight="700" fill="#8a5a12">What a hash row means</text>
+
+    <circle cx="54" cy="374" r="4" fill="#b45309"/>
+    <text x="68" y="378" class="note" font-weight="700">row present, hash set</text>
+    <text x="68" y="394" class="note">the hash</text>
+
+    <circle cx="54" cy="418" r="4" fill="#b45309"/>
+    <text x="68" y="422" class="note" font-weight="700">row present, hash NULL</text>
+    <text x="68" y="438" class="note">gave up — past the cap, or OCL</text>
+    <text x="68" y="452" class="note">could not hash it. Never retried.</text>
+
+    <circle cx="54" cy="476" r="4" fill="#c3cad3"/>
+    <text x="68" y="480" class="note" font-weight="700">no row at all</text>
+    <text x="68" y="496" class="note">not hashed yet — the resume point</text>
+  </g>
+
+  <text x="32" y="534" class="note">Presence, not value, marks an entry done —</text>
+  <text x="32" y="550" class="note">which is what makes the backfill resumable,</text>
+  <text x="32" y="566" class="note">and why each hash gets its own table.</text>
+
+  <!-- ============ FK edges ============ -->
+  <path d="M296 176 C 344 176, 344 176, 392 176" fill="none" stroke="#8a96a3" stroke-width="1.5" marker-end="url(#fk)"/>
+  <path d="M296 176 C 326 176, 340 200, 340 556 L 392 556" fill="none" stroke="#8a96a3" stroke-width="1.5" marker-end="url(#fk)"/>
+  <path d="M340 556 C 340 640, 340 678, 392 678" fill="none" stroke="#8a96a3" stroke-width="1.5" marker-end="url(#fk)"/>
+  <text x="310" y="168" class="lbl">FK</text>
+</svg>

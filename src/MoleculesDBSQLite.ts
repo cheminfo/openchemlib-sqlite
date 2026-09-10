@@ -6,9 +6,15 @@ import { getIndex, substructureSearch } from 'openchemlib-search-wasm';
 
 import type { SearchWorkerPool } from './SearchWorkerPool.ts';
 import { runMigrations } from './migrations.ts';
+import {
+  NO_STEREO_HASH_TABLE,
+  NO_STEREO_TAUTOMER_HASH_TABLE,
+} from './schema.ts';
 // Type-only: erased at build, so node:worker_threads is never pulled into the
 // synchronous/browser path. The pool is loaded lazily via dynamic import.
 import type {
+  BackfillOptions,
+  BackfillResult,
   MigrateOptions,
   MoleculesDBConfig,
   SQLiteDatabase,
@@ -17,11 +23,14 @@ import type {
   SearchResponse,
   SearchResult,
 } from './types.ts';
+import { backfillHashes } from './utils/backfillHashes.ts';
 import { packSSIndex, unpackSSIndex } from './utils/packSSIndex.ts';
 import type { PrescreenState } from './utils/prescreen.ts';
 import { prescreen } from './utils/prescreen.ts';
 import { runSubstructureSearch } from './utils/runSubstructureSearch.ts';
 import { parseMolecule, rowToResult } from './utils/searchHelpers.ts';
+import type { HashKind } from './utils/structureHash.ts';
+import { structureHash } from './utils/structureHash.ts';
 
 type OCLLibrary = typeof OpenChemLib;
 type OCLMolecule = InstanceType<OCLLibrary['Molecule']>;
@@ -30,7 +39,6 @@ interface ResolvedConfig {
   entriesTable: string;
   pkColumn: string;
   idCodeColumn: string;
-  idCodeNoStereoColumn: string | null;
   mwColumn: string | null;
   poolSize: number;
   batchSize: number;
@@ -42,12 +50,27 @@ function resolveConfig(config: MoleculesDBConfig): ResolvedConfig {
     entriesTable: config.entriesTable,
     pkColumn: config.pkColumn ?? 'id',
     idCodeColumn: config.idCodeColumn ?? 'id_code',
-    idCodeNoStereoColumn: config.idCodeNoStereoColumn ?? null,
     mwColumn: config.mwColumn ?? null,
     poolSize: config.poolSize ?? availableParallelism(),
     batchSize: config.batchSize ?? 128,
     searchCacheSize: config.searchCacheSize ?? 100,
   };
+}
+
+/** Everything a hash lookup needs beyond the hash itself. */
+interface HashLookup {
+  /** The caller's entries table. */
+  entriesTable: string;
+  /** Its primary key column. */
+  pkColumn: string;
+  /** The JOIN restricting the search to a candidates subquery, or ''. */
+  candidateJoin: string;
+  /** Values bound by that subquery, bound before the hash. */
+  candidateParams: unknown[];
+  /** Result offset. */
+  from: number;
+  /** Maximum results to return. */
+  limit: number;
 }
 
 /** A cached full (unsliced) structure-scan result, paginated on each hit. */
@@ -253,8 +276,7 @@ export class MoleculesDBSQLite {
       candidates,
     } = options ?? {};
 
-    const { entriesTable, idCodeColumn, idCodeNoStereoColumn, pkColumn } =
-      this.#cfg;
+    const { entriesTable, idCodeColumn, pkColumn } = this.#cfg;
     const { Molecule } = this.#ocl;
 
     // Restricting the entries table to the candidate subquery. Every mode
@@ -272,6 +294,14 @@ export class MoleculesDBSQLite {
       typeof query === 'string'
         ? parseMolecule(Molecule, query, format, ensureCoordinates)
         : query;
+    // Both hash modes key on the query's idCode. An idCode query is used as the
+    // string it already is: re-encoding it would invent coordinates for nothing
+    // and is not even lossless. No coordinates otherwise — both hashes are
+    // graph-derived, and inventing them is ~20x the parse.
+    const queryIdCode = (): string =>
+      typeof query === 'string' && format === 'idCode'
+        ? query
+        : withFragment(parse(false), false, fromInstance).getIDCode();
 
     switch (mode) {
       case 'exact': {
@@ -294,33 +324,35 @@ export class MoleculesDBSQLite {
         };
       }
 
-      case 'exactNoStereo': {
-        if (!idCodeNoStereoColumn) {
-          throw new Error(
-            'exactNoStereo search requires idCodeNoStereoColumn to be configured',
-          );
-        }
-        // This mode re-encodes the query with getIDCode(), so it needs
-        // coordinates: without them OCL drops the stereo descriptors and the
-        // re-encoded idCode no longer matches what was stored.
-        const baseMol = parse(true);
-        // stripStereoInformation always mutates, so always copy if fromInstance
-        const mol = fromInstance ? baseMol.getCompactCopy() : baseMol;
-        mol.setFragment(false);
-        mol.stripStereoInformation();
-        const idCodeNoStereo = mol.getIDCode();
-        const rows = this.#db
-          .prepare(
-            `SELECT ${this.#selectCols} FROM ${entriesTable} e ${this.#ssJoin} ${candidateJoin} WHERE e.${idCodeNoStereoColumn} = ?`,
-          )
-          .all(...candidateParams, idCodeNoStereo) as Array<
-          Record<string, unknown>
-        >;
-        return {
-          results: rows.slice(from, from + limit).map(rowToResult),
-          total: rows.length,
-        };
-      }
+      case 'exactNoStereo':
+        return this.#searchByHash(
+          'noStereo',
+          NO_STEREO_HASH_TABLE,
+          queryIdCode(),
+          {
+            entriesTable,
+            pkColumn,
+            candidateJoin,
+            candidateParams,
+            from,
+            limit,
+          },
+        );
+
+      case 'exactNoStereoTautomer':
+        return this.#searchByHash(
+          'noStereoTautomer',
+          NO_STEREO_TAUTOMER_HASH_TABLE,
+          queryIdCode(),
+          {
+            entriesTable,
+            pkColumn,
+            candidateJoin,
+            candidateParams,
+            from,
+            limit,
+          },
+        );
 
       case 'substructure': {
         // No coordinates: the fingerprint prefilter and the graph match are both
@@ -378,6 +410,76 @@ export class MoleculesDBSQLite {
       default:
         throw new Error(`Unknown search mode: ${String(mode)}`);
     }
+  }
+
+  /**
+   * Compute every structure hash that is missing, so `exactNoStereo` and
+   * `exactNoStereoTautomer` can find those entries.
+   *
+   * **Run this in the background, not during startup.** It runs two passes, and
+   * the cheap one goes first on purpose: the no-stereo hash costs ~74 µs a
+   * molecule where the tautomer hash averages ~22 ms, so `exactNoStereo` becomes
+   * completely searchable in well under a minute on a corpus where
+   * `exactNoStereoTautomer` is still hours away. A pass finishes before the next
+   * starts, so neither mode is left half-answered for the length of the run.
+   *
+   * It is **resumable and interruptible**. Work is committed a chunk at a time
+   * and an entry is marked done by the presence of its row, so an interrupted
+   * run loses at most one chunk and the next call continues from there — nothing
+   * is ever recomputed. Pass `limit` to bound each pass, or `signal` to stop at
+   * the next chunk boundary.
+   *
+   * A molecule the cap stops is stored as NULL, and so is one OpenChemLib cannot
+   * hash. Both mean the same thing to a search — this entry has no such hash —
+   * and neither is retried by a later run.
+   * @param options - Concurrency, the per-molecule cap, and progress reporting.
+   * @returns One result per pass, plus the totals.
+   * @example
+   * ```js
+   * // after migrate(), off the startup path
+   * const result = await molDB.backfillHashes({
+   *   onProgress: (progress) => logger.info(progress, 'hash backfill'),
+   * });
+   * ```
+   */
+  async backfillHashes(options: BackfillOptions = {}): Promise<BackfillResult> {
+    const { entriesTable, pkColumn, idCodeColumn, poolSize } = this.#cfg;
+    const result = await backfillHashes(
+      { db: this.#db, entriesTable, pkColumn, idCodeColumn },
+      { poolSize, ...options },
+    );
+    // Entries that had no hash can now match, so anything cached is stale.
+    if (result.hashed > 0) this.#searchCache?.clear();
+    return result;
+  }
+
+  /**
+   * Look entries up by one of the two structure hashes.
+   * @param kind - Which hash to key on.
+   * @param table - The table holding it.
+   * @param idCode - The query, as an idCode.
+   * @param sql - Where to look and how much to return.
+   * @returns The matching entries.
+   */
+  #searchByHash(
+    kind: HashKind,
+    table: string,
+    idCode: string,
+    sql: HashLookup,
+  ): SearchResponse {
+    // A query OCL cannot hash matches nothing, rather than raising the opaque
+    // error the canonizer throws on a malformed idCode.
+    const hash = structureHash(kind, idCode);
+    if (hash === null) return { results: [], total: 0 };
+    const rows = this.#db
+      .prepare(
+        `SELECT ${this.#selectCols} FROM ${sql.entriesTable} e ${this.#ssJoin} ${sql.candidateJoin} JOIN ${table} h ON h.entry_id = e.${sql.pkColumn} WHERE h.hash = ?`,
+      )
+      .all(...sql.candidateParams, hash) as Array<Record<string, unknown>>;
+    return {
+      results: rows.slice(sql.from, sql.from + sql.limit).map(rowToResult),
+      total: rows.length,
+    };
   }
 
   /**

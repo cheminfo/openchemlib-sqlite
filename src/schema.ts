@@ -92,3 +92,44 @@ export function buildEntryIndexSql(
 ): string {
   return `CREATE UNIQUE INDEX IF NOT EXISTS ${name} ON ${table} (entry_id);`;
 }
+
+/** Table holding each entry's no-stereo hash. */
+export const NO_STEREO_HASH_TABLE = 'ocl_no_stereo_hash';
+
+/** Table holding each entry's no-stereo tautomer hash. */
+export const NO_STEREO_TAUTOMER_HASH_TABLE = 'ocl_no_stereo_tautomer_hash';
+
+/**
+ * Build one of the two structure-hash tables. Both have the same shape.
+ *
+ * A row's **presence** is what records that an entry has been hashed, which is
+ * what makes a backfill resumable: `hash IS NULL` means OpenChemLib produced no
+ * hash for that molecule — it would not parse, could not be canonized, or ran
+ * past the cap — while *no row at all* means it has not been tried yet. Storing
+ * the two states in one nullable column would make them indistinguishable, and
+ * a resumed backfill would either redo the give-ups forever or skip entries it
+ * never actually hashed.
+ *
+ * The two hashes get a table each rather than two columns of one, because they
+ * are filled by separate passes: the no-stereo hash costs ~74 µs and the
+ * no-stereo tautomer hash averages ~22 ms, so the cheap one runs to completion
+ * first and its table is complete while the expensive one is still filling.
+ * Sharing a table would need a second "attempted" marker per hash to say the
+ * same thing a row's presence already says.
+ *
+ * The hash is OpenChemLib's own — `CanonizerUtil.getNoStereoHash` or
+ * `getNoStereoTautomerHash` — a signed 64-bit integer, which is exactly what an
+ * SQLite INTEGER column stores and indexes, so nothing is converted either way.
+ * @param config - Entries table name and primary key column name.
+ * @param table - Which hash table to create.
+ * @returns SQL ready for db.exec().
+ */
+export function buildHashTableSql(config: SchemaConfig, table: string): string {
+  return `
+CREATE TABLE IF NOT EXISTS ${table} (
+  entry_id INTEGER PRIMARY KEY REFERENCES ${config.entriesTable}(${config.pkColumn}),
+  hash     INTEGER
+);
+CREATE INDEX IF NOT EXISTS idx_${table} ON ${table} (hash) WHERE hash IS NOT NULL;
+`;
+}

@@ -4,7 +4,7 @@
 [![Node.js CI](https://github.com/cheminfo/openchemlib-sqlite/workflows/Node.js%20CI/badge.svg)](https://github.com/cheminfo/openchemlib-sqlite/actions/workflows/nodejs.yml)
 
 SQLite-backed molecular search using [OCL (openchemlib-js)](https://github.com/cheminfo/openchemlib-js).
-Adds substructure, exact, and similarity search on top of an **existing** molecules table that you own.
+Adds substructure, exact, tautomer-insensitive, and similarity search on top of an **existing** molecules table that you own.
 
 ## Requirements
 
@@ -23,9 +23,10 @@ npm install openchemlib-sqlite openchemlib
 
 - a primary key column (default: `id`)
 - an `id_code` column holding the OCL idCode string (default column name: `id_code`)
-- optionally an `id_code_no_stereo` column for stereo-insensitive exact search
 
-`migrate()` creates an `ocl_ss_index` table storing the 512-bit fingerprint for each indexed entry, referencing the entries table by its primary key, plus an `ocl_ss_schema` table recording the schema version. Call it on every startup: it applies whatever a database is missing and upgrades one written by an older release in place — see [Upgrading](#upgrading).
+Nothing else: the stereo- and tautomer-insensitive keys are this package's business, not yours — it computes and stores them itself (see [Structure hashes](#structure-hashes)).
+
+`migrate()` creates an `ocl_ss_index` table storing the 512-bit fingerprint for each indexed entry, referencing the entries table by its primary key, the two structure-hash tables, plus an `ocl_ss_schema` table recording the schema version. Call it on every startup: it applies whatever a database is missing and upgrades one written by an older release in place — see [Upgrading](#upgrading).
 
 ## Setup
 
@@ -39,16 +40,14 @@ const db = new DatabaseSync('molecules.db');
 // Your molecules table (already exists, or create it here):
 db.exec(`
   CREATE TABLE IF NOT EXISTS molecules (
-    id                INTEGER PRIMARY KEY,
-    id_code           TEXT NOT NULL UNIQUE,
-    id_code_no_stereo TEXT NOT NULL
+    id      INTEGER PRIMARY KEY,
+    id_code TEXT NOT NULL UNIQUE
   )
 `);
 
 // Point the library at it:
 const molDB = new MoleculesDBSQLite(db, OCL, {
   entriesTable: 'molecules',
-  idCodeNoStereoColumn: 'id_code_no_stereo', // omit if not needed
 });
 molDB.migrate(); // creates or upgrades ocl_ss_index (idempotent)
 ```
@@ -60,7 +59,6 @@ molDB.migrate(); // creates or upgrades ocl_ss_index (idempotent)
 | `entriesTable`         | _(required)_ | Name of the existing molecules table                                                                         |
 | `pkColumn`             | `'id'`       | Primary key column name                                                                                      |
 | `idCodeColumn`         | `'id_code'`  | Column holding the OCL idCode                                                                                |
-| `idCodeNoStereoColumn` | `null`       | Column for stereo-stripped idCode; required for `exactNoStereo` mode                                         |
 | `mwColumn`             | `null`       | Column holding the molecular weight (REAL); enables automatic mass-difference sorting in substructure search |
 
 ## Inserting molecules
@@ -87,14 +85,9 @@ if (!mol) throw new Error('Could not parse molecule');
 
 const idCode = mol.getIDCode();
 
-// Compute stereo-stripped idCode without mutating the original
-const molNoStereo = mol.getCompactCopy();
-molNoStereo.stripStereoInformation();
-const idCodeNoStereo = molNoStereo.getIDCode();
-
 const { lastInsertRowid } = db
-  .prepare('INSERT INTO molecules (id_code, id_code_no_stereo) VALUES (?, ?)')
-  .run(idCode, idCodeNoStereo);
+  .prepare('INSERT INTO molecules (id_code) VALUES (?)')
+  .run(idCode);
 
 // Index the molecule — pass the Molecule instance or an idCode string
 molDB.insert(Number(lastInsertRowid), mol);
@@ -135,7 +128,7 @@ const { results } = molDB.search(
 
 ### Exact match ignoring stereocenters
 
-Requires `idCodeNoStereoColumn` to be configured.
+Requires the hashes to have been built — see [Structure hashes](#structure-hashes).
 
 ```js
 const { results } = molDB.search('NC(C)C(=O)O', {
@@ -144,6 +137,25 @@ const { results } = molDB.search('NC(C)C(=O)O', {
 });
 // returns both L-alanine and D-alanine
 ```
+
+### Exact match ignoring stereocenters and tautomerism
+
+Requires the hashes to have been built — see [Structure hashes](#structure-hashes).
+
+```js
+const { results } = molDB.search('CC(=O)CC(=O)C', {
+  mode: 'exactNoStereoTautomer',
+  format: 'smiles',
+});
+// finds pentane-2,4-dione whether it was stored as the keto or the enol form
+```
+
+A compound keys the same whether it was drawn as the keto or the enol form and
+whether or not its stereo centres were assigned, so this is the mode to use when
+"the same molecule" means the same constitution rather than the same drawing.
+
+An entry whose hash could not be computed — see the cap below — has NULL stored
+and is never returned by this mode. So is a query OCL cannot hash.
 
 ### Substructure search
 
@@ -276,19 +288,121 @@ rebuild it, materialising every candidate before the first row comes out. Forcin
 the clustered scan keeps a restricted search streaming and lightest-first exactly
 like an unrestricted one (24 ms vs 70 ms on the benzene scan above).
 
+## Structure hashes
+
+`exactNoStereo` and `exactNoStereoTautomer` match on OpenChemLib's own 64-bit
+structure hashes — `CanonizerUtil.getNoStereoHash` and
+`getNoStereoTautomerHash`. **You never compute or store these**: this package
+owns both, in two tables of its own. `migrate()` creates them but leaves them
+**empty**, because filling them is a long-running job you start yourself:
+
+```js
+molDB.migrate(); // instant: creates the two hash tables
+
+// Off the startup path — this is minutes, not milliseconds.
+const result = await molDB.backfillHashes({
+  onProgress: (progress) => logger.info(progress, 'hash backfill'),
+});
+// { passes: [{ kind: 'noStereo', … }, { kind: 'noStereoTautomer', … }], … }
+```
+
+Until a pass has run, its mode simply returns nothing. Nothing else breaks.
+
+### The cheap hash is computed first, on purpose
+
+The two hashes are nothing alike in cost. Measured over 3000 real molecules:
+
+| | mean | p50 | p99 | max |
+| --- | --- | --- | --- | --- |
+| no-stereo | **74 µs** | 50 µs | 359 µs | 18 ms |
+| no-stereo tautomer | 22 ms | 123 µs | **910 ms** | **3.6 s** |
+
+Roughly 300× apart, so the backfill runs them as **two passes and finishes the
+cheap one first**: `exactNoStereo` becomes completely searchable in well under a
+minute on a corpus where `exactNoStereoTautomer` is still hours away. Doing them
+together would leave both modes half-answered for the whole run.
+
+Per 400 000 entries on one core: the no-stereo pass takes ~30 s; the tautomer
+pass takes 2.4 h uncapped, or ~21 min at the default cap.
+
+### The cap, and what NULL means
+
+Canonizing a generic tautomer runs synchronously inside WebAssembly and cannot
+be cancelled, so a molecule that runs long is stopped by **destroying the worker
+thread running it** and starting a fresh one (~50 ms). `capMs` sets how long to
+allow; the default is 100 ms:
+
+| cap | given up on | tautomer pass, 400 000 entries, 8 cores |
+| --- | --- | --- |
+| none | 0% | 17.7 min |
+| 250 ms | 2.0% | 5.3 min |
+| **100 ms** (default) | **2.3%** | **2.6 min** |
+| 20 ms | 3.2% | 54 s |
+
+The no-stereo pass never comes near it — its p99 is 359 µs — so the cap is
+effectively a tautomer-only setting.
+
+A molecule the cap stops is stored as **NULL**, and so is one OCL cannot hash at
+all. Both mean the same thing to a search — this entry has no such hash — and
+neither is retried by a later run. Nothing is silently substituted: a column
+never holds a fallback that would make it mean two different things.
+
+### It is resumable
+
+An entry is marked done by the **presence** of its row, not by its value, so
+`hash IS NULL` ("no hash for this molecule") and no row at all ("not tried yet")
+stay distinguishable. Work is committed a chunk at a time, so an interrupted run
+loses at most one chunk and the next call continues from exactly there — nothing
+is ever recomputed.
+
+That is also why the two hashes get a table each rather than two columns of one:
+the passes are independent, and a row's presence in its own table already says
+what a shared table would need an extra "attempted" marker per hash to say.
+
+```js
+// bound each pass
+await molDB.backfillHashes({ limit: 50_000 });
+
+// or stop at the next chunk boundary on shutdown
+const controller = new AbortController();
+process.once('SIGTERM', () => controller.abort());
+await molDB.backfillHashes({ signal: controller.signal });
+```
+
+Entries inserted after a backfill are picked up by the next run, so a service can
+simply call it on a timer. It holds the write lock only for each chunk's insert —
+never while molecules are being hashed — and yields between chunks, so it can run
+beside a server that keeps serving.
+
+`poolSize` (default: core count), `chunkSize` (default: 500) and `limit` tune the
+rest.
+
+> **Note**: the columns hold real 64-bit values. Reading one back with
+> `node:sqlite` needs `stmt.setReadBigInts(true)`, or the read throws
+> `Value is too large to be represented as a JavaScript number`. Searching never
+> reads them, so this only affects querying the hash tables yourself.
+
 ## Schema
 
-`migrate()` creates two tables:
+![The tables migrate() adds](docs/schema.svg)
+
+`migrate()` creates four tables:
 
 ```sql
-ocl_ss_index  (mw, entry_id, ss_index0 .. ss_index7)  -- WITHOUT ROWID, PK (mw, entry_id)
-ocl_ss_schema (version, applied_at)                   -- which schema version this database is at
+ocl_ss_index                (mw, entry_id, ss_index0 .. ss_index7)  -- WITHOUT ROWID, PK (mw, entry_id)
+ocl_no_stereo_hash          (entry_id, hash)                        -- NULL = no hash for this molecule
+ocl_no_stereo_tautomer_hash (entry_id, hash)                        -- NULL = no hash for this molecule
+ocl_ss_schema               (version, applied_at)                   -- which schema version this database is at
 ```
 
 `entry_id` is a foreign-key reference to your entries table's primary key column, with a unique index
 of its own. The eight `ss_indexN` columns store the 512-bit OCL fingerprint packed as signed 64-bit
 integers for efficient SQL bitwise prefiltering. `mw` leads the primary key so the table is physically
 stored lightest-first — see [above](#why-the-index-is-ordered-by-molecular-weight).
+
+Both hash tables are created empty and filled by `backfillHashes()` — see
+[Structure hashes](#structure-hashes). Each carries a partial index on `hash` (skipping the NULLs,
+which no query ever matches).
 
 ## Upgrading
 
@@ -321,6 +435,10 @@ Measured on 49 983 CCD ligands:
 | no `mwColumn` — weights derived from each idCode       | **2.7 s**  |
 
 Compare with ~5 minutes to re-fingerprint the same index from scratch.
+
+Version 3 adds the two structure hash tables. They are created **empty**, so the migration is
+instant; filling them is a separate long-running job — see
+[Structure hashes](#structure-hashes).
 
 Each version is applied in its own transaction, so an interrupted upgrade leaves the database at the
 last version that fully completed — never half-way through one. A migration only ever discards rows it

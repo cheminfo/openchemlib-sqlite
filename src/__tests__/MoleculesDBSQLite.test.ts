@@ -13,14 +13,12 @@ function makeDB() {
   const db = new DatabaseSync(':memory:');
   db.exec(`
     CREATE TABLE molecules (
-      id                INTEGER PRIMARY KEY,
-      id_code           TEXT NOT NULL UNIQUE,
-      id_code_no_stereo TEXT NOT NULL
+      id      INTEGER PRIMARY KEY,
+      id_code TEXT NOT NULL UNIQUE
     )
   `);
   const molDB = new MoleculesDBSQLite(db, OCL, {
     entriesTable: 'molecules',
-    idCodeNoStereoColumn: 'id_code_no_stereo',
   });
   molDB.migrate();
   return { db, molDB };
@@ -33,11 +31,9 @@ function insertSmiles(
 ): { entryId: number; idCode: string } {
   const mol = OCL.Molecule.fromSmiles(smiles);
   const idCode = mol.getIDCode();
-  mol.stripStereoInformation();
-  const idCodeNoStereo = mol.getIDCode();
   const result = db
-    .prepare('INSERT INTO molecules (id_code, id_code_no_stereo) VALUES (?, ?)')
-    .run(idCode, idCodeNoStereo) as { lastInsertRowid: number };
+    .prepare('INSERT INTO molecules (id_code) VALUES (?)')
+    .run(idCode) as { lastInsertRowid: number };
   const entryId = result.lastInsertRowid;
   molDB.insert(entryId, idCode);
   return { entryId, idCode };
@@ -70,11 +66,9 @@ test('insert accepts a Molecule instance', async () => {
   const { db, molDB } = makeDB();
   const mol = OCL.Molecule.fromSmiles('c1ccccc1');
   const idCode = mol.getIDCode();
-  mol.stripStereoInformation();
-  const idCodeNoStereo = mol.getIDCode();
   const result = db
-    .prepare('INSERT INTO molecules (id_code, id_code_no_stereo) VALUES (?, ?)')
-    .run(idCode, idCodeNoStereo) as { lastInsertRowid: number };
+    .prepare('INSERT INTO molecules (id_code) VALUES (?)')
+    .run(idCode) as { lastInsertRowid: number };
   molDB.insert(result.lastInsertRowid, mol);
 
   const { results } = await molDB.search('c1ccccc1', {
@@ -142,6 +136,7 @@ test('exactNoStereo search ignores stereocenters', async () => {
   const { db, molDB } = makeDB();
   insertSmiles(db, molDB, 'N[C@@H](C)C(=O)O');
   insertSmiles(db, molDB, 'N[C@H](C)C(=O)O');
+  await molDB.backfillHashes();
 
   const { results, total } = await molDB.search('NC(C)C(=O)O', {
     mode: 'exactNoStereo',
@@ -150,19 +145,8 @@ test('exactNoStereo search ignores stereocenters', async () => {
 
   expect(total).toBe(2);
   expect(results).toHaveLength(2);
-});
 
-test('exactNoStereo throws when column not configured', async () => {
-  const db = new DatabaseSync(':memory:');
-  db.exec(
-    'CREATE TABLE molecules (id INTEGER PRIMARY KEY, id_code TEXT NOT NULL UNIQUE)',
-  );
-  const molDB = new MoleculesDBSQLite(db, OCL, { entriesTable: 'molecules' });
-  molDB.migrate();
-
-  await expect(
-    molDB.search('NC(C)C(=O)O', { mode: 'exactNoStereo', format: 'smiles' }),
-  ).rejects.toThrow('exactNoStereo');
+  await molDB.close();
 });
 
 test('substructure search finds all molecules containing the fragment', async () => {
@@ -307,12 +291,15 @@ test('search with Molecule instance for exactNoStereo mode', async () => {
   const { db, molDB } = makeDB();
   insertSmiles(db, molDB, 'N[C@@H](C)C(=O)O');
   insertSmiles(db, molDB, 'N[C@H](C)C(=O)O');
+  await molDB.backfillHashes();
   const queryMol = OCL.Molecule.fromSmiles('NC(C)C(=O)O');
 
   const { total } = await molDB.search(queryMol, { mode: 'exactNoStereo' });
 
   expect(total).toBe(2);
   expect(queryMol.isFragment()).toBe(false);
+
+  await molDB.close();
 });
 
 // ── empty-molecule optimization ────────────────────────────────────────────
@@ -341,13 +328,11 @@ function makeDBWithMw() {
     CREATE TABLE molecules (
       id                INTEGER PRIMARY KEY,
       id_code           TEXT NOT NULL UNIQUE,
-      id_code_no_stereo TEXT NOT NULL,
       mw                REAL NOT NULL
     )
   `);
   const molDB = new MoleculesDBSQLite(db, OCL, {
     entriesTable: 'molecules',
-    idCodeNoStereoColumn: 'id_code_no_stereo',
     mwColumn: 'mw',
   });
   molDB.migrate();
@@ -362,13 +347,9 @@ function insertSmilesWithMw(
   const mol = OCL.Molecule.fromSmiles(smiles);
   const idCode = mol.getIDCode();
   const mw = mol.getMolecularFormula().relativeWeight;
-  mol.stripStereoInformation();
-  const idCodeNoStereo = mol.getIDCode();
   const result = db
-    .prepare(
-      'INSERT INTO molecules (id_code, id_code_no_stereo, mw) VALUES (?, ?, ?)',
-    )
-    .run(idCode, idCodeNoStereo, mw) as { lastInsertRowid: number };
+    .prepare('INSERT INTO molecules (id_code, mw) VALUES (?, ?)')
+    .run(idCode, mw) as { lastInsertRowid: number };
   const entryId = result.lastInsertRowid;
   molDB.insert(entryId, idCode);
   return { entryId, idCode, mw };
@@ -548,11 +529,10 @@ test('substructure results are cached and invalidated by insert', async () => {
 test('searchCacheSize 0 disables the result cache', async () => {
   const db = new DatabaseSync(':memory:');
   db.exec(
-    'CREATE TABLE molecules (id INTEGER PRIMARY KEY, id_code TEXT NOT NULL UNIQUE, id_code_no_stereo TEXT NOT NULL)',
+    'CREATE TABLE molecules (id INTEGER PRIMARY KEY, id_code TEXT NOT NULL UNIQUE)',
   );
   const molDB = new MoleculesDBSQLite(db, OCL, {
     entriesTable: 'molecules',
-    idCodeNoStereoColumn: 'id_code_no_stereo',
     searchCacheSize: 0,
   });
   molDB.migrate();
@@ -625,13 +605,11 @@ test('parallel substructure search across workers matches the sync result', asyn
     CREATE TABLE molecules (
       id                INTEGER PRIMARY KEY,
       id_code           TEXT NOT NULL UNIQUE,
-      id_code_no_stereo TEXT NOT NULL,
       mw                REAL NOT NULL
     )
   `);
   const baseConfig = {
     entriesTable: 'molecules',
-    idCodeNoStereoColumn: 'id_code_no_stereo',
     mwColumn: 'mw',
   };
   const indexer = new MoleculesDBSQLite(db, OCL, baseConfig);
@@ -649,14 +627,13 @@ test('parallel substructure search across workers matches the sync result', asyn
     'Cn1c(=O)c2c(ncn2C)n(C)c1=O',
   ];
   const insert = db.prepare(
-    'INSERT INTO molecules (id_code, id_code_no_stereo, mw) VALUES (?, ?, ?)',
+    'INSERT INTO molecules (id_code, mw) VALUES (?, ?)',
   );
   for (const smi of smiles) {
     const mol = OCL.Molecule.fromSmiles(smi);
     const idCode = mol.getIDCode();
     const mw = mol.getMolecularFormula().relativeWeight;
-    mol.stripStereoInformation();
-    const { lastInsertRowid } = insert.run(idCode, mol.getIDCode(), mw) as {
+    const { lastInsertRowid } = insert.run(idCode, mw) as {
       lastInsertRowid: number;
     };
     indexer.insert(lastInsertRowid, idCode);

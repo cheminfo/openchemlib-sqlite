@@ -56,6 +56,7 @@ export type SearchMode =
   | 'substructure'
   | 'exact'
   | 'exactNoStereo'
+  | 'exactNoStereoTautomer'
   | 'similarity';
 export type InputFormat = 'smiles' | 'idCode' | 'molfile';
 
@@ -73,12 +74,6 @@ export interface MoleculesDBConfig {
    * @default 'id_code'
    */
   idCodeColumn?: string;
-  /**
-   * Column containing the stereo-stripped OCL idCode.
-   * Required to use the 'exactNoStereo' search mode.
-   * @default null
-   */
-  idCodeNoStereoColumn?: string | null;
   /**
    * Column on the entries table holding each molecule's weight (REAL). The
    * ocl_ss_index is clustered by molecular weight, so this column is read once
@@ -236,4 +231,102 @@ export interface SearchResponse {
   matched?: number;
   /** Wall-clock time spent in the scan, in ms (substructure mode only). */
   elapsedMs?: number;
+}
+
+/** Which of the two structure hashes a backfill pass computes. */
+export type HashKind = 'noStereo' | 'noStereoTautomer';
+
+/** What one pass of the backfill did. */
+export interface BackfillPassResult {
+  /** Which hash this pass computed. */
+  kind: HashKind;
+  /** Entries that got a hash. */
+  hashed: number;
+  /** Entries OpenChemLib produced no hash for, within the cap. */
+  noHash: number;
+  /** Entries the cap stopped, stored as NULL. */
+  timedOut: number;
+  /** Entries still owed this hash when the pass returned. */
+  remaining: number;
+  /** Wall-clock time of the pass, in ms. */
+  elapsedMs: number;
+}
+
+/** What a whole backfill run did, across both passes. */
+export interface BackfillResult {
+  /** One entry per pass, in the order they ran: no-stereo, then tautomer. */
+  passes: BackfillPassResult[];
+  /** Entries that got a hash, summed over both passes. */
+  hashed: number;
+  /** Entries with no hash, summed over both passes. */
+  noHash: number;
+  /** Entries the cap stopped, summed over both passes. */
+  timedOut: number;
+  /** Hashes still owed when the run returned, summed over both passes. */
+  remaining: number;
+  /** Wall-clock time of the whole run, in ms. */
+  elapsedMs: number;
+}
+
+/** A progress report: one pass's running totals plus its position. */
+export interface BackfillProgress extends BackfillPassResult {
+  /** Entries this pass has processed so far. */
+  done: number;
+  /** Entries this pass found to do when it started. */
+  total: number;
+}
+
+/** Options for `backfillHashes()`. */
+export interface BackfillOptions {
+  /**
+   * Number of worker threads hashing molecules.
+   *
+   * Hashing is CPU-bound and holds no database connection, so this is the whole
+   * of the run's parallelism; the writes stay on the calling thread.
+   * @default availableParallelism()
+   */
+  poolSize?: number;
+  /**
+   * How long one molecule may take before it is given up on and stored as NULL.
+   *
+   * It exists for the tautomer hash, whose cost per molecule spans four orders
+   * of magnitude: the median is ~123 µs but a molecule with many tautomeric
+   * sites can run for seconds, and those few dominate the total. Canonization is
+   * synchronous inside WebAssembly and cannot be cancelled, so the cap is
+   * enforced by destroying the worker and starting a fresh one (~50 ms), which
+   * is why a very small cap costs more than it saves. The no-stereo pass is
+   * nowhere near it — its p99 is ~359 µs — so the cap never fires there.
+   *
+   * Measured over a 400k-molecule corpus: 100 ms gives up on ~2% of molecules
+   * and takes ~3 min on 8 cores, against 2.4 h with no cap at all.
+   * @default 100
+   */
+  capMs?: number;
+  /**
+   * Entries hashed between commits.
+   *
+   * Each chunk is one short transaction, so a run never holds the write lock
+   * while molecules are being canonized, and an interruption loses at most one
+   * chunk of work.
+   * @default 500
+   */
+  chunkSize?: number;
+  /**
+   * Stop each pass after this many entries, leaving the rest for a later run.
+   * Lets a caller spend a bounded amount of time per pass and resume later; a
+   * run is resumable at chunk granularity either way.
+   * @default Number.MAX_SAFE_INTEGER
+   */
+  limit?: number;
+  /**
+   * Called after each committed chunk, with the running pass's totals. A full
+   * backfill is minutes to hours, so wire this to your logger — a run that is
+   * working should not look like one that has hung.
+   */
+  onProgress?: (progress: BackfillProgress) => void;
+  /**
+   * Stops the run at the next chunk boundary. Everything committed stays
+   * committed and the next run resumes from there.
+   */
+  signal?: AbortSignal;
 }

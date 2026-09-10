@@ -16,13 +16,11 @@ function makeDB() {
     CREATE TABLE molecules (
       id                INTEGER PRIMARY KEY,
       name              TEXT NOT NULL,
-      id_code           TEXT NOT NULL UNIQUE,
-      id_code_no_stereo TEXT NOT NULL
+      id_code           TEXT NOT NULL UNIQUE
     )
   `);
   const molDB = new MoleculesDBSQLite(db, OCL, {
     entriesTable: 'molecules',
-    idCodeNoStereoColumn: 'id_code_no_stereo',
   });
   molDB.migrate();
   return { db, molDB };
@@ -36,12 +34,9 @@ function insert(
 ): number {
   const mol = OCL.Molecule.fromSmiles(smiles);
   const idCode = mol.getIDCode();
-  mol.stripStereoInformation();
   const result = db
-    .prepare(
-      'INSERT INTO molecules (name, id_code, id_code_no_stereo) VALUES (?, ?, ?)',
-    )
-    .run(name, idCode, mol.getIDCode()) as { lastInsertRowid: number };
+    .prepare('INSERT INTO molecules (name, id_code) VALUES (?, ?)')
+    .run(name, idCode) as { lastInsertRowid: number };
   molDB.insert(result.lastInsertRowid, idCode);
   return result.lastInsertRowid;
 }
@@ -139,6 +134,7 @@ test('exact: candidates restrict the match', async () => {
 
 test('exactNoStereo: candidates restrict the match', async () => {
   const { molDB, aniline } = seed();
+  await molDB.backfillHashes();
 
   const found = await molDB.search('Nc1ccccc1', { mode: 'exactNoStereo' });
 

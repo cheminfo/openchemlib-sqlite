@@ -46,7 +46,7 @@
   },
   "dependencies": {
     "lru-cache": "^11.2.2",
-    "openchemlib-search-wasm": "^1.0.0",
+    "openchemlib-search-wasm": "^1.2.0",
     "workerpool": "^9.3.4"
   },
   "peerDependencies": {
