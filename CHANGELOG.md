@@ -1,5 +1,16 @@
 # Changelog
 
+## [5.0.0](https://github.com/cheminfo/openchemlib-sqlite/compare/v4.0.0...v5.0.0) (2026-09-10)
+
+
+### ⚠ BREAKING CHANGES
+
+* `idCodeNoStereoColumn` is gone and `exactNoStereo` now matches on a stored hash, so an entries table needs only an idCode. Call `backfillHashes()` after `migrate()` to populate the two hash tables; until a pass has run, its mode returns nothing. Requires openchemlib-search-wasm >= 1.2.0.
+
+### Features
+
+* own both structure hashes and the searches over them ([f1611c6](https://github.com/cheminfo/openchemlib-sqlite/commit/f1611c6f639eadafe6568c51540a1ca946e19142))
+
 ## [4.0.0](https://github.com/cheminfo/openchemlib-sqlite/compare/v3.0.0...v4.0.0) (2026-08-28)
 
 
