@@ -1,5 +1,13 @@
 # Changelog
 
+## [5.2.0](https://github.com/cheminfo/openchemlib-sqlite/compare/v5.1.0...v5.2.0) (2026-10-01)
+
+
+### Features
+
+* build the index in a database of its own ([67ff7fa](https://github.com/cheminfo/openchemlib-sqlite/commit/67ff7facf9ba855e4f0d26310c3785cf33877910))
+* take a precomputed fingerprint and weight on insert ([12bbdf0](https://github.com/cheminfo/openchemlib-sqlite/commit/12bbdf071b9732a7bb06db1bd68c0e8147f37d2a))
+
 ## [5.1.0](https://github.com/cheminfo/openchemlib-sqlite/compare/v5.0.0...v5.1.0) (2026-10-01)
 
 
