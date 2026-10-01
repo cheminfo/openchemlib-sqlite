@@ -122,6 +122,55 @@ Passing a `Molecule` instance to `insert()` avoids a redundant re-parse. Passing
 molDB.insert(Number(lastInsertRowid), idCode);
 ```
 
+### Giving `insert()` what you already computed
+
+A caller that stores its own fingerprints has already paid for the expensive
+part, and `insert()` takes it rather than building it again:
+
+```js
+import { getIndex } from 'openchemlib-search-wasm';
+
+molDB.insert(entryId, idCode, { index: getIndex(idCode), mw: 194.19 });
+```
+
+With both given nothing here reads the molecule, so `insert()` does no chemistry
+at all. Measured over real idcodes: **1350 µs an entry building the fingerprint,
+88 µs writing one already in hand** — at 150 million entries, 56 hours against
+under four. `index` is the 512-bit FragFp in whichever width you hold it, 16
+words of 32 bits or 8 of 64.
+
+A `mw` must be the value `mwColumn` holds when one is configured, or the index's
+clustered order stops matching what a bulk path would have written.
+
+## Keeping the index in its own database
+
+The index does not have to live beside the entries it indexes. Open the index
+file, attach the entries file, and name the table through the attachment:
+
+```js
+const index = new DatabaseSync('index.sqlite');
+index.exec(`ATTACH DATABASE 'entries.sqlite' AS mol`);
+
+const molDB = new MoleculesDBSQLite(index, OCL, {
+  entriesTable: 'mol.molecules',
+  mwColumn: 'mw',
+});
+molDB.migrate(); // every ocl_* table is created in index.sqlite
+```
+
+Everything works across the attachment — `insert()`, every search mode, and
+`backfillHashes()`. The entries database is never written to, so it can be a
+read-only replica, and the index can be deleted and rebuilt, or built on another
+machine and copied in, without touching it.
+
+**The one difference is the foreign key.** SQLite has no syntax for a qualified
+parent table — `REFERENCES mol.molecules(id)` is a parse error — and a foreign
+key may not span databases at all, so a qualified `entriesTable` builds the same
+tables without the constraint. Only the constraint is dropped, never a column, so
+the same queries and the same migrations run against a database built either way.
+What is lost is SQLite refusing to index an entry that does not exist, and
+refusing to delete an entry that is still indexed.
+
 ## Searching
 
 All search modes return a `SearchResponse` with `results`, `total`, and optional `partial` / `screened` fields.

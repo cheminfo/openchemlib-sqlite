@@ -25,6 +25,7 @@ import type {
   BackfillResult,
   MigrateOptions,
   MoleculesDBConfig,
+  PrecomputedEntry,
   SQLiteDatabase,
   SearchCandidates,
   SearchOptions,
@@ -32,7 +33,11 @@ import type {
   SearchResult,
 } from './types.ts';
 import { backfillHashes } from './utils/backfillHashes.ts';
-import { packSSIndex, unpackSSIndex } from './utils/packSSIndex.ts';
+import {
+  packGivenIndex,
+  packSSIndex,
+  unpackSSIndex,
+} from './utils/packSSIndex.ts';
 import type { PrescreenState } from './utils/prescreen.ts';
 import { prescreen } from './utils/prescreen.ts';
 import { runSubstructureSearch } from './utils/runSubstructureSearch.ts';
@@ -314,20 +319,34 @@ export class MoleculesDBSQLite {
    * entries table.
    * @param entryId - Primary key of the entry in the entries table.
    * @param molecule - OCL Molecule instance or idCode string.
+   * @param precomputed - Values the caller already holds, so this does not
+   *   compute them again. Anything absent is derived from the molecule as
+   *   before; with both `index` and `mw` given, no chemistry is done here at all
+   *   and the molecule is never read.
    */
-  insert(entryId: number, molecule: string | OCLMolecule): void {
+  insert(
+    entryId: number,
+    molecule: string | OCLMolecule,
+    precomputed: PrecomputedEntry = {},
+  ): void {
     const { mwColumn, entriesTable, pkColumn } = this.#cfg;
     // Building the fingerprint is ~99% of what indexing an entry costs, so from an idCode it is
     // built by openchemlib-search-wasm (~920 µs) rather than openchemlib-js (~4491 µs). The words
     // are the same, bit for bit, and a BigInt64Array over them is already the eight columns below.
     // A Molecule the caller passed in cannot take that path without being re-encoded, so it keeps
-    // its own fingerprint.
-    const packed =
-      typeof molecule === 'string'
-        ? Array.from(new BigInt64Array(getIndex(molecule).buffer, 0, 8))
-        : packSSIndex(molecule.getIndex());
+    // its own fingerprint. A caller holding one already passes it and this costs nothing.
+    let packed: bigint[];
+    if (precomputed.index !== undefined) {
+      packed = packGivenIndex(precomputed.index);
+    } else if (typeof molecule === 'string') {
+      packed = Array.from(new BigInt64Array(getIndex(molecule).buffer, 0, 8));
+    } else {
+      packed = packSSIndex(molecule.getIndex());
+    }
 
-    if (mwColumn) {
+    if (precomputed.mw !== undefined) {
+      this.#insertIndexRow(entryId, precomputed.mw, packed);
+    } else if (mwColumn) {
       // Take mw from the entries table so the clustered order matches whatever
       // a bulk index path stores; the entry already exists there.
       this.#db
@@ -348,14 +367,24 @@ export class MoleculesDBSQLite {
       } catch {
         // a molecule with no computable formula sorts first (mw = 0)
       }
-      this.#db
-        .prepare(
-          'INSERT OR REPLACE INTO ocl_ss_index (mw, entry_id, ss_index0, ss_index1, ss_index2, ss_index3, ss_index4, ss_index5, ss_index6, ss_index7) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
-        )
-        .run(mw, entryId, ...packed);
+      this.#insertIndexRow(entryId, mw, packed);
     }
     // The data changed, so cached search results are stale.
     this.#searchCache?.clear();
+  }
+
+  /**
+   * Write one row of the fingerprint index, weight and all.
+   * @param entryId - Primary key of the entry.
+   * @param mw - The weight the index is clustered by.
+   * @param packed - The eight 64-bit fingerprint words.
+   */
+  #insertIndexRow(entryId: number, mw: number, packed: bigint[]): void {
+    this.#db
+      .prepare(
+        'INSERT OR REPLACE INTO ocl_ss_index (mw, entry_id, ss_index0, ss_index1, ss_index2, ss_index3, ss_index4, ss_index5, ss_index6, ss_index7) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
+      )
+      .run(mw, entryId, ...packed);
   }
 
   /** Clear the in-memory structure-search result cache. */

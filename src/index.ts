@@ -10,6 +10,7 @@ export type {
   MigrateOptions,
   MigrationEvent,
   MoleculesDBConfig,
+  PrecomputedEntry,
   SQLiteDatabase,
   SearchCandidates,
   SearchOptions,

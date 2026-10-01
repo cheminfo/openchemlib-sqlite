@@ -390,3 +390,37 @@ export interface BackfillOptions {
    */
   signal?: AbortSignal;
 }
+
+/**
+ * What a caller has already computed for an entry, so the library does not
+ * compute it a second time.
+ *
+ * Every field is independent: what is given is stored, what is absent is derived
+ * from the molecule exactly as before, so an existing `insert()` call keeps its
+ * behaviour.
+ *
+ * It exists because the caller is often a database that already holds these
+ * values. Measured over real idcodes, building the fingerprint is 1350 µs an
+ * entry and writing one already in hand is 88 µs — at 150 million entries, 56
+ * hours against under four.
+ */
+export interface PrecomputedEntry {
+  /**
+   * The 512-bit FragFp, as `getIndex()` from openchemlib-search-wasm or
+   * `Molecule.getIndex()` returns it, or as the eight 64-bit words already
+   * packed.
+   *
+   * Building it is ~99% of what indexing an entry costs, so this is the field
+   * worth passing.
+   */
+  index?: Int32Array | Uint32Array | number[] | BigInt64Array | bigint[];
+  /**
+   * The molecular weight the index is clustered by.
+   *
+   * Without it the weight is read from {@link MoleculesDBConfig.mwColumn}, or
+   * derived from the molecule when no such column is configured. With a
+   * `mwColumn` configured this must be the value that column holds, or the
+   * index's clustered order stops matching what a bulk path would have written.
+   */
+  mw?: number;
+}
