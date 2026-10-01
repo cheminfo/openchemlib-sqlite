@@ -3,6 +3,31 @@ export interface SchemaConfig {
   pkColumn: string;
 }
 
+/**
+ * The `REFERENCES` clause tying an index row to its entry, or nothing when the
+ * entries table lives in another database.
+ *
+ * SQLite has no syntax for a qualified parent table — `REFERENCES other.t(id)`
+ * is a parse error — and a foreign key may not span databases at all. So a
+ * caller that keeps its entries in one file and this index in another (attached
+ * as, say, `mol`, and named `mol.molecules` here) gets the same tables without
+ * the constraint.
+ *
+ * Only the constraint is dropped, never a column: a database built either way
+ * has the same shape, so the same queries and the same migrations run against
+ * both. What is lost is SQLite refusing to index an entry that does not exist,
+ * and refusing to delete an entry that is still indexed.
+ * @param config - The entries table and its primary key.
+ * @returns The clause, with a leading space, or an empty string.
+ */
+export function referencesEntries(config: SchemaConfig): string {
+  // A dot is the only way to name a table in another database, and the only
+  // case SQLite rejects — so it is the condition itself, not a setting that
+  // could disagree with it.
+  if (config.entriesTable.includes('.')) return '';
+  return ` REFERENCES ${config.entriesTable}(${config.pkColumn})`;
+}
+
 /** Table recording which schema version this database is at. */
 export const VERSION_TABLE = 'ocl_ss_schema';
 
@@ -53,7 +78,7 @@ export function buildVersionTableSql(): string {
 export function buildSchemaSqlV1(config: SchemaConfig): string {
   return `
 CREATE TABLE IF NOT EXISTS ocl_ss_index (
-  entry_id  INTEGER PRIMARY KEY REFERENCES ${config.entriesTable}(${config.pkColumn}),
+  entry_id  INTEGER PRIMARY KEY${referencesEntries(config)},
   ss_index0 INTEGER NOT NULL DEFAULT 0,
   ss_index1 INTEGER NOT NULL DEFAULT 0,
   ss_index2 INTEGER NOT NULL DEFAULT 0,
@@ -88,7 +113,7 @@ export function buildSchemaSqlV2(
   return `
 CREATE TABLE IF NOT EXISTS ${table} (
   mw        REAL    NOT NULL,
-  entry_id  INTEGER NOT NULL REFERENCES ${config.entriesTable}(${config.pkColumn}),
+  entry_id  INTEGER NOT NULL${referencesEntries(config)},
   ss_index0 INTEGER NOT NULL DEFAULT 0,
   ss_index1 INTEGER NOT NULL DEFAULT 0,
   ss_index2 INTEGER NOT NULL DEFAULT 0,
@@ -149,7 +174,7 @@ export const NO_STEREO_TAUTOMER_HASH_TABLE = 'ocl_no_stereo_tautomer_hash';
 export function buildHashTableSql(config: SchemaConfig, table: string): string {
   return `
 CREATE TABLE IF NOT EXISTS ${table} (
-  entry_id INTEGER PRIMARY KEY REFERENCES ${config.entriesTable}(${config.pkColumn}),
+  entry_id INTEGER PRIMARY KEY${referencesEntries(config)},
   hash     INTEGER
 );
 CREATE INDEX IF NOT EXISTS idx_${table} ON ${table} (hash) WHERE hash IS NOT NULL;

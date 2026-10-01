@@ -1,4 +1,5 @@
 import type { SchemaConfig } from '../schema.ts';
+import { referencesEntries } from '../schema.ts';
 
 /** Table holding the transposed fingerprint: one row per (chunk, bit). */
 export const PLANE_TABLE = 'ocl_ss_plane';
@@ -44,7 +45,7 @@ CREATE TABLE IF NOT EXISTS ${PLANE_TABLE} (
 
 CREATE TABLE IF NOT EXISTS ${SLOT_TABLE} (
   slot     INTEGER PRIMARY KEY,
-  entry_id INTEGER NOT NULL REFERENCES ${config.entriesTable}(${config.pkColumn})
+  entry_id INTEGER NOT NULL${referencesEntries(config)}
 );
 CREATE UNIQUE INDEX IF NOT EXISTS idx_${SLOT_TABLE}_entry
   ON ${SLOT_TABLE} (entry_id);
