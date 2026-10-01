@@ -85,6 +85,51 @@ export interface MoleculesDBConfig {
    */
   mwColumn?: string | null;
   /**
+   * The ceiling on how many tautomers OpenChemLib enumerates for one molecule
+   * before it settles for what it has. A molecule that reaches it gets no
+   * tautomer hash, stored as NULL, exactly like one OpenChemLib cannot read.
+   *
+   * It is a work bound rather than a clock, so the same molecule gets the same
+   * answer on every machine and a database holds the same hashes wherever it was
+   * filled. The default gives up on about 2.6% of a drug-like corpus; the old
+   * 100 ms clock gave up on about 2.3%, but on a loaded machine it also gave up
+   * on molecules a quiet one hashed.
+   *
+   * Which molecules have a tautomer hash depends on this, so it is recorded in
+   * the database: changing it makes the next `migrate()` empty the tautomer hash
+   * table, and `backfillHashes()` fills it again under the new ceiling.
+   * @default 5000
+   */
+  maxTautomers?: number;
+  /**
+   * Whether {@link MoleculesDBConfig.mwColumn} really holds molecular weights.
+   *
+   * A substructure match cannot be lighter than its fragment, and the index is
+   * clustered by weight, so the prescreen can start with a seek past every entry
+   * too light to match instead of reading them. That is only sound if the stored
+   * weight is the molecular weight: a column holding a sort key, a rounded
+   * value or a different convention would make the bound drop real matches, so
+   * with a `mwColumn` configured the library does not assume it. Set this when
+   * the column is the molecular weight and you want the bound.
+   *
+   * Ignored without a `mwColumn`, where `insert()` derives the weight itself and
+   * the bound always applies.
+   * @default false
+   */
+  trustMwColumn?: boolean;
+  /**
+   * The share of the index above which a substructure search stays on the
+   * column scan rather than using the plane index.
+   *
+   * Verification costs ~8 µs a candidate against ~0.25 µs a row for the
+   * clustered scan, so the two break even once candidates reach about 1.4% of
+   * the index. Below that the screen was the query's whole cost; above it,
+   * verification swamps whatever the screen saves. Raise it only with a
+   * measurement.
+   * @default 0.01
+   */
+  planeCandidateRatio?: number;
+  /**
    * Number of verifier threads used for substructure search.
    *
    * A substructure search is two steps: a fingerprint prescreen in SQL (~3% of
@@ -107,7 +152,13 @@ export interface MoleculesDBConfig {
    * regardless of how candidates are distributed; smaller batches balance better
    * but pay more round trips. A scan that never fills a single batch is verified
    * inline, without spawning any thread.
-   * @default 128
+   *
+   * The round trip is most of the cost at a small size: measured over real
+   * idCodes, one candidate costs 32.0 µs at 64, 10.7 µs at 256 and 8.2 µs at
+   * 1024. Verification is the bulk of a substructure search, so the default is
+   * the large one; a search bounded by `maxResults` shrinks it again by itself,
+   * to about one round per thread, so nothing is overshot by raising it.
+   * @default 1024
    */
   batchSize?: number;
   /**
@@ -302,6 +353,15 @@ export interface BackfillOptions {
    * @default 100
    */
   capMs?: number;
+  /**
+   * The ceiling on tautomer enumeration for this run, overriding the instance's
+   * {@link MoleculesDBConfig.maxTautomers}.
+   *
+   * Overriding it here fills the table under a ceiling the database does not
+   * record, so the hashes stop matching what `search()` computes for its query.
+   * It exists for measuring the trade-off, not for production runs.
+   */
+  maxTautomers?: number;
   /**
    * Entries hashed between commits.
    *

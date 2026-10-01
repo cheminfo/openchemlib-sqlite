@@ -74,3 +74,93 @@ and what they save — including the ~50 ms of destroying a worker and starting 
 fresh one, which is the only way to stop a canonization already running. It also
 checks that hashing one molecule at a time costs the same as a batched call,
 which is what makes a per-molecule cap affordable.
+
+## Plane index: `planeScan.mjs`
+
+```sh
+node benchmark/planeScan.mjs 2000000 /tmp/planeScan.sqlite
+```
+
+Real molecules, synthetic library: ~8 600 fingerprints are computed from
+combinatorial SMILES and sampled with replacement, so bit marginals **and bit
+correlations** are those of real structures. A fingerprint drawn bit by bit from
+independent marginals is useless here — every multi-bit query returns nothing.
+
+Only the prescreen is measured; verification is unchanged. `column` is today's
+`ocl_ss_index` scan, `screen` is the plane intersection alone, `plane` is the
+intersection plus turning survivors back into candidates.
+
+At 2 000 000 entries, warm cache:
+
+| query | bits | used | column | screen | plane | candidates |
+|---|---|---|---|---|---|---|
+| benzene | 3 | 0 | 10 486 ms | — | declined | 1 381 568 |
+| phenol | 8 | 3 | 3 921 ms | **3 ms** | 1 446 ms | 272 568 |
+| naphthalene | 4 | 1 | 2 005 ms | **1 ms** | 3 635 ms | 677 014 |
+| biphenyl-F | 13 | 7 | 216 ms | **6 ms** | 14 ms | 0 |
+| benzamide | 21 | 9 | 860 ms | **9 ms** | 995 ms | 127 105 |
+| sulfonamide-aryl | 24 | 12 | 407 ms | **6 ms** | 47 ms | 0 |
+
+Three things to read out of it.
+
+**The screen stops being the cost.** 1–9 ms against a column scan of 216 ms to
+10.5 s, and it is flat in the number of candidates because it only reads the
+planes of the bits the query sets. This is the whole point of the index.
+
+**What is left is resolving survivors**, at roughly 5 µs each, which no index
+removes — a candidate has to be verified. So the plane path wins by the margin
+the screen saves and loses nothing else: selective fragments are 15–18× faster,
+and a fragment matching a third of the library is a wash.
+
+**A fragment whose every bit is too common is declined**, and belongs on the
+column path, which is clustered by molecular weight and stops early. Benzene in
+this library is in 69% of entries; there is nothing to screen.
+
+With `exactFilter: false` (leaving the real matcher to reject the screen's false
+positives instead of checking each survivor's stored 512-bit fingerprint),
+resolution roughly halves and the plane path is never slower than the column one:
+
+| query | column | exactFilter on | off |
+|---|---|---|---|
+| phenol | 405 ms | 654 ms | **275 ms** |
+| naphthalene | 773 ms | 1 731 ms | **745 ms** |
+| benzamide | 276 ms | 371 ms | **157 ms** |
+| biphenyl-F | 162 ms | 9 ms | **9 ms** |
+| sulfonamide-aryl | 151 ms | 10 ms | **10 ms** |
+
+On this library the exact filter rejected **nothing at all** — 0 false positives
+on every query — because a fragment's rare bits already imply its common ones.
+That rate is a property of the corpus, so the filter stays on by default: a false
+positive reaching verification costs a `fromIDCode` parse, measured at ~625 µs.
+
+Index size at 2 M entries: `ocl_ss_plane` 98.6 MB and `ocl_ss_slot` 24.1 MB,
+against 196.8 MB for `ocl_ss_index` itself. The fold took 76 s, about 38 µs per
+entry.
+
+### Routed, which is what a search actually does
+
+`choosePrescreenPath()` picks per query, by measuring: it intersects the planes,
+counts what survives, and takes the plane path only when the count is small
+enough that verification will not swamp the saving **and** below `maxResults`, so
+no truncation can make the slot order observable. Both columns below run the same
+dispatcher, the baseline with the plane index switched off, so the only
+difference is the routing.
+
+| query | bits | used | plane index off | screen | routed | path | speedup |
+|---|---|---|---|---|---|---|---|
+| benzene | 3 | 0 | 1 716 ms | — | 1 792 ms | column | 1.0× |
+| phenol | 8 | 3 | 509 ms | 2 ms | 487 ms | column | 1.0× |
+| naphthalene | 4 | 1 | 994 ms | 1 ms | 962 ms | column | 1.0× |
+| biphenyl-F | 13 | 7 | 145 ms | 3 ms | 24 ms | **plane** | **5.9×** |
+| benzamide | 21 | 9 | 299 ms | 6 ms | 311 ms | column | 1.0× |
+| sulfonamide-aryl | 24 | 12 | 142 ms | 5 ms | 22 ms | **plane** | **6.5×** |
+
+Never slower, 6× where the screen pays. Deciding is free in practice — the
+intersection it has to run to decide costs 1–6 ms, and it is thrown away when the
+answer is no.
+
+Two measurement notes, because both bit me while writing this file. The baseline
+has to run through the same generator: counting raw rows instead flatters it by
+~25%, because a real search builds a candidate object per row. And A/B passes
+have to be **interleaved** — three A passes then three B let machine drift land
+on one side and showed phantom regressions down to 0.76×.

@@ -46,7 +46,7 @@
   },
   "dependencies": {
     "lru-cache": "^11.2.2",
-    "openchemlib-search-wasm": "^1.2.0",
+    "openchemlib-search-wasm": "^2.0.0",
     "workerpool": "^9.3.4"
   },
   "peerDependencies": {
@@ -60,6 +60,7 @@
     "cif-to-json": "^2.0.0",
     "eslint": "^9.39.2",
     "eslint-config-cheminfo-typescript": "^22.0.0",
+    "ml-xsadd": "^3.0.1",
     "openchemlib": "^9.22.1",
     "prettier": "^3.8.3",
     "rimraf": "^6.1.3",

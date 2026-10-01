@@ -5,10 +5,18 @@ import type * as OpenChemLib from 'openchemlib';
 import { getIndex, substructureSearch } from 'openchemlib-search-wasm';
 
 import type { SearchWorkerPool } from './SearchWorkerPool.ts';
-import { runMigrations } from './migrations.ts';
+import { SCHEMA_VERSION, runMigrations } from './migrations.ts';
+import type { FoldOptions, FoldResult } from './planes/foldPlanes.ts';
+import { foldPlanes } from './planes/foldPlanes.ts';
+import { planeCoverage } from './planes/planePrescreen.ts';
+import { TAIL_TABLE } from './planes/planeSchema.ts';
+import { countOf } from './planes/planeState.ts';
 import {
+  MAX_TAUTOMERS_SETTING,
   NO_STEREO_HASH_TABLE,
   NO_STEREO_TAUTOMER_HASH_TABLE,
+  SETTINGS_TABLE,
+  buildHashTableSql,
 } from './schema.ts';
 // Type-only: erased at build, so node:worker_threads is never pulled into the
 // synchronous/browser path. The pool is loaded lazily via dynamic import.
@@ -30,7 +38,7 @@ import { prescreen } from './utils/prescreen.ts';
 import { runSubstructureSearch } from './utils/runSubstructureSearch.ts';
 import { parseMolecule, rowToResult } from './utils/searchHelpers.ts';
 import type { HashKind } from './utils/structureHash.ts';
-import { structureHash } from './utils/structureHash.ts';
+import { DEFAULT_MAX_TAUTOMERS, structureHash } from './utils/structureHash.ts';
 
 type OCLLibrary = typeof OpenChemLib;
 type OCLMolecule = InstanceType<OCLLibrary['Molecule']>;
@@ -40,9 +48,12 @@ interface ResolvedConfig {
   pkColumn: string;
   idCodeColumn: string;
   mwColumn: string | null;
+  trustMwColumn: boolean;
+  planeCandidateRatio: number;
   poolSize: number;
   batchSize: number;
   searchCacheSize: number;
+  maxTautomers: number;
 }
 
 function resolveConfig(config: MoleculesDBConfig): ResolvedConfig {
@@ -51,9 +62,12 @@ function resolveConfig(config: MoleculesDBConfig): ResolvedConfig {
     pkColumn: config.pkColumn ?? 'id',
     idCodeColumn: config.idCodeColumn ?? 'id_code',
     mwColumn: config.mwColumn ?? null,
+    trustMwColumn: config.trustMwColumn ?? false,
+    planeCandidateRatio: config.planeCandidateRatio ?? 0.01,
     poolSize: config.poolSize ?? availableParallelism(),
-    batchSize: config.batchSize ?? 128,
+    batchSize: config.batchSize ?? 1024,
     searchCacheSize: config.searchCacheSize ?? 100,
+    maxTautomers: config.maxTautomers ?? DEFAULT_MAX_TAUTOMERS,
   };
 }
 
@@ -170,9 +184,118 @@ export class MoleculesDBSQLite {
       mwColumn,
       onMigration: options.onMigration,
     });
+    const rebuilt = this.#reconcileCeiling(options);
     // A rewritten index invalidates anything cached from the old one.
-    if (applied.length > 0) this.#searchCache?.clear();
+    if (applied.length > 0 || rebuilt) this.#searchCache?.clear();
     return applied;
+  }
+
+  /**
+   * Rebuild the tautomer hash table when the ceiling it was filled under is not
+   * the one this instance is configured with.
+   *
+   * Which molecules have a tautomer hash depends on the ceiling, and `search()`
+   * hashes its query under the configured one. Left alone, raising or lowering
+   * it would make a query hash that no stored hash was ever going to equal, and
+   * the mode would quietly return nothing. So the table is emptied and
+   * `backfillHashes()` fills it again under the new ceiling.
+   *
+   * The no-stereo table is untouched: it enumerates no tautomers, so no ceiling
+   * applies to it.
+   * @param options - The migration log callback, so a rebuild is not silent.
+   * @returns Whether the table was rebuilt.
+   */
+  #reconcileCeiling(options: MigrateOptions): boolean {
+    const { entriesTable, pkColumn, maxTautomers } = this.#cfg;
+    const wanted = String(maxTautomers);
+    const recorded = (
+      this.#db
+        .prepare(
+          `SELECT value FROM ${SETTINGS_TABLE} WHERE name = '${MAX_TAUTOMERS_SETTING}'`,
+        )
+        .get() as { value: string } | undefined
+    )?.value;
+
+    if (recorded === wanted) return false;
+
+    // Only rows already filled under the old ceiling have to go. An empty table
+    // — a fresh database, or one whose backfill has not run — is simply recorded
+    // against the new one, so a reconfigured ceiling costs nothing until there
+    // is something to lose.
+    const filled =
+      (
+        this.#db
+          .prepare(`SELECT COUNT(*) AS n FROM ${NO_STEREO_TAUTOMER_HASH_TABLE}`)
+          .get() as { n: number }
+      ).n > 0;
+
+    if (filled) {
+      options.onMigration?.({
+        version: SCHEMA_VERSION,
+        description: `rebuild ${NO_STEREO_TAUTOMER_HASH_TABLE}: maxTautomers ${recorded ?? 'unrecorded'} -> ${wanted}`,
+        phase: 'start',
+      });
+      this.#db.exec(`DROP TABLE IF EXISTS ${NO_STEREO_TAUTOMER_HASH_TABLE}`);
+      this.#db.exec(
+        buildHashTableSql(
+          { entriesTable, pkColumn },
+          NO_STEREO_TAUTOMER_HASH_TABLE,
+        ),
+      );
+    }
+
+    this.#db
+      .prepare(
+        `INSERT INTO ${SETTINGS_TABLE} (name, value) VALUES ('${MAX_TAUTOMERS_SETTING}', ?)
+         ON CONFLICT(name) DO UPDATE SET value = excluded.value`,
+      )
+      .run(wanted);
+    return filled;
+  }
+
+  /**
+   * Fold waiting fingerprints into the plane index.
+   *
+   * The plane index is the transposed form of `ocl_ss_index`: one bitmap per
+   * fingerprint bit, so a substructure prescreen reads only the planes of the
+   * bits its query sets instead of every entry's key. Measured on 2 M entries
+   * that takes the screen from 216 ms–10.5 s to 1–9 ms, and because it does not
+   * grow with the library the saving grows with it.
+   *
+   * It is filled here rather than at `insert()` because one molecule sets 74–348
+   * of its 512 bits, so writing those in place would rewrite a chunk of each of
+   * that many planes per insert. A fold appends whole chunks of 2^20 entries
+   * instead, which comes to 64 bytes a molecule — the size of the fingerprint
+   * itself. `insert()` meanwhile only adds a row to a small tail, which the next
+   * search screens the old way and the next fold drains.
+   *
+   * Call it after a bulk load, and periodically afterwards: between folds the
+   * tail grows and search slowly returns to its unfolded speed. It is resumable
+   * and commits per chunk, so interrupting it loses only the chunk in progress.
+   * Nothing has to be folded for the database to work — until it is, every
+   * search simply takes the column path.
+   * @param options - What to store, and how much to do in one call.
+   * @returns What this call folded, and whether anything is still waiting.
+   */
+  foldPlanes(options: FoldOptions = {}): FoldResult {
+    const result = foldPlanes(this.#db, options);
+    // Which prescreen a query takes now depends on what is folded, so an
+    // answer cached before this call was reached by a different route.
+    this.clearSearchCache();
+    return result;
+  }
+
+  /**
+   * What the plane index currently covers.
+   *
+   * `pending` is what `foldPlanes()` would pick up: entries inserted since the
+   * last fold, which every search still screens the slower way. It is the number
+   * to watch to decide how often to fold.
+   * @returns The folded entry count, the number of folds, and what is waiting.
+   */
+  planeStatus(): { folded: number; segments: number; pending: number } {
+    const { segments, slots } = planeCoverage(this.#db);
+    return { folded: slots, segments, pending: countOf(this.#db, TAIL_TABLE) };
   }
 
   /**
@@ -236,6 +359,19 @@ export class MoleculesDBSQLite {
   }
 
   /** Clear the in-memory structure-search result cache. */
+  /**
+   * Whether the index's `mw` can be relied on to be the molecular weight.
+   *
+   * Only when `insert()` computed it from the molecule. A configured `mwColumn`
+   * is the caller's column and may mean something else entirely, so the weight
+   * floor the prescreen can seek on stays off for it unless the caller says
+   * otherwise with `trustMwColumn`.
+   * @returns True when a weight floor may be applied to the prescreen.
+   */
+  #mwIsMolecularWeight(): boolean {
+    return this.#cfg.mwColumn === null || this.#cfg.trustMwColumn;
+  }
+
   clearSearchCache(): void {
     this.#searchCache?.clear();
   }
@@ -443,10 +579,11 @@ export class MoleculesDBSQLite {
    * ```
    */
   async backfillHashes(options: BackfillOptions = {}): Promise<BackfillResult> {
-    const { entriesTable, pkColumn, idCodeColumn, poolSize } = this.#cfg;
+    const { entriesTable, pkColumn, idCodeColumn, poolSize, maxTautomers } =
+      this.#cfg;
     const result = await backfillHashes(
       { db: this.#db, entriesTable, pkColumn, idCodeColumn },
-      { poolSize, ...options },
+      { poolSize, maxTautomers, ...options },
     );
     // Entries that had no hash can now match, so anything cached is stale.
     if (result.hashed > 0) this.#searchCache?.clear();
@@ -469,7 +606,7 @@ export class MoleculesDBSQLite {
   ): SearchResponse {
     // A query OCL cannot hash matches nothing, rather than raising the opaque
     // error the canonizer throws on a malformed idCode.
-    const hash = structureHash(kind, idCode);
+    const hash = structureHash(kind, idCode, this.#cfg.maxTautomers);
     if (hash === null) return { results: [], total: 0 };
     const rows = this.#db
       .prepare(
@@ -525,14 +662,22 @@ export class MoleculesDBSQLite {
     onProgress: SearchOptions['onProgress'],
     candidates?: SearchCandidates,
   ): Promise<CachedScan> {
-    const { entriesTable, pkColumn, idCodeColumn, poolSize, batchSize } =
-      this.#cfg;
+    const {
+      entriesTable,
+      pkColumn,
+      idCodeColumn,
+      poolSize,
+      batchSize,
+      planeCandidateRatio,
+    } = this.#cfg;
     const params = {
       db: this.#db,
       ocl: this.#ocl,
       entriesTable,
       pkColumn,
       idCodeColumn,
+      mwIsMolecularWeight: this.#mwIsMolecularWeight(),
+      planeCandidateRatio,
       mol,
       from: 0,
       limit: Number.MAX_SAFE_INTEGER,

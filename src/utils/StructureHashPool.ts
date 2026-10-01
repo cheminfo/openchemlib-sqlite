@@ -19,6 +19,8 @@ export interface HashOutcome {
   hash: string | null;
   /** True when the cap stopped it rather than OpenChemLib answering. */
   timedOut: boolean;
+  /** Whether the ceiling cut the tautomer enumeration short. */
+  truncated: boolean;
 }
 
 /**
@@ -39,12 +41,14 @@ class HashWorker {
    * @param kind - Which hash to compute.
    * @param idCode - The molecule to hash.
    * @param capMs - How long to allow before destroying the worker.
+   * @param maxTautomers - The ceiling on tautomer enumeration.
    * @returns Its hash, or null with `timedOut` set when the cap stopped it.
    */
   async hash(
     kind: HashKind,
     idCode: string,
     capMs: number,
+    maxTautomers: number,
   ): Promise<HashOutcome> {
     const worker = await this.#ensureWorker();
     return new Promise<HashOutcome>((resolve) => {
@@ -53,12 +57,16 @@ class HashWorker {
         // The thread is wedged in the canonizer and will never answer, so it is
         // destroyed and the next molecule gets a fresh one.
         void this.#discard();
-        resolve({ hash: null, timedOut: true });
+        resolve({ hash: null, timedOut: true, truncated: false });
       }, capMs);
 
       const onMessage = (response: HashResponse) => {
         cleanup();
-        resolve({ hash: response.hash, timedOut: false });
+        resolve({
+          hash: response.hash,
+          timedOut: false,
+          truncated: response.truncated,
+        });
       };
       // A worker that dies on its own (an OOM in the canonizer, say) must not
       // hang the backfill: treat it exactly like the cap firing.
@@ -66,7 +74,7 @@ class HashWorker {
         cleanup();
         this.#worker = undefined;
         this.#ready = undefined;
-        resolve({ hash: null, timedOut: true });
+        resolve({ hash: null, timedOut: true, truncated: false });
       };
 
       function cleanup() {
@@ -77,7 +85,7 @@ class HashWorker {
 
       worker.on('message', onMessage);
       worker.on('exit', onExit);
-      worker.postMessage({ kind, idCode });
+      worker.postMessage({ kind, idCode, maxTautomers });
     });
   }
 
@@ -138,16 +146,18 @@ export class StructureHashPool {
    * @param kind - Which hash to compute.
    * @param idCode - The molecule to hash.
    * @param capMs - How long to allow before destroying the worker running it.
+   * @param maxTautomers - The ceiling on tautomer enumeration.
    * @returns Its hash, or null with `timedOut` set when the cap stopped it.
    */
   async hash(
     kind: HashKind,
     idCode: string,
     capMs: number,
+    maxTautomers: number,
   ): Promise<HashOutcome> {
     const worker = await this.#acquire();
     try {
-      return await worker.hash(kind, idCode, capMs);
+      return await worker.hash(kind, idCode, capMs, maxTautomers);
     } finally {
       this.#release(worker);
     }

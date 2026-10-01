@@ -1,6 +1,11 @@
 import type * as OpenChemLib from 'openchemlib';
 
 import {
+  TAIL_TABLE,
+  buildPlaneSchemaSql,
+  buildTailTriggerSql,
+} from './planes/planeSchema.ts';
+import {
   NO_STEREO_HASH_TABLE,
   NO_STEREO_TAUTOMER_HASH_TABLE,
   VERSION_TABLE,
@@ -8,6 +13,7 @@ import {
   buildHashTableSql,
   buildSchemaSqlV1,
   buildSchemaSqlV2,
+  buildSettingsTableSql,
   buildVersionTableSql,
 } from './schema.ts';
 import type { MigrationEvent, SQLiteDatabase } from './types.ts';
@@ -75,6 +81,47 @@ export const MIGRATIONS: Migration[] = [
       db.exec(buildHashTableSql(config, NO_STEREO_TAUTOMER_HASH_TABLE));
     },
   },
+  {
+    version: 4,
+    description: 'discard hashes computed before openchemlib-search-wasm 2.0.0',
+    up: ({ db, entriesTable, pkColumn }) => {
+      // openchemlib-search-wasm 2.0.0 fixed a defect that gave the wrong hash to
+      // a molecule whose stereogenic double bond carries no configuration —
+      // about 1.5% of a drug-like library. A database filled before it holds
+      // those wrong values, and nothing about a stored hash says which version
+      // computed it, so the only safe answer is to drop them and let
+      // `backfillHashes()` fill them again.
+      //
+      // Dropped rather than emptied: `DELETE FROM` walks every row and this
+      // table has one per entry, which on a large corpus is minutes inside a
+      // migration's transaction.
+      const config = { entriesTable, pkColumn };
+      for (const table of [
+        NO_STEREO_HASH_TABLE,
+        NO_STEREO_TAUTOMER_HASH_TABLE,
+      ]) {
+        db.exec(`DROP TABLE IF EXISTS ${table}`);
+        db.exec(buildHashTableSql(config, table));
+      }
+      // The tautomer hashes are bounded by a ceiling from here on, and which
+      // molecules have one depends on it, so it is recorded alongside them.
+      db.exec(buildSettingsTableSql());
+    },
+  },
+  {
+    version: 5,
+    description: 'create the transposed plane index and its tail',
+    up: ({ db, entriesTable, pkColumn }) => {
+      // Only the tables and the trigger. Filling them transposes every
+      // fingerprint in the database, which is the same order of work as a hash
+      // backfill and cannot run inside a migration's transaction: `foldPlanes()`
+      // does it, chunk by chunk and resumable, whenever the caller chooses.
+      //
+      // Until it has run the index is empty, every search stays on the column
+      // path, and nothing about the database's behaviour changes.
+      db.exec(buildPlaneSchemaSql({ entriesTable, pkColumn }));
+    },
+  },
 ];
 
 /** The version a freshly-migrated database ends up at. */
@@ -124,7 +171,29 @@ export function runMigrations(context: MigrationContext): number[] {
     });
     applied.push(migration.version);
   }
+
+  reassertTailTrigger(db);
   return applied;
+}
+
+/**
+ * Put the tail trigger back if anything has dropped it.
+ *
+ * SQLite drops a trigger with the table it watches, so any later migration that
+ * rebuilds `ocl_ss_index` — as version 2 did, under a temporary name before
+ * swapping it in — takes `ocl_ss_tail_insert` with it. Nothing would report
+ * that: inserts would keep working, the tail would simply stop filling, the
+ * entries added after it would never be folded, and a search answered from the
+ * plane index would quietly stop finding them.
+ *
+ * So it is re-asserted on every `migrate()` rather than trusted to the one
+ * migration that created it. `CREATE TRIGGER IF NOT EXISTS` makes that free when
+ * it is already there, and it is skipped entirely until the plane tables exist.
+ * @param db - The database to repair.
+ */
+function reassertTailTrigger(db: SQLiteDatabase): void {
+  if (!tableExists(db, TAIL_TABLE)) return;
+  db.exec(buildTailTriggerSql());
 }
 
 /**

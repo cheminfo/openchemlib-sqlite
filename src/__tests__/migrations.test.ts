@@ -78,7 +78,7 @@ test('a 2.x database is upgraded in place instead of rejected', async () => {
 
   const applied = molDB.migrate();
 
-  expect(applied).toStrictEqual([2, 3]);
+  expect(applied).toStrictEqual([2, 3, 4, 5]);
   expect(schemaOf(db)).toContain('WITHOUT ROWID');
 
   // The whole point: searching an upgraded database works and is mw-ordered.
@@ -112,7 +112,7 @@ test('the upgrade carries the fingerprints over rather than recomputing them', (
 test('migrate is idempotent and does nothing on an already-current database', () => {
   const { molDB } = legacyDatabase();
 
-  expect(molDB.migrate()).toStrictEqual([2, 3]);
+  expect(molDB.migrate()).toStrictEqual([2, 3, 4, 5]);
   expect(molDB.migrate()).toStrictEqual([]);
   expect(molDB.migrate()).toStrictEqual([]);
 });
@@ -124,7 +124,7 @@ test('a fresh database walks every migration and records the version', () => {
   );
   const molDB = new MoleculesDBSQLite(db, OCL, { entriesTable: 'ligands' });
 
-  expect(molDB.migrate()).toStrictEqual([1, 2, 3]);
+  expect(molDB.migrate()).toStrictEqual([1, 2, 3, 4, 5]);
 
   const recorded = db
     .prepare('SELECT MAX(version) AS version FROM ocl_ss_schema')
@@ -261,7 +261,7 @@ test('a pre-versioning mw-clustered database is recognised as version 2', () => 
   const molDB = new MoleculesDBSQLite(db, OCL, { entriesTable: 'ligands' });
 
   // Only version 3 is owed: 1 and 2 are already in the schema.
-  expect(molDB.migrate()).toStrictEqual([3]);
+  expect(molDB.migrate()).toStrictEqual([3, 4, 5]);
   expect(molDB.migrate()).toStrictEqual([]);
 });
 
@@ -328,7 +328,7 @@ test('an entry whose idCode will not parse is carried over with mw 0', () => {
 
   const molDB = new MoleculesDBSQLite(db, OCL, { entriesTable: 'ligands' });
 
-  expect(molDB.migrate()).toStrictEqual([2, 3]);
+  expect(molDB.migrate()).toStrictEqual([2, 3, 4, 5]);
 
   const rows = db
     .prepare(
@@ -363,7 +363,7 @@ test('the upgrade works on a driver whose statements cannot iterate', () => {
     entriesTable: 'ligands',
   });
 
-  expect(molDB.migrate()).toStrictEqual([2, 3]);
+  expect(molDB.migrate()).toStrictEqual([2, 3, 4, 5]);
 
   const rows = db
     .prepare('SELECT mw FROM ocl_ss_index ORDER BY mw')
@@ -393,7 +393,7 @@ test('an entry with a NULL idCode is carried over with mw 0', () => {
   db.exec('INSERT INTO ocl_ss_index (entry_id) VALUES (1), (2)');
   const molDB = new MoleculesDBSQLite(db, OCL, { entriesTable: 'ligands' });
 
-  expect(molDB.migrate()).toStrictEqual([2, 3]);
+  expect(molDB.migrate()).toStrictEqual([2, 3, 4, 5]);
 
   const rows = db
     .prepare(
@@ -402,4 +402,40 @@ test('an entry with a NULL idCode is carried over with mw 0', () => {
     .all() as Array<{ entryId: number; mw: number }>;
 
   expect(rows[1]?.mw).toBe(0);
+});
+
+test('version 4 discards hashes computed before the wasm fix', async () => {
+  const db = new DatabaseSync(':memory:');
+  db.exec(
+    'CREATE TABLE molecules (id INTEGER PRIMARY KEY, id_code TEXT NOT NULL)',
+  );
+  const molDB = new MoleculesDBSQLite(db, OCL, { entriesTable: 'molecules' });
+  molDB.migrate();
+  const idCode = OCL.Molecule.fromSmiles('CCC(=O)CC').getIDCode();
+  const { lastInsertRowid } = db
+    .prepare('INSERT INTO molecules (id_code) VALUES (?)')
+    .run(idCode);
+  molDB.insert(Number(lastInsertRowid), idCode);
+  await molDB.backfillHashes();
+
+  const count = (table: string) =>
+    (db.prepare(`SELECT COUNT(*) AS n FROM ${table}`).get() as { n: number }).n;
+
+  expect(count('ocl_no_stereo_hash')).toBe(1);
+  expect(count('ocl_no_stereo_tautomer_hash')).toBe(1);
+
+  // Replay as a database that stopped at version 3, the way an upgrade sees one
+  // filled by an older release.
+  db.exec('UPDATE ocl_ss_schema SET version = 3');
+  molDB.migrate();
+
+  expect(count('ocl_no_stereo_hash')).toBe(0);
+  expect(count('ocl_no_stereo_tautomer_hash')).toBe(0);
+
+  // and the tables are still usable: a fresh backfill refills them
+  await molDB.backfillHashes();
+
+  expect(count('ocl_no_stereo_hash')).toBe(1);
+
+  await molDB.close();
 });

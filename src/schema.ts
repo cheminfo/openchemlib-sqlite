@@ -6,6 +6,28 @@ export interface SchemaConfig {
 /** Table recording which schema version this database is at. */
 export const VERSION_TABLE = 'ocl_ss_schema';
 
+/** Table recording the settings the stored hashes were built under. */
+export const SETTINGS_TABLE = 'ocl_ss_settings';
+
+/** The setting naming the ceiling the tautomer hashes were enumerated to. */
+export const MAX_TAUTOMERS_SETTING = 'maxTautomers';
+
+/**
+ * SQL creating the settings table.
+ *
+ * A stored tautomer hash only means something relative to the ceiling it was
+ * enumerated under, and `search()` hashes its query with the ceiling it is
+ * configured with. Recording it is what lets a later start notice the two have
+ * drifted apart, instead of quietly returning nothing.
+ * @returns SQL ready for db.exec().
+ */
+export function buildSettingsTableSql() {
+  return `CREATE TABLE IF NOT EXISTS ${SETTINGS_TABLE} (
+  name  TEXT PRIMARY KEY,
+  value TEXT NOT NULL
+);`;
+}
+
 /**
  * SQL creating the version table. It is what makes the schema upgradable: once a
  * database records its version, every later release can tell exactly which

@@ -107,9 +107,17 @@ export function runSubstructureSearch(
   if (!stop) flush();
   params.onProgress?.(state.screened, state.screened);
 
+  // The plane index yields slot order, so the lightest-first order the column
+  // path produces for free has to be restored here. It is a no-op for the column
+  // path, whose stream is already in that order, so it is only paid when the
+  // plane index actually answered.
+  const ordered = state.usedPlaneIndex
+    ? results.toSorted((a, b) => (a.mw ?? 0) - (b.mw ?? 0))
+    : results;
+
   return {
-    results: results.slice(from, from + limit),
-    total: results.length,
+    results: ordered.slice(from, from + limit),
+    total: ordered.length,
     screened: state.screened,
     matched: results.length,
     elapsedMs: Date.now() - start,

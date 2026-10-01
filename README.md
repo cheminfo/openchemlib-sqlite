@@ -60,6 +60,29 @@ molDB.migrate(); // creates or upgrades ocl_ss_index (idempotent)
 | `pkColumn`             | `'id'`       | Primary key column name                                                                                      |
 | `idCodeColumn`         | `'id_code'`  | Column holding the OCL idCode                                                                                |
 | `mwColumn`             | `null`       | Column holding the molecular weight (REAL); enables automatic mass-difference sorting in substructure search |
+| `maxTautomers`         | `5000`       | Ceiling on tautomer enumeration; recorded in the database, and changing it rebuilds the tautomer hashes      |
+| `trustMwColumn`        | `false`      | Promise that `mwColumn` holds real molecular weights, so the prescreen may seek past entries too light to match |
+| `batchSize`            | `1024`       | Candidates verified per call; measured 32.0 µs each at 64, 10.7 µs at 256, 8.2 µs at 1024                   |
+
+## Tuning SQLite for a large database
+
+The library is handed a connection it does not own, so it sets no pragmas. Two
+are worth setting yourself once the index is large.
+
+```js
+const db = new DatabaseSync('molecules.db');
+// Read index pages straight out of the page cache instead of copying them into
+// SQLite's own. Measured on a 2 M-entry prescreen: 124 ms -> 64 ms. Node's
+// build caps the value at 2 GB, and asking for more is not an error.
+db.exec('PRAGMA mmap_size = 2147483648');
+// node:sqlite ships SQLite's stock 2 MB page cache. 128 MB (the value is in
+// KiB, negative) is a better fit for a scan-heavy workload.
+db.exec('PRAGMA cache_size = -131072');
+```
+
+A prescreen reads the `ocl_ss_index` covering index end to end, so it is paging
+work more than it is CPU work, and both pragmas address exactly that. Neither
+changes any result.
 
 ## Inserting molecules
 
@@ -280,6 +303,24 @@ candidates reads only ~1 400 of them and returns in 16 ms instead of 787 ms.
 **What survives an early stop is the smallest superstructures** — the matches
 closest to the query — rather than an arbitrary insertion-order subset.
 
+**A match cannot be lighter than the fragment**, and since the table is
+physically ordered by weight, the prescreen can *seek* past every entry too light
+to be a superstructure rather than reading and rejecting them. It is the only
+predicate in the prescreen SQLite can seek on; the fingerprint test is a bitmask
+and has to be evaluated row by row.
+
+The floor is a fragment's own `getMolecularFormula().relativeWeight`, which for a
+fragment counts **only heavy atoms** — benzene reads `C6`, 72.07, not `C6H6`,
+78.11 — so it is sound whatever hydrogens the match carries. It is dropped
+entirely in three cases, each of which would otherwise lose real matches:
+
+- the fragment carries any **query feature**: an atom list or a wildcard lets an
+  atom match a lighter element than the formula assumed, and an exclude group
+  puts atoms in the formula that a match must *not* have;
+- any entry's stored weight is **0**, which `insert()` also uses for "unknown";
+- a **`mwColumn` is configured** and `trustMwColumn` is not set, because that
+  column is yours and may hold a sort key rather than a weight.
+
 This is why `candidates` uses `+s.entry_id IN (…)`. The unary `+` marks the term
 unusable by an index, which keeps `ocl_ss_index` as the driving table. Without
 it SQLite drives the scan off the subquery — the smaller side, and one with no
@@ -325,22 +366,55 @@ together would leave both modes half-answered for the whole run.
 Per 400 000 entries on one core: the no-stereo pass takes ~30 s; the tautomer
 pass takes 2.4 h uncapped, or ~21 min at the default cap.
 
-### The cap, and what NULL means
+### Hashes written before version 6
 
-Canonizing a generic tautomer runs synchronously inside WebAssembly and cannot
-be cancelled, so a molecule that runs long is stopped by **destroying the worker
-thread running it** and starting a fresh one (~50 ms). `capMs` sets how long to
-allow; the default is 100 ms:
+`openchemlib-search-wasm` 2.0.0 fixed a defect that gave the wrong hash to a
+molecule whose stereogenic double bond carries no configuration — around 1.5% of
+a drug-like library, and exactly the molecules a SMILES written without stereo
+produces. Nothing about a stored hash says which version computed it, so schema
+version 4 **drops both hash tables and recreates them empty**. Run
+`backfillHashes()` again after upgrading; until you do, the two hash modes return
+nothing, which is the same state a database is in before its first backfill.
 
-| cap | given up on | tautomer pass, 400 000 entries, 8 cores |
-| --- | --- | --- |
-| none | 0% | 17.7 min |
-| 250 ms | 2.0% | 5.3 min |
-| **100 ms** (default) | **2.3%** | **2.6 min** |
-| 20 ms | 3.2% | 54 s |
+### The ceiling, and what NULL means
 
-The no-stereo pass never comes near it — its p99 is 359 µs — so the cap is
-effectively a tautomer-only setting.
+The cost of a tautomer hash is set by how many tautomers the molecule has, so
+that is what bounds it: `maxTautomers` is the ceiling OpenChemLib stops
+enumerating at, and a molecule that reaches it has no tautomer hash. Measured
+over 2000 real idcodes:
+
+| `maxTautomers` | given up on | whole pass | slowest molecule |
+| --- | --- | --- | --- |
+| 100000 (OpenChemLib's own) | 1.50% | 58.1 s | 2841 ms |
+| 20000 | 1.85% | 22.9 s | 5851 ms |
+| **5000** (default) | **2.60%** | **7.1 s** | **320 ms** |
+| 2000 | 3.20% | 1.5 s | 48 ms |
+| 1000 | 3.85% | 0.9 s | 16 ms |
+
+The default gives up on about as much as the old 100 ms clock did (2.3%) and is
+roughly eight times faster, but that is not the reason it replaced it.
+
+**A clock makes the database depend on the machine.** Under load a time cap
+gives up on molecules a quiet machine hashes, so the same corpus imported on two
+hosts holds different hashes — and `search()`, which hashes its query the same
+way, then finds nothing for them. A ceiling is a work bound: the same molecule
+reaches it everywhere, so a database holds the same hashes wherever it was
+filled.
+
+`capMs` remains as a backstop for a molecule that runs long for some other
+reason; it is no longer what normally stops one. The no-stereo pass enumerates
+no tautomers, so neither bound applies to it.
+
+### Changing the ceiling rebuilds the tautomer hashes
+
+Which molecules have a tautomer hash depends on the ceiling, so the ceiling is
+recorded in the database. Open an existing database with a different
+`maxTautomers` and `migrate()` empties the tautomer hash table — `onMigration`
+reports it — so `backfillHashes()` fills it again under the new one. Without
+that, raising or lowering it would make `search()` hash its query to a value no
+stored hash was ever going to equal, and the mode would quietly return nothing.
+
+The no-stereo table is untouched: no ceiling applies to it.
 
 A molecule the cap stops is stored as **NULL**, and so is one OCL cannot hash at
 all. Both mean the same thing to a search — this entry has no such hash — and

@@ -9,7 +9,7 @@ import type {
 
 import { StructureHashPool } from './StructureHashPool.ts';
 import type { HashKind } from './structureHash.ts';
-import { HASH_TABLE } from './structureHash.ts';
+import { DEFAULT_MAX_TAUTOMERS, HASH_TABLE } from './structureHash.ts';
 
 /** Everything the backfill needs to find the entries it still owes. */
 export interface BackfillContext {
@@ -55,6 +55,7 @@ export async function backfillHashes(
   const {
     poolSize = availableParallelism(),
     capMs = 100,
+    maxTautomers = DEFAULT_MAX_TAUTOMERS,
     chunkSize = 500,
     limit = Number.MAX_SAFE_INTEGER,
     onProgress,
@@ -72,6 +73,7 @@ export async function backfillHashes(
       // eslint-disable-next-line no-await-in-loop -- intentional: that ordering is the point
       const pass = await runPass(context, pool, kind, {
         capMs,
+        maxTautomers,
         chunkSize,
         limit,
         onProgress,
@@ -106,10 +108,12 @@ async function runPass(
   context: BackfillContext,
   pool: StructureHashPool,
   kind: HashKind,
-  options: Required<Pick<BackfillOptions, 'capMs' | 'chunkSize' | 'limit'>> &
+  options: Required<
+    Pick<BackfillOptions, 'capMs' | 'chunkSize' | 'limit' | 'maxTautomers'>
+  > &
     Pick<BackfillOptions, 'onProgress' | 'signal'>,
 ): Promise<BackfillPassResult> {
-  const { capMs, chunkSize, limit, onProgress, signal } = options;
+  const { capMs, maxTautomers, chunkSize, limit, onProgress, signal } = options;
   const table = HASH_TABLE[kind];
   const total = countPending(context, table);
   const started = Date.now();
@@ -151,8 +155,10 @@ async function runPass(
     const hashes = await Promise.all(
       rows.map(async (row) => {
         // An entry with no idCode has no hash, and needs no worker to say so.
-        if (!row.id_code) return { hash: null, timedOut: false };
-        return pool.hash(kind, row.id_code, capMs);
+        if (!row.id_code) {
+          return { hash: null, timedOut: false, truncated: false };
+        }
+        return pool.hash(kind, row.id_code, capMs, maxTautomers);
       }),
     );
 
@@ -176,7 +182,9 @@ async function runPass(
 
     for (const outcome of hashes) {
       if (outcome.hash !== null) result.hashed++;
-      else if (outcome.timedOut) result.timedOut++;
+      // Both bounds mean the same thing to a caller: we chose to stop rather
+      // than OpenChemLib being unable to answer.
+      else if (outcome.timedOut || outcome.truncated) result.timedOut++;
       else result.noHash++;
     }
     processed += rows.length;
