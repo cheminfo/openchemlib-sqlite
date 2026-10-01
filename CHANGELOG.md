@@ -1,5 +1,17 @@
 # Changelog
 
+## [5.1.0](https://github.com/cheminfo/openchemlib-sqlite/compare/v5.0.0...v5.1.0) (2026-10-01)
+
+
+### Features
+
+* screen substructure candidates from a transposed plane index ([82a48a5](https://github.com/cheminfo/openchemlib-sqlite/commit/82a48a50e904e285b43f39a402549c473ac7b61e))
+
+
+### Bug Fixes
+
+* publish a folded chunk only once it is whole ([ed3ff2d](https://github.com/cheminfo/openchemlib-sqlite/commit/ed3ff2d44ed1522a24b60ad0f8fe20f2ebc4539e))
+
 ## [5.0.0](https://github.com/cheminfo/openchemlib-sqlite/compare/v4.0.0...v5.0.0) (2026-09-10)
 
 
