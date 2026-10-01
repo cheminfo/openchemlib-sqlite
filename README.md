@@ -329,6 +329,62 @@ rebuild it, materialising every candidate before the first row comes out. Forcin
 the clustered scan keeps a restricted search streaming and lightest-first exactly
 like an unrestricted one (24 ms vs 70 ms on the benzene scan above).
 
+## Folding the plane index
+
+`molDB.foldPlanes()` transposes fingerprints into the plane index, and **nothing
+calls it for you**. Until it runs, the index is empty and every search takes the
+column scan exactly as before, so a database that never folds simply never gets
+faster.
+
+It is manual for the same reason `backfillHashes()` is: at ~38 µs an entry a
+first fold of 150 M takes about 95 minutes. It is resumable, and
+`planeStatus().pending` is the number to watch — entries inserted since the last
+fold, which every search still screens the slower way.
+
+```js
+let result;
+do {
+  result = molDB.foldPlanes({ maxChunks: 1 });
+} while (result.pending);
+```
+
+### Run it beside the service, not inside it
+
+`node:sqlite` is synchronous, so a fold blocks whichever thread owns the
+connection — there is no background for it to run in. Run it in a **separate
+process or worker thread**, with its own connection to the same file: WAL allows
+one writer alongside readers, and nothing is shared but the file.
+
+A fold is a writer, so it competes for the write lock with whatever is
+inserting. Two things keep it out of the way, and both matter if the database is
+serving traffic:
+
+- **Its transactions are short.** Writing a chunk of 2^20 entries used to be one
+  transaction — seconds on the lock, and tens of megabytes. It is now committed
+  in pieces of 10 000 slots and 32 plane blobs.
+- **`pauseMs` leaves gaps between them**, so the service's own writes land in
+  between. Start at `pauseMs: 50` for a fold sharing a live database.
+
+```js
+molDB.foldPlanes({ maxChunks: 1, pauseMs: 50 });
+```
+
+Set `busy_timeout` on both connections (see the tuning section above) so neither
+side gives up when the other holds the lock.
+
+### An interrupted fold cannot corrupt an answer
+
+A chunk's planes are written first and **published second**: a search takes its
+chunk list from the segments, so a chunk whose planes exist but whose segment has
+not been extended is invisible and cannot answer. The next fold writes over it.
+
+This is why visibility is not read from `ocl_ss_plane` directly. It would make a
+half-written chunk look complete, and a search would return false negatives
+without any sign of it — a missing plane row legitimately means "no entry in this
+chunk sets this bit". For the same reason the tail rows a chunk covers are
+cleared in that publishing transaction, never before it, so an interruption
+cannot lose an entry from both the tail and the index.
+
 ## Structure hashes
 
 `exactNoStereo` and `exactNoStereoTautomer` match on OpenChemLib's own 64-bit

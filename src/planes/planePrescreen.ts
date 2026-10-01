@@ -9,12 +9,7 @@ import type {
 
 import { intersectPlanes } from './planeIntersect.ts';
 import { SLOTS_PER_CHUNK, bitsOfIndex, readBit } from './planeLayout.ts';
-import {
-  BITSTAT_TABLE,
-  PLANE_TABLE,
-  SEGMENT_TABLE,
-  SLOT_TABLE,
-} from './planeSchema.ts';
+import { BITSTAT_TABLE, SEGMENT_TABLE, SLOT_TABLE } from './planeSchema.ts';
 
 type OCLMolecule = InstanceType<(typeof OpenChemLib)['Molecule']>;
 
@@ -242,15 +237,37 @@ function* resolveBatch(
 }
 
 /**
- * The chunks the plane index holds, ascending.
+ * The chunks a search may read, ascending.
+ *
+ * Derived from the segments rather than from the planes themselves, and that is
+ * what makes a fold safe to interrupt: a chunk whose planes are written but
+ * whose segment has not been extended is not listed here, so it cannot answer.
+ * Taken from `ocl_ss_plane` instead, a half-written chunk would be read as
+ * complete and quietly return false negatives — a missing plane row legitimately
+ * means "no entry here sets this bit".
  * @param db - The database to read.
- * @returns Every chunk number that has at least one plane.
+ * @returns Every chunk number a published segment covers.
  */
 export function planeChunks(db: SQLiteDatabase): number[] {
   const rows = db
-    .prepare(`SELECT DISTINCT chunk FROM ${PLANE_TABLE} ORDER BY chunk`)
+    .prepare(
+      `SELECT first_slot, slot_count FROM ${SEGMENT_TABLE}
+        WHERE slot_count > 0 ORDER BY first_slot`,
+    )
     .all() as Array<Record<string, unknown>>;
-  return rows.map((row) => Number(row.chunk));
+  const chunks = new Set<number>();
+  for (const row of rows) {
+    const first = Number(row.first_slot);
+    const last = first + Number(row.slot_count) - 1;
+    for (
+      let chunk = Math.floor(first / SLOTS_PER_CHUNK);
+      chunk <= Math.floor(last / SLOTS_PER_CHUNK);
+      chunk++
+    ) {
+      chunks.add(chunk);
+    }
+  }
+  return [...chunks].toSorted((a, b) => a - b);
 }
 
 /**

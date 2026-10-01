@@ -4,7 +4,6 @@ import { unpackSSIndex } from '../utils/packSSIndex.ts';
 import { ChunkBuilder } from './ChunkBuilder.ts';
 import { SLOTS_PER_CHUNK, bitsOfIndex } from './planeLayout.ts';
 import {
-  BITSTAT_TABLE,
   PLANE_TABLE,
   SEGMENT_TABLE,
   SLOT_TABLE,
@@ -16,6 +15,7 @@ import {
   nextSlotOf,
   storedBitsOf,
 } from './planeState.ts';
+import { publishChunk, writeChunkData } from './writeChunk.ts';
 
 /** How a fold decides what to store and how much to do in one call. */
 export interface FoldOptions {
@@ -40,6 +40,17 @@ export interface FoldOptions {
   maxChunks?: number;
   /** Called after each chunk with how many entries have been folded so far. */
   onProgress?: (folded: number) => void;
+  /**
+   * Milliseconds to pause between the fold's transactions.
+   *
+   * A fold is a writer, so it competes for the write lock with whatever is
+   * inserting. Its transactions are already short enough not to stall a service
+   * sharing the file, and this leaves gaps between them as well — the knob for
+   * folding in the background without the live side noticing. 50 ms roughly
+   * halves a fold's share of the lock.
+   * @default 0
+   */
+  pauseMs?: number;
 }
 
 /** What one fold did. */
@@ -84,6 +95,7 @@ export function foldPlanes(
     maxPopulationRatio = 0.5,
     maxChunks = Number.MAX_SAFE_INTEGER,
     onProgress,
+    pauseMs = 0,
   } = options;
   const start = Date.now();
 
@@ -109,11 +121,6 @@ export function foldPlanes(
   const writeSlot = db.prepare(
     `INSERT OR REPLACE INTO ${SLOT_TABLE} (slot, entry_id) VALUES (?, ?)`,
   );
-  const bumpStat = db.prepare(
-    `INSERT INTO ${BITSTAT_TABLE} (bit, population, stored) VALUES (?, ?, ?)
-       ON CONFLICT(bit) DO UPDATE SET population = population + excluded.population`,
-  );
-  const dropTail = db.prepare(`DELETE FROM ${TAIL_TABLE} WHERE entry_id = ?`);
 
   let stored = storedBitsOf(db);
   const builder = new ChunkBuilder();
@@ -122,6 +129,8 @@ export function foldPlanes(
   let chunks = 0;
   let cursor = { mw: -1e308, entryId: -1 };
   let pending = false;
+
+  let segment: number | null = null;
 
   while (chunks < maxChunks) {
     const rows = read.all(cursor.mw, cursor.entryId, SLOTS_PER_CHUNK) as Array<
@@ -145,32 +154,35 @@ export function foldPlanes(
       );
     }
 
-    const chunk = Math.floor(slot / SLOTS_PER_CHUNK);
-    db.exec('BEGIN');
-    try {
-      for (const [bit, bits] of builder.entries(stored)) {
-        writePlane.run(chunk, bit, bits);
-      }
-      for (const [offset, entryId] of entryIds.entries()) {
-        writeSlot.run(slot + offset, entryId);
-      }
-      for (const [bit, population] of populations) {
-        bumpStat.run(bit, population, stored.has(bit) ? 1 : 0);
-      }
-      if (source === TAIL_TABLE) {
-        for (const entryId of entryIds) dropTail.run(entryId);
-      }
-      db.exec('COMMIT');
-    } catch (error) {
-      db.exec('ROLLBACK');
-      throw error;
-    }
-
     const last = rows.at(-1);
-    cursor = {
+    const reached = {
       mw: Number(last?.mw ?? 0),
       entryId: Number(last?.entry_id ?? 0),
     };
+
+    // Written first and published second: until the segment covers it, no
+    // search can see this chunk, so an interruption costs the chunk rather than
+    // the correctness of every query that touches it.
+    writeChunkData({
+      db,
+      chunk: Math.floor(slot / SLOTS_PER_CHUNK),
+      firstSlot: slot,
+      entryIds,
+      builder,
+      stored,
+      writePlane,
+      writeSlot,
+      pauseMs,
+    });
+    segment = publishChunk(db, segment, {
+      firstSlot: slot,
+      slots: rows.length,
+      populations,
+      stored,
+      cursor: source === TAIL_TABLE ? reached : null,
+    });
+
+    cursor = reached;
     slot += rows.length;
     folded += rows.length;
     chunks++;
@@ -180,10 +192,6 @@ export function foldPlanes(
   }
 
   if (folded > 0) {
-    db.prepare(
-      `INSERT INTO ${SEGMENT_TABLE} (first_slot, slot_count, mw_ordered)
-       VALUES (?, ?, 1)`,
-    ).run(firstSlot, folded);
     // The trigger has been filling the tail since the migration ran, so after a
     // seed from ocl_ss_index the tail holds rows that now have a slot.
     db.exec(
@@ -192,6 +200,7 @@ export function foldPlanes(
                        WHERE s.entry_id = ${TAIL_TABLE}.entry_id)`,
     );
   }
+
   if (!pending) pending = countOf(db, TAIL_TABLE) > 0;
 
   return {

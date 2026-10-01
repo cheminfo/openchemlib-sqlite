@@ -8,11 +8,18 @@ import { buildPrescreenSql } from '../../utils/prescreen.ts';
 import { foldPlanes } from '../foldPlanes.ts';
 import { bitsOfIndex, countBits, readBit, setBit } from '../planeLayout.ts';
 import {
+  planeChunks,
   planeCoverage,
   planeQueryBits,
   prescreenPlanes,
 } from '../planePrescreen.ts';
-import { BITSTAT_TABLE, PLANE_TABLE, TAIL_TABLE } from '../planeSchema.ts';
+import {
+  BITSTAT_TABLE,
+  PLANE_TABLE,
+  SLOT_TABLE,
+  TAIL_TABLE,
+} from '../planeSchema.ts';
+import { nextSlotOf } from '../planeState.ts';
 
 const SMILES = [
   'CC(=O)Oc1ccccc1C(=O)O',
@@ -253,4 +260,51 @@ test('migrate puts the tail trigger back when a rebuild has dropped it', () => {
     .get(Number(lastInsertRowid)) as Record<string, unknown>;
 
   expect(Number(row.n)).toBe(1);
+});
+
+test('a chunk no segment covers is invisible to a search', () => {
+  const { db } = makeDB();
+  foldPlanes(db, { maxPopulationRatio: 1 });
+  const published = planeChunks(db);
+
+  // What an interrupted fold leaves behind: planes written, segment not yet
+  // extended. Read from ocl_ss_plane this would answer as a complete chunk and
+  // return false negatives, because a missing plane row means "no entry here
+  // sets this bit".
+  db.prepare(
+    `INSERT INTO ${PLANE_TABLE} (chunk, bit, bits) VALUES (?, ?, ?)`,
+  ).run(99, 0, new Uint8Array(16));
+
+  expect(planeChunks(db)).toStrictEqual(published);
+});
+
+test('the slots of an abandoned chunk are written over, not skipped', () => {
+  const { db } = makeDB();
+  foldPlanes(db, { maxPopulationRatio: 1 });
+  const next = nextSlotOf(db);
+
+  // Orphan slots, as an interrupted fold leaves: past the published slots but
+  // covered by no segment. The entry has to be real — the slot table references
+  // the entries table and foreign keys are enforced.
+  const { lastInsertRowid } = db
+    .prepare('INSERT INTO molecules (id_code) VALUES (?)')
+    .run(OCL.Molecule.fromSmiles('Ic1ccccc1').getIDCode());
+  db.prepare(`INSERT INTO ${SLOT_TABLE} (slot, entry_id) VALUES (?, ?)`).run(
+    next + 500,
+    Number(lastInsertRowid),
+  );
+
+  expect(nextSlotOf(db)).toBe(next);
+});
+
+test('pausing between transactions changes nothing but the pace', () => {
+  const paced = makeDB();
+  foldPlanes(paced.db, { maxPopulationRatio: 1, pauseMs: 1 });
+  const flat = makeDB();
+  foldPlanes(flat.db, { maxPopulationRatio: 1 });
+
+  expect(planeCandidates(paced.db, 'Oc1ccccc1')).toStrictEqual(
+    planeCandidates(flat.db, 'Oc1ccccc1'),
+  );
+  expect(planeCoverage(paced.db)).toStrictEqual(planeCoverage(flat.db));
 });

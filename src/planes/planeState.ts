@@ -1,7 +1,7 @@
 import type { SQLiteDatabase } from '../types.ts';
 
 import { PLANE_BITS } from './planeLayout.ts';
-import { BITSTAT_TABLE, SLOT_TABLE } from './planeSchema.ts';
+import { BITSTAT_TABLE, SEGMENT_TABLE } from './planeSchema.ts';
 
 /**
  * Settle which bits get planes, from the first chunk's populations.
@@ -44,15 +44,22 @@ export function storedBitsOf(db: SQLiteDatabase): Set<number> | null {
 }
 
 /**
- * The first unused slot.
+ * The first slot no published chunk holds.
+ *
+ * Read from the segments, not from the slot table: a fold that was interrupted
+ * leaves slot rows no segment covers, and those are rows a search cannot see, so
+ * the next fold should write over them rather than start past them.
  * @param db - The database to read.
- * @returns One past the highest slot in use, or 0.
+ * @returns One past the last published slot, or 0.
  */
 export function nextSlotOf(db: SQLiteDatabase): number {
   const row = db
-    .prepare(`SELECT COALESCE(MAX(slot), -1) AS last FROM ${SLOT_TABLE}`)
+    .prepare(
+      `SELECT COALESCE(MAX(first_slot + slot_count), 0) AS next
+         FROM ${SEGMENT_TABLE}`,
+    )
     .get() as Record<string, unknown> | undefined;
-  return Number(row?.last ?? -1) + 1;
+  return Number(row?.next ?? 0);
 }
 
 /**
