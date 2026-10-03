@@ -1,5 +1,14 @@
 # Changelog
 
+## [5.3.0](https://github.com/cheminfo/openchemlib-sqlite/compare/v5.2.0...v5.3.0) (2026-10-03)
+
+
+### Features
+
+* bound, resume and time out structure scans ([e32a4ab](https://github.com/cheminfo/openchemlib-sqlite/commit/e32a4ab74756392c99983fe1239e89bd0747a33f))
+* drop the tail and lower a watermark when entry ids do not grow ([9cd9ca9](https://github.com/cheminfo/openchemlib-sqlite/commit/9cd9ca96290b0943b7f2259bc2f29616177cc33e))
+* fold up to an entry-id watermark ([01f220a](https://github.com/cheminfo/openchemlib-sqlite/commit/01f220a71356a40e3dc1cc7dd705b2d22d87f601))
+
 ## [5.2.0](https://github.com/cheminfo/openchemlib-sqlite/compare/v5.1.0...v5.2.0) (2026-10-01)
 
 
