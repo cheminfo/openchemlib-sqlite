@@ -54,15 +54,15 @@ molDB.migrate(); // creates or upgrades ocl_ss_index (idempotent)
 
 `MoleculesDBConfig` options:
 
-| Option                 | Default      | Description                                                                                                  |
-| ---------------------- | ------------ | ------------------------------------------------------------------------------------------------------------ |
-| `entriesTable`         | _(required)_ | Name of the existing molecules table                                                                         |
-| `pkColumn`             | `'id'`       | Primary key column name                                                                                      |
-| `idCodeColumn`         | `'id_code'`  | Column holding the OCL idCode                                                                                |
-| `mwColumn`             | `null`       | Column holding the molecular weight (REAL); enables automatic mass-difference sorting in substructure search |
-| `maxTautomers`         | `5000`       | Ceiling on tautomer enumeration; recorded in the database, and changing it rebuilds the tautomer hashes      |
-| `trustMwColumn`        | `false`      | Promise that `mwColumn` holds real molecular weights, so the prescreen may seek past entries too light to match |
-| `batchSize`            | `1024`       | Candidates verified per call; measured 32.0 µs each at 64, 10.7 µs at 256, 8.2 µs at 1024                   |
+| Option          | Default      | Description                                                                                                     |
+| --------------- | ------------ | --------------------------------------------------------------------------------------------------------------- |
+| `entriesTable`  | _(required)_ | Name of the existing molecules table                                                                            |
+| `pkColumn`      | `'id'`       | Primary key column name                                                                                         |
+| `idCodeColumn`  | `'id_code'`  | Column holding the OCL idCode                                                                                   |
+| `mwColumn`      | `null`       | Column holding the molecular weight (REAL); enables automatic mass-difference sorting in substructure search    |
+| `maxTautomers`  | `5000`       | Ceiling on tautomer enumeration; recorded in the database, and changing it rebuilds the tautomer hashes         |
+| `trustMwColumn` | `false`      | Promise that `mwColumn` holds real molecular weights, so the prescreen may seek past entries too light to match |
+| `batchSize`     | `1024`       | Candidates verified per call; measured 32.0 µs each at 64, 10.7 µs at 256, 8.2 µs at 1024                       |
 
 ## Tuning SQLite for a large database
 
@@ -139,6 +139,11 @@ at all. Measured over real idcodes: **1350 µs an entry building the fingerprint
 under four. `index` is the 512-bit FragFp in whichever width you hold it, 16
 words of 32 bits or 8 of 64.
 
+The statement it writes with is prepared once per instance: preparing it for
+every insert was most of what writing a precomputed entry cost, 14.9 µs an
+entry against 3.7 µs once prepared
+([benchmark/insertPrecomputed.mjs](benchmark/insertPrecomputed.mjs)).
+
 A `mw` must be the value `mwColumn` holds when one is configured, or the index's
 clustered order stops matching what a bulk path would have written.
 
@@ -173,7 +178,8 @@ refusing to delete an entry that is still indexed.
 
 ## Searching
 
-All search modes return a `SearchResponse` with `results`, `total`, and optional `partial` / `screened` fields.
+All search modes return a `SearchResponse` with `results`, `total`, and optional `partial` / `screened` fields;
+the scans add `timedOut`, and a substructure scan stopped early adds `resume` (see [Pagination](#pagination)).
 Each result contains `{ entryId, idCode }` — use `entryId` to look up additional data in your own table.
 
 The query can be a string (parsed with `options.format`) or a `Molecule` instance (format option is ignored).
@@ -241,6 +247,14 @@ const { results, screened, partial } = molDB.search('c1ccccc1', {
 
 A 512-bit fingerprint prefilter (bitwise AND) discards non-candidates before running the full OCL substructure check.
 
+**`timeoutMs` is enforced from inside SQLite.** A scan whose rows all fail the
+prefilter or the candidates test yields nothing, so the loop that reads the clock
+between rows never runs. On a driver that can register a SQL function, the library
+registers `ocl_ss_deadline` on the connection and makes it the first condition of
+the scan, so the statement itself stops at the deadline. `timedOut: true` then says
+the clock stopped the scan; `maxResults` and `maxCandidates` set only `partial`.
+Without `function()` the clock is read between rows, as before.
+
 **Empty query optimization** — passing a molecule with no atoms (e.g. `new OCL.Molecule(0, 0)`) skips the fingerprint prefilter entirely and returns every indexed entry, because an empty fragment matches everything.
 
 ### Substructure search sorted by mass difference
@@ -270,8 +284,17 @@ const { results } = molDB.search('Cn1c(=O)c2c(ncn2C)n(C)c1=O', {
   format: 'smiles',
   similarityThreshold: 0.4,
 });
-// results sorted by descending similarity; each entry has a .similarity field
+// results sorted by descending similarity, then by entry id; each entry has a .similarity field
 ```
+
+A similarity search reads every entry, so the coefficient is computed inside
+SQLite, by a function the library registers on the connection, and the
+threshold is tested there: only the entries that reach it are handed to
+JavaScript. Over 891 901 natural products at a threshold of 0.8, a scan takes
+484 ms instead of 3 502 ms (543 against 3 926 ns an entry, flavone) and 401 ms
+instead of 3 250 ms (quercetin) —
+[benchmark/similarityScan.mjs](benchmark/similarityScan.mjs). A driver that
+cannot register a function falls back to reading every row.
 
 ### Pagination
 
@@ -282,6 +305,32 @@ const { results, total } = molDB.search(query, {
   limit: 50,
   from: 0,
 });
+```
+
+A substructure scan stopped by `maxResults` or by its time also says where it
+stopped. `resume` is the weight and entry id of the last match it kept — or of
+the last candidate it read, when its time ran out — and handing it back as
+`after` starts the next scan there, sought on the clustered key, so a deep page
+costs what the first one does. `resume` is absent once the scan has read every
+candidate, and `timedOut` says whether the clock stopped it.
+
+`resume` is also absent when the [plane index](#folding-the-plane-index) answered
+a scan that stopped early: the planes read in slot order, so there is no position
+to give. That scan stopped on its time or on `maxCandidates`, never on
+`maxResults`, and `partial` says its answer is incomplete. A scan given `after`,
+`mwRange` or `candidates` never takes the plane path.
+
+```js
+let after;
+do {
+  const page = await molDB.search('c1ccccc1', {
+    mode: 'substructure',
+    maxResults: 50,
+    ...(after === undefined ? {} : { after }),
+  });
+  show(page.results);
+  after = page.resume;
+} while (after !== undefined);
 ```
 
 ### Restricting a search to candidates
@@ -310,9 +359,56 @@ filter: **199 ms → 50 ms**.
 
 `sql` must select exactly one column, named `entry_id`, and `params` must use
 **named** parameters (`:name`) since the prescreen binds its own anonymous ones.
-Every mode honours it (`substructure`, `similarity`, `exact`, `exactNoStereo`).
-Because the prescreen runs once per search, so does the subquery — however many
-verifier threads are running.
+Every mode honours it (`substructure`, `similarity`, `exact`, `exactNoStereo`,
+`exactNoStereoTautomer`). It belongs to the single prescreen statement, so it is
+evaluated by one search however many verifier threads are running.
+
+#### How the subquery is applied: `strategy`
+
+```js
+candidates: {
+  sql: 'SELECT id AS entry_id FROM ligands WHERE band = :band',
+  params: { band: 7 },
+  strategy: 'probe', // 'membership' (default) | 'probe' | 'drive'
+},
+```
+
+| `strategy`             | what it does                                                                                            | right when                                                     |
+| ---------------------- | ------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------- |
+| `membership` (default) | runs the subquery once, holds its ids, tests each entry of the weight-ordered scan against them         | the subquery is modest and an index answers it                 |
+| `probe`                | looks each entry the prefilter keeps up in the subquery, as a correlated `EXISTS`; nothing is listed    | the subquery keeps a large share, or tests an unindexed column |
+| `drive`                | reads the subquery's entries first, each fingerprint through the `entry_id` index, then sorts by weight | the subquery returns few rows                                  |
+
+A membership list costs the whole subquery before the first candidate is read; a
+probe costs the page, since the scan stops as soon as it has enough; drive costs
+the subquery's own rows, however large the index. Measured on 4 023 045 entries,
+benzene, a page of 24: `band = 7` (1%, no index) takes 107 ms as membership and
+11 ms as a probe; `tag = 7` (0.01%, indexed) takes 115 ms as membership and
+3.7 ms driven ([benchmark/filteredScan.mjs](benchmark/README.md#filters-filteredscanmjs)).
+A probe's subquery should be a plain SELECT — joins and WHERE — so SQLite can push
+the entry id into it.
+
+The exact modes read a handful of rows, so they always test the subquery per row,
+whatever the strategy. A similarity scan follows it: `probe` tests per row, the
+other two join the subquery.
+
+#### Bounding the weight: `mwRange`
+
+```js
+const { results } = await molDB.search('c1ccccc1', {
+  mode: 'substructure',
+  mwRange: { min: 260, max: 500 }, // inclusive; either bound may be left out
+});
+```
+
+The index is clustered by weight, so a bound here is a **seek**: the scan starts
+at `min` and ends at `max` without reading what lies outside. The same bound
+written into `candidates` is tested entry by entry, or listed in full as
+membership: on the benchmark above, `mw >= 260 AND band < 80` takes 497 ms as a
+membership list and 3.6 ms as `mwRange: { min: 260 }` plus a `band < 80` probe. The
+values are compared with the weight the index stores — the one `insert()`
+derived, or your `mwColumn` / precomputed `mw`. Every mode honours it; outside
+the substructure scan it is a test rather than a seek.
 
 ## How a substructure search runs
 
@@ -353,7 +449,7 @@ candidates reads only ~1 400 of them and returns in 16 ms instead of 787 ms.
 closest to the query — rather than an arbitrary insertion-order subset.
 
 **A match cannot be lighter than the fragment**, and since the table is
-physically ordered by weight, the prescreen can *seek* past every entry too light
+physically ordered by weight, the prescreen can _seek_ past every entry too light
 to be a superstructure rather than reading and rejecting them. It is the only
 predicate in the prescreen SQLite can seek on; the fingerprint test is a bitmask
 and has to be evaluated row by row.
@@ -365,7 +461,7 @@ entirely in three cases, each of which would otherwise lose real matches:
 
 - the fragment carries any **query feature**: an atom list or a wildcard lets an
   atom match a lighter element than the formula assumed, and an exclude group
-  puts atoms in the formula that a match must *not* have;
+  puts atoms in the formula that a match must _not_ have;
 - any entry's stored weight is **0**, which `insert()` also uses for "unknown";
 - a **`mwColumn` is configured** and `trustMwColumn` is not set, because that
   column is yours and may hold a sort key rather than a weight.
@@ -458,10 +554,10 @@ Until a pass has run, its mode simply returns nothing. Nothing else breaks.
 
 The two hashes are nothing alike in cost. Measured over 3000 real molecules:
 
-| | mean | p50 | p99 | max |
-| --- | --- | --- | --- | --- |
-| no-stereo | **74 µs** | 50 µs | 359 µs | 18 ms |
-| no-stereo tautomer | 22 ms | 123 µs | **910 ms** | **3.6 s** |
+|                    | mean      | p50    | p99        | max       |
+| ------------------ | --------- | ------ | ---------- | --------- |
+| no-stereo          | **74 µs** | 50 µs  | 359 µs     | 18 ms     |
+| no-stereo tautomer | 22 ms     | 123 µs | **910 ms** | **3.6 s** |
 
 Roughly 300× apart, so the backfill runs them as **two passes and finishes the
 cheap one first**: `exactNoStereo` becomes completely searchable in well under a
@@ -488,13 +584,13 @@ that is what bounds it: `maxTautomers` is the ceiling OpenChemLib stops
 enumerating at, and a molecule that reaches it has no tautomer hash. Measured
 over 2000 real idcodes:
 
-| `maxTautomers` | given up on | whole pass | slowest molecule |
-| --- | --- | --- | --- |
-| 100000 (OpenChemLib's own) | 1.50% | 58.1 s | 2841 ms |
-| 20000 | 1.85% | 22.9 s | 5851 ms |
-| **5000** (default) | **2.60%** | **7.1 s** | **320 ms** |
-| 2000 | 3.20% | 1.5 s | 48 ms |
-| 1000 | 3.85% | 0.9 s | 16 ms |
+| `maxTautomers`             | given up on | whole pass | slowest molecule |
+| -------------------------- | ----------- | ---------- | ---------------- |
+| 100000 (OpenChemLib's own) | 1.50%       | 58.1 s     | 2841 ms          |
+| 20000                      | 1.85%       | 22.9 s     | 5851 ms          |
+| **5000** (default)         | **2.60%**   | **7.1 s**  | **320 ms**       |
+| 2000                       | 3.20%       | 1.5 s      | 48 ms            |
+| 1000                       | 3.85%       | 0.9 s      | 16 ms            |
 
 The default gives up on about as much as the old 100 ms clock did (2.3%) and is
 roughly eight times faster, but that is not the reason it replaced it.
@@ -641,8 +737,15 @@ import { MoleculesDBSQLite, type SQLiteDatabase } from 'openchemlib-sqlite';
 const db: SQLiteDatabase = /* any compatible driver */;
 ```
 
-> **Note**: Substructure and similarity searches call `stmt.setReadBigInts(true)` when available (node:sqlite).
+> **Note**: Code that reads fingerprints back — migrations, folds, the plane index, and a similarity
+> scan on a driver without `function()` — calls `stmt.setReadBigInts(true)` when available (node:sqlite).
 > For other drivers, configure BigInt return for INTEGER columns at the driver level.
+
+When the driver has `function()` (`node:sqlite` from Node 22.13, `better-sqlite3`), the library
+registers two SQL functions on the connection, once each: `ocl_ss_deadline`, which stops a scan at its
+`timeoutMs` from inside SQLite, and `ocl_ss_tanimoto`, which computes the similarity coefficient there.
+Without it, both fall back to JavaScript: the deadline is checked between rows and a similarity scan reads
+every row.
 
 ## License
 

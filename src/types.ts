@@ -18,6 +18,16 @@ export interface SQLiteStatement {
 export interface SQLiteDatabase {
   prepare(sql: string): SQLiteStatement;
   exec(sql: string): void;
+  /**
+   * Register a SQL function (node:sqlite + better-sqlite3). A scan uses one to
+   * stop at its deadline from inside SQLite; without it, the deadline is only
+   * checked between the rows a scan yields.
+   */
+  function?(
+    name: string,
+    options: { deterministic?: boolean; varargs?: boolean },
+    fn: (...args: unknown[]) => number,
+  ): unknown;
 }
 
 /** One step of a schema migration, reported to {@link MigrateOptions.onMigration}. */
@@ -166,7 +176,8 @@ export interface MoleculesDBConfig {
    * result set is kept in an in-memory LRU cache, keyed by the query. A repeated
    * search for the same structure — e.g. paging through results — then returns
    * instantly instead of re-running the scan. The cache is cleared whenever
-   * `insert()` changes the data. Set to 0 to disable caching.
+   * `insert()` changes the data. A scan that ran out of time is never kept, so
+   * a retry gets the chance to answer in full. Set to 0 to disable caching.
    * @default 100
    */
   searchCacheSize?: number;
@@ -198,6 +209,10 @@ export interface SearchOptions {
   from?: number;
   /**
    * Timeout in ms for scan-based searches (substructure / similarity).
+   *
+   * On a driver with {@link SQLiteDatabase.function} the deadline is also read
+   * from inside the scan's statement, so a scan that yields no row still stops
+   * on time; {@link SearchResponse.timedOut} then says the clock stopped it.
    * @default 5000
    */
   timeoutMs?: number;
@@ -231,8 +246,9 @@ export interface SearchOptions {
    * up. Prefer this over filtering the results afterwards, which pays for the
    * full scan first.
    *
-   * The subquery becomes a membership test on the single prescreen, so it is
-   * executed exactly once per search however many verifier threads are running.
+   * How the subquery is applied is its {@link SearchCandidates.strategy}; every
+   * strategy runs on the single prescreen, so however many verifier threads are
+   * running, it is evaluated once per search.
    *
    * `sql` must select exactly one column, named `entry_id`, holding primary keys
    * of the entries table. Bound values go in `params` and must be **named**
@@ -250,7 +266,81 @@ export interface SearchOptions {
    * ```
    */
   candidates?: SearchCandidates;
+  /**
+   * Bounds on the weight the index is clustered by, both inclusive.
+   *
+   * `ocl_ss_index` is stored in ascending weight order, so a bound here is a seek
+   * on its key rather than a test on each row: the scan starts at `min` and ends
+   * at `max` without reading anything outside them. Expressed in `candidates`
+   * instead, the same bound would be checked entry by entry — or, as a
+   * membership list, would list every entry in range before the first candidate
+   * is read.
+   *
+   * The values are compared with the weight the index stores: the one `insert()`
+   * derived, or the `mwColumn` or precomputed `mw` the caller supplied. Every mode
+   * honours it.
+   * @default {} — unbounded
+   */
+  mwRange?: MwRange;
+  /**
+   * Resume a substructure scan after this position, as a previous search's
+   * {@link SearchResponse.resume} gave it.
+   *
+   * Candidates stream in `(mw, entry_id)` order, the order the index is
+   * clustered in, so the scan seeks past the position on that key and reads
+   * nothing before it: a deep page costs what the first one does. Ignored by
+   * the other modes.
+   * @default undefined — from the first candidate
+   */
+  after?: ScanPosition;
 }
+
+/**
+ * Where a substructure scan stands: the weight and entry id of a candidate,
+ * the key the index is clustered by.
+ */
+export interface ScanPosition {
+  /** The candidate's weight, as the index stores it. */
+  mw: number;
+  /** The candidate's entry id. */
+  entryId: number;
+}
+
+/** Inclusive bounds on the weight the index is clustered by. */
+export interface MwRange {
+  /**
+   * The lightest weight kept.
+   * @default undefined — no lower bound
+   */
+  min?: number;
+  /**
+   * The heaviest weight kept.
+   * @default undefined — no upper bound
+   */
+  max?: number;
+}
+
+/**
+ * How a candidates subquery restricts a scan.
+ *
+ * - `membership` — the subquery runs once, its ids are held in memory, and the
+ *   scan tests each entry against them. It is the right choice for a modest
+ *   subquery an index answers, and it is what a caller gets by default.
+ * - `probe` — the subquery never runs as a whole: each entry the fingerprint
+ *   prescreen lets through is looked up in it, as a correlated `EXISTS`. Right
+ *   when the subquery keeps a large share of the entries or tests a column no
+ *   index covers, because listing such a subquery first reads most of the table
+ *   before the scan yields anything. The scan streams lightest-first and stops
+ *   as soon as it has enough, so its cost follows the page, not the subquery.
+ *   The subquery should be a plain SELECT — joins and WHERE — so SQLite can push
+ *   the entry id into it.
+ * - `drive` — the subquery is the outer loop: each entry it returns has its
+ *   fingerprint read through the `entry_id` index, and the survivors are sorted
+ *   by weight. Right when the subquery returns few rows: its cost is then the
+ *   subquery's own however large the index is, where the other two would scan
+ *   the index until they had read past every candidate.
+ */
+export type CandidateStrategy = 'membership' | 'probe' | 'drive';
 
 /** A subquery restricting a search to a subset of the entries table. */
 export interface SearchCandidates {
@@ -258,6 +348,11 @@ export interface SearchCandidates {
   sql: string;
   /** Named parameters (`:name`) bound to {@link SearchCandidates.sql}. */
   params?: Record<string, unknown>;
+  /**
+   * How the subquery restricts the scan; see {@link CandidateStrategy}.
+   * @default 'membership'
+   */
+  strategy?: CandidateStrategy;
 }
 
 export interface SearchResult {
@@ -282,6 +377,22 @@ export interface SearchResponse {
   matched?: number;
   /** Wall-clock time spent in the scan, in ms (substructure mode only). */
   elapsedMs?: number;
+  /**
+   * True when the scan stopped because its time ran out, rather than at
+   * `maxResults` or at the end of the candidates.
+   */
+  timedOut?: boolean;
+  /**
+   * Substructure only: where a scan that stopped before reading every
+   * candidate resumes — pass it as {@link SearchOptions.after} — and undefined
+   * once it has read them all. It is the last match kept when the scan stopped
+   * at `maxResults`, and the last candidate read when it ran out of time.
+   *
+   * Also undefined when the plane index answered a scan that stopped early: it
+   * reads in slot order, so there is no position to resume from, and `partial`
+   * is what says the answer is incomplete.
+   */
+  resume?: ScanPosition;
 }
 
 /** Which of the two structure hashes a backfill pass computes. */

@@ -25,8 +25,11 @@ import type {
   BackfillResult,
   MigrateOptions,
   MoleculesDBConfig,
+  MwRange,
   PrecomputedEntry,
   SQLiteDatabase,
+  SQLiteStatement,
+  ScanPosition,
   SearchCandidates,
   SearchOptions,
   SearchResponse,
@@ -40,10 +43,27 @@ import {
 } from './utils/packSSIndex.ts';
 import type { PrescreenState } from './utils/prescreen.ts';
 import { prescreen } from './utils/prescreen.ts';
+import type { EntryRestriction } from './utils/restrictEntries.ts';
+import { restrictEntries, restrictionKey } from './utils/restrictEntries.ts';
 import { runSubstructureSearch } from './utils/runSubstructureSearch.ts';
-import { parseMolecule, rowToResult } from './utils/searchHelpers.ts';
+import {
+  installScanDeadline,
+  isScanDeadline,
+  scanDeadlineGuard,
+} from './utils/scanDeadline.ts';
+import {
+  byWeight,
+  parseMolecule,
+  resumePosition,
+  rowToResult,
+} from './utils/searchHelpers.ts';
 import type { HashKind } from './utils/structureHash.ts';
 import { DEFAULT_MAX_TAUTOMERS, structureHash } from './utils/structureHash.ts';
+import {
+  installTanimoto,
+  tanimotoSql,
+  withTanimotoQuery,
+} from './utils/tanimotoFunction.ts';
 
 type OCLLibrary = typeof OpenChemLib;
 type OCLMolecule = InstanceType<OCLLibrary['Molecule']>;
@@ -82,10 +102,8 @@ interface HashLookup {
   entriesTable: string;
   /** Its primary key column. */
   pkColumn: string;
-  /** The JOIN restricting the search to a candidates subquery, or ''. */
-  candidateJoin: string;
-  /** Values bound by that subquery, bound before the hash. */
-  candidateParams: unknown[];
+  /** The caller's candidates and weight range, as SQL. */
+  restriction: EntryRestriction;
   /** Result offset. */
   from: number;
   /** Maximum results to return. */
@@ -99,6 +117,8 @@ interface CachedScan {
   matched: number;
   partial: boolean;
   elapsedMs: number;
+  timedOut: boolean;
+  resume?: ScanPosition;
 }
 
 /**
@@ -128,14 +148,30 @@ function withFragment(
 }
 
 /**
- * Identify a candidates subquery inside a search-cache key, so a restricted
- * search never returns another subset's — or the unrestricted — cached results.
- * @param candidates - The subquery restricting the search, if any.
- * @returns A key fragment identifying the subquery and its bound values.
+ * A similarity scan's matches, best first, as the cache keeps them.
+ * @param withSim - The entries that reached the threshold, in scan order.
+ * @param timedOut - Whether the deadline stopped the scan.
+ * @param start - When it started, in ms since the epoch.
+ * @returns The scan.
  */
-function candidatesKey(candidates: SearchCandidates | undefined): string {
-  if (!candidates) return '';
-  return `${candidates.sql}|${JSON.stringify(candidates.params ?? {})}`;
+function similarityScan(
+  withSim: Array<SearchResult & { similarity: number }>,
+  timedOut: boolean,
+  start: number,
+): CachedScan {
+  // Ties are broken by entry id, so the order never depends on the plan the
+  // scan happened to take.
+  const results = withSim.toSorted(
+    (a, b) => b.similarity - a.similarity || a.entryId - b.entryId,
+  );
+  return {
+    results,
+    screened: results.length,
+    matched: results.length,
+    partial: timedOut,
+    timedOut,
+    elapsedMs: Date.now() - start,
+  };
 }
 
 export class MoleculesDBSQLite {
@@ -147,6 +183,13 @@ export class MoleculesDBSQLite {
   #selectCols: string;
   #pool: SearchWorkerPool | undefined;
   #searchCache: LRUCache<string, CachedScan> | undefined;
+  /**
+   * The statements `insert()` writes with, prepared on first use. Preparing
+   * one is most of what writing a precomputed entry costs, and a bulk load
+   * writes millions.
+   */
+  #insertStatements: { row?: SQLiteStatement; fromColumn?: SQLiteStatement } =
+    {};
 
   constructor(db: SQLiteDatabase, ocl: OCLLibrary, config: MoleculesDBConfig) {
     this.#db = db;
@@ -189,6 +232,9 @@ export class MoleculesDBSQLite {
       mwColumn,
       onMigration: options.onMigration,
     });
+    // A migration may have rewritten the table those statements were written
+    // for, so they are prepared again on the next insert.
+    this.#insertStatements = {};
     const rebuilt = this.#reconcileCeiling(options);
     // A rewritten index invalidates anything cached from the old one.
     if (applied.length > 0 || rebuilt) this.#searchCache?.clear();
@@ -349,11 +395,10 @@ export class MoleculesDBSQLite {
     } else if (mwColumn) {
       // Take mw from the entries table so the clustered order matches whatever
       // a bulk index path stores; the entry already exists there.
-      this.#db
-        .prepare(
-          `INSERT OR REPLACE INTO ocl_ss_index (mw, entry_id, ss_index0, ss_index1, ss_index2, ss_index3, ss_index4, ss_index5, ss_index6, ss_index7) VALUES ((SELECT COALESCE(${mwColumn}, 0) FROM ${entriesTable} WHERE ${pkColumn} = ?), ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-        )
-        .run(entryId, entryId, ...packed);
+      this.#insertStatements.fromColumn ??= this.#db.prepare(
+        `INSERT OR REPLACE INTO ocl_ss_index (mw, entry_id, ss_index0, ss_index1, ss_index2, ss_index3, ss_index4, ss_index5, ss_index6, ss_index7) VALUES ((SELECT COALESCE(${mwColumn}, 0) FROM ${entriesTable} WHERE ${pkColumn} = ?), ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      );
+      this.#insertStatements.fromColumn.run(entryId, entryId, ...packed);
     } else {
       // Only this branch needs the molecule itself. `false` skips 2D-coordinate invention: the
       // molecular weight never reads a coordinate, and inventing them is ~20x the cost of the parse.
@@ -380,11 +425,10 @@ export class MoleculesDBSQLite {
    * @param packed - The eight 64-bit fingerprint words.
    */
   #insertIndexRow(entryId: number, mw: number, packed: bigint[]): void {
-    this.#db
-      .prepare(
-        'INSERT OR REPLACE INTO ocl_ss_index (mw, entry_id, ss_index0, ss_index1, ss_index2, ss_index3, ss_index4, ss_index5, ss_index6, ss_index7) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
-      )
-      .run(mw, entryId, ...packed);
+    this.#insertStatements.row ??= this.#db.prepare(
+      'INSERT OR REPLACE INTO ocl_ss_index (mw, entry_id, ss_index0, ss_index1, ss_index2, ss_index3, ss_index4, ss_index5, ss_index6, ss_index7) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
+    );
+    this.#insertStatements.row.run(mw, entryId, ...packed);
   }
 
   /** Clear the in-memory structure-search result cache. */
@@ -439,17 +483,17 @@ export class MoleculesDBSQLite {
       maxResults = Number.MAX_SAFE_INTEGER,
       onProgress,
       candidates,
+      mwRange,
+      after,
     } = options ?? {};
 
     const { entriesTable, idCodeColumn, pkColumn } = this.#cfg;
     const { Molecule } = this.#ocl;
 
-    // Restricting the entries table to the candidate subquery. Every mode
-    // honours it, so a caller can never get unfiltered results by picking one.
-    const candidateJoin = candidates
-      ? `JOIN (${candidates.sql}) c ON c.entry_id = e.${pkColumn}`
-      : '';
-    const candidateParams = candidates?.params ? [candidates.params] : [];
+    // Restricting the entries table to the candidates and the weight range.
+    // Every mode honours both, so a caller can never get unfiltered results by
+    // picking one. The exact modes read a handful of rows, so they test each.
+    const restriction = restrictEntries(pkColumn, true, candidates, mwRange);
 
     const fromInstance = typeof query !== 'string';
     // Parsing is deferred to each mode: only the modes that re-encode the query
@@ -480,9 +524,11 @@ export class MoleculesDBSQLite {
             : withFragment(parse(true), false, fromInstance).getIDCode();
         const rows = this.#db
           .prepare(
-            `SELECT ${this.#selectCols} FROM ${entriesTable} e ${this.#ssJoin} ${candidateJoin} WHERE e.${idCodeColumn} = ?`,
+            `SELECT ${this.#selectCols} FROM ${entriesTable} e ${this.#ssJoin} ${restriction.join} WHERE e.${idCodeColumn} = ?${restriction.where}`,
           )
-          .all(...candidateParams, idCode) as Array<Record<string, unknown>>;
+          .all(...restriction.named, idCode, ...restriction.values) as Array<
+          Record<string, unknown>
+        >;
         return {
           results: rows.slice(from, from + limit).map(rowToResult),
           total: rows.length,
@@ -494,14 +540,7 @@ export class MoleculesDBSQLite {
           'noStereo',
           NO_STEREO_HASH_TABLE,
           queryIdCode(),
-          {
-            entriesTable,
-            pkColumn,
-            candidateJoin,
-            candidateParams,
-            from,
-            limit,
-          },
+          { entriesTable, pkColumn, restriction, from, limit },
         );
 
       case 'exactNoStereoTautomer':
@@ -509,14 +548,7 @@ export class MoleculesDBSQLite {
           'noStereoTautomer',
           NO_STEREO_TAUTOMER_HASH_TABLE,
           queryIdCode(),
-          {
-            entriesTable,
-            pkColumn,
-            candidateJoin,
-            candidateParams,
-            from,
-            limit,
-          },
+          { entriesTable, pkColumn, restriction, from, limit },
         );
 
       case 'substructure': {
@@ -525,16 +557,13 @@ export class MoleculesDBSQLite {
         const mol = withFragment(parse(false), true, fromInstance);
         const queryIdCode = mol.getIDCode();
         const scan = await this.#cachedScan(
-          `sub|${queryIdCode}|${maxResults}|${maxCandidates}|${candidatesKey(candidates)}`,
+          `sub|${queryIdCode}|${maxResults}|${maxCandidates}|${restrictionKey(candidates, mwRange)}|${after === undefined ? '' : `${after.mw}:${after.entryId}`}`,
           () =>
             this.#scanSubstructureFull(
               mol,
               queryIdCode,
-              maxResults,
-              maxCandidates,
-              timeoutMs,
-              onProgress,
-              candidates,
+              { maxResults, maxCandidates, timeoutMs, onProgress },
+              { candidates, mwRange, after },
             ),
         );
         return {
@@ -544,6 +573,8 @@ export class MoleculesDBSQLite {
           matched: scan.matched,
           partial: scan.partial,
           elapsedMs: scan.elapsedMs,
+          timedOut: scan.timedOut,
+          ...(scan.resume === undefined ? {} : { resume: scan.resume }),
         };
       }
 
@@ -553,7 +584,7 @@ export class MoleculesDBSQLite {
         const mol = withFragment(parse(false), false, fromInstance);
         const queryIdCode = mol.getIDCode();
         const scan = await this.#cachedScan(
-          `sim|${queryIdCode}|${similarityThreshold}|${candidatesKey(candidates)}`,
+          `sim|${queryIdCode}|${similarityThreshold}|${restrictionKey(candidates, mwRange)}`,
           () =>
             Promise.resolve(
               this.#scanSimilarityFull(
@@ -561,6 +592,7 @@ export class MoleculesDBSQLite {
                 similarityThreshold,
                 timeoutMs,
                 candidates,
+                mwRange,
               ),
             ),
         );
@@ -569,6 +601,7 @@ export class MoleculesDBSQLite {
           total: scan.results.length,
           partial: scan.partial,
           elapsedMs: scan.elapsedMs,
+          timedOut: scan.timedOut,
         };
       }
 
@@ -637,13 +670,16 @@ export class MoleculesDBSQLite {
     // error the canonizer throws on a malformed idCode.
     const hash = structureHash(kind, idCode, this.#cfg.maxTautomers);
     if (hash === null) return { results: [], total: 0 };
+    const { entriesTable, pkColumn, restriction, from, limit } = sql;
     const rows = this.#db
       .prepare(
-        `SELECT ${this.#selectCols} FROM ${sql.entriesTable} e ${this.#ssJoin} ${sql.candidateJoin} JOIN ${table} h ON h.entry_id = e.${sql.pkColumn} WHERE h.hash = ?`,
+        `SELECT ${this.#selectCols} FROM ${entriesTable} e ${this.#ssJoin} ${restriction.join} JOIN ${table} h ON h.entry_id = e.${pkColumn} WHERE h.hash = ?${restriction.where}`,
       )
-      .all(...sql.candidateParams, hash) as Array<Record<string, unknown>>;
+      .all(...restriction.named, hash, ...restriction.values) as Array<
+      Record<string, unknown>
+    >;
     return {
-      results: rows.slice(sql.from, sql.from + sql.limit).map(rowToResult),
+      results: rows.slice(from, from + limit).map(rowToResult),
       total: rows.length,
     };
   }
@@ -659,6 +695,10 @@ export class MoleculesDBSQLite {
 
   // Get the full (unsliced) result set for a structure query from the cache, or
   // compute it via `computeFull` and store it, so subsequent pages are instant.
+  //
+  // A scan the clock stopped is not stored: the key holds no timeout, and what
+  // the scan reached depends on the load at the time, so the next identical
+  // search must get the chance to answer in full.
   async #cachedScan(
     key: string,
     computeFull: () => Promise<CachedScan>,
@@ -666,7 +706,7 @@ export class MoleculesDBSQLite {
     const hit = this.#searchCache?.get(key);
     if (hit) return hit;
     const scan = await computeFull();
-    this.#searchCache?.set(key, scan);
+    if (!scan.timedOut) this.#searchCache?.set(key, scan);
     return scan;
   }
 
@@ -685,12 +725,19 @@ export class MoleculesDBSQLite {
   async #scanSubstructureFull(
     mol: OCLMolecule,
     queryIdCode: string,
-    maxResults: number,
-    maxCandidates: number,
-    timeoutMs: number,
-    onProgress: SearchOptions['onProgress'],
-    candidates?: SearchCandidates,
+    bounds: Pick<
+      Required<SearchOptions>,
+      'maxResults' | 'maxCandidates' | 'timeoutMs'
+    > &
+      Pick<SearchOptions, 'onProgress'>,
+    restriction: {
+      candidates?: SearchCandidates;
+      mwRange?: MwRange;
+      after?: ScanPosition;
+    },
   ): Promise<CachedScan> {
+    const { maxResults, maxCandidates, timeoutMs, onProgress } = bounds;
+    const { candidates, mwRange, after } = restriction;
     const {
       entriesTable,
       pkColumn,
@@ -715,6 +762,8 @@ export class MoleculesDBSQLite {
       maxResults,
       onProgress,
       candidates,
+      mwRange,
+      after,
     };
     if (poolSize <= 1) {
       const r = runSubstructureSearch(params);
@@ -724,6 +773,8 @@ export class MoleculesDBSQLite {
         matched: r.matched ?? 0,
         partial: r.partial ?? false,
         elapsedMs: r.elapsedMs ?? 0,
+        timedOut: r.timedOut ?? false,
+        ...(r.resume === undefined ? {} : { resume: r.resume }),
       };
     }
 
@@ -772,12 +823,14 @@ export class MoleculesDBSQLite {
       ? Math.max(1, Math.min(batchSize, Math.ceil(maxResults / poolSize)))
       : batchSize;
 
+    let lastRead: SearchResult | undefined;
     for (const candidate of prescreen(params, state)) {
       const result: SearchResult = {
         entryId: candidate.entryId,
         idCode: candidate.idCode,
         mw: candidate.mw,
       };
+      lastRead = result;
       if (emptyFragment) {
         results.push(result);
         if (results.length >= maxResults) {
@@ -824,71 +877,124 @@ export class MoleculesDBSQLite {
     await Promise.all(inFlight);
     params.onProgress?.(state.screened, state.screened);
 
-    // Batches complete out of order, so restore the lightest-first order the
-    // prescreen produced before truncating to maxResults.
-    const sorted = emptyFragment
-      ? results
-      : results.toSorted((a, b) => (a.mw ?? 0) - (b.mw ?? 0));
+    // Batches complete out of order, so restore the order the prescreen
+    // produced — weight, then entry id — before truncating to maxResults.
+    const sorted = emptyFragment ? results : results.toSorted(byWeight);
     if (sorted.length > maxResults) state.partial = true;
     const kept = sorted.slice(0, maxResults);
+    const resume = resumePosition(kept, maxResults, state, lastRead, after);
     return {
       results: kept,
       screened: state.screened,
       matched: kept.length,
       partial: state.partial,
       elapsedMs: Date.now() - start,
+      timedOut: state.timedOut === true,
+      ...(resume === undefined ? {} : { resume }),
     };
   }
 
   // Run a full similarity scan (no pagination): Tanimoto over every indexed row.
+  //
+  // The coefficient is computed inside SQLite and the threshold tested there,
+  // so only the entries that reach it are handed to JavaScript: handing every
+  // row over — ten columns, eight of them BigInts — was most of the scan's cost.
+  // The guard stops a step that reads without yielding at the deadline.
   #scanSimilarityFull(
     mol: OCLMolecule,
     similarityThreshold: number,
     timeoutMs: number,
     candidates?: SearchCandidates,
+    mwRange?: MwRange,
+  ): CachedScan {
+    const start = Date.now();
+    const queryIndex = mol.getIndex();
+    const deadline = Date.now() + timeoutMs;
+    const restriction = restrictEntries(
+      this.#cfg.pkColumn,
+      false,
+      candidates,
+      mwRange,
+    );
+    if (!installTanimoto(this.#db)) {
+      return this.#scanSimilarityInJs(
+        queryIndex,
+        similarityThreshold,
+        deadline,
+        restriction,
+      );
+    }
+    const guarded = installScanDeadline(this.#db);
+    return withTanimotoQuery(queryIndex, (key) => {
+      const stmt = this.#db.prepare(
+        `SELECT ${this.#selectCols}, ${tanimotoSql('s')} AS similarity FROM ${this.#cfg.entriesTable} e ${this.#ssJoin} ${restriction.join} WHERE ${guarded ? scanDeadlineGuard('s.entry_id') : '1'}${restriction.where} AND similarity >= ?`,
+      );
+      const params = [
+        ...restriction.named,
+        key,
+        ...(guarded ? [deadline] : []),
+        ...restriction.values,
+        similarityThreshold,
+      ];
+      const withSim: Array<SearchResult & { similarity: number }> = [];
+      let timedOut = false;
+      try {
+        const rows = (stmt.iterate?.(...params) ??
+          stmt.all(...params)) as Iterable<Record<string, unknown>>;
+        for (const row of rows) {
+          withSim.push({
+            ...rowToResult(row),
+            similarity: row.similarity as number,
+          });
+          if (withSim.length % 500 === 0 && Date.now() > deadline) {
+            timedOut = true;
+            break;
+          }
+        }
+      } catch (error: unknown) {
+        if (!isScanDeadline(error)) throw error;
+        timedOut = true;
+      }
+      return similarityScan(withSim, timedOut, start);
+    });
+  }
+
+  // The same scan for a driver that cannot register a function: every row is
+  // read and its coefficient computed here.
+  #scanSimilarityInJs(
+    queryIndex: number[],
+    similarityThreshold: number,
+    deadline: number,
+    restriction: EntryRestriction,
   ): CachedScan {
     const { SSSearcherWithIndex } = this.#ocl;
     const start = Date.now();
-    const queryIndex = mol.getIndex();
-    const candidateJoin = candidates
-      ? `JOIN (${candidates.sql}) c ON c.entry_id = e.${this.#cfg.pkColumn ?? 'id'}`
-      : '';
     const stmt = this.#db.prepare(
-      `SELECT ${this.#selectCols}, ${this.#ssIndexCols} FROM ${this.#cfg.entriesTable} e ${this.#ssJoin} ${candidateJoin}`,
+      `SELECT ${this.#selectCols}, ${this.#ssIndexCols} FROM ${this.#cfg.entriesTable} e ${this.#ssJoin} ${restriction.join} WHERE 1${restriction.where}`,
     );
     stmt.setReadBigInts?.(true);
-    const rows = stmt.all(
-      ...(candidates?.params ? [candidates.params] : []),
-    ) as Array<Record<string, unknown>>;
-    const deadline = Date.now() + timeoutMs;
+    const params = [...restriction.named, ...restriction.values];
+    const rows = (stmt.iterate?.(...params) ?? stmt.all(...params)) as Iterable<
+      Record<string, unknown>
+    >;
     const withSim: Array<SearchResult & { similarity: number }> = [];
-    let partial = false;
+    let timedOut = false;
     let screened = 0;
-    for (let i = 0; i < rows.length; i++) {
-      const row = rows[i];
-      if (!row) continue;
+    for (const row of rows) {
       screened++;
-      const targetIndex = unpackSSIndex(row);
       const sim = SSSearcherWithIndex.getSimilarityTanimoto(
         queryIndex,
-        targetIndex,
+        unpackSSIndex(row),
       );
       if (sim >= similarityThreshold) {
         withSim.push({ ...rowToResult(row), similarity: sim });
       }
-      if (i % 500 === 499 && Date.now() > deadline) {
-        partial = true;
+      if (screened % 500 === 0 && Date.now() > deadline) {
+        timedOut = true;
         break;
       }
     }
-    const results = withSim.toSorted((a, b) => b.similarity - a.similarity);
-    return {
-      results,
-      screened,
-      matched: results.length,
-      partial,
-      elapsedMs: Date.now() - start,
-    };
+    return similarityScan(withSim, timedOut, start);
   }
 
   // Lazily create the verifier pool. The pool module (and node:worker_threads) is

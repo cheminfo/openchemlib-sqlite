@@ -4,7 +4,12 @@ import { prescreenPlanes } from '../planes/planePrescreen.ts';
 import type { PrescreenPlan } from '../planes/planeRouter.ts';
 import { choosePrescreenPath } from '../planes/planeRouter.ts';
 import { TAIL_TABLE } from '../planes/planeSchema.ts';
-import type { SQLiteDatabase, SearchCandidates } from '../types.ts';
+import type {
+  MwRange,
+  SQLiteDatabase,
+  ScanPosition,
+  SearchCandidates,
+} from '../types.ts';
 
 import { prescreenColumn } from './prescreenColumn.ts';
 
@@ -34,6 +39,23 @@ export interface PrescreenParams {
   onProgress?: (processed: number, total: number) => void;
   /** Restrict the prescreen to the entries returned by this subquery. */
   candidates?: SearchCandidates;
+  /**
+   * The caller's bounds on the indexed weight, sought on the clustered key.
+   * @default {} — unbounded
+   */
+  mwRange?: MwRange;
+  /**
+   * Start after this candidate, sought on the clustered key.
+   * @default undefined — from the first candidate
+   */
+  after?: ScanPosition;
+  /**
+   * When the scan must stop, in ms since the epoch, checked from inside SQLite
+   * by the deadline guard. Null leaves the guard out, which a statement built
+   * for a connection that lacks the guard's function must do.
+   * @default null
+   */
+  deadline?: number | null;
   /**
    * A proved floor on a match's molecular weight, from `queryMwBound()`.
    *
@@ -96,6 +118,8 @@ export interface PrescreenState {
   screened: number;
   /** True when the prescreen stopped on the timeout or `maxCandidates`. */
   partial: boolean;
+  /** True when it was the timeout that stopped it. */
+  timedOut?: boolean;
   /**
    * True when the plane index answered, so candidates arrived in slot order
    * rather than ascending molecular weight and the caller must sort them.
@@ -148,8 +172,10 @@ export function* prescreen(
  * Which prescreen to run, including the cases that never reach the router.
  *
  * A `candidates` subquery stays on the column path whatever the query looks
- * like: its plan is tuned to keep `ocl_ss_index` the driving table so the scan
- * streams in weight order, and a membership-restricted scan is already small.
+ * like: its plans are built around `ocl_ss_index` — scanned in weight order, or
+ * read through its entry index — and the planes know nothing of the subquery.
+ * A weight range and a resumed scan stay there too, because on the column path
+ * each is a seek.
  * @param params - The prescreen parameters.
  * @returns The chosen path.
  */
@@ -159,6 +185,13 @@ function planFor(params: PrescreenParams): PrescreenPlan {
   }
   if (params.candidates !== undefined) {
     return { kind: 'column', reason: 'the scan is restricted to a subquery' };
+  }
+  if (params.mwRange?.min !== undefined || params.mwRange?.max !== undefined) {
+    return { kind: 'column', reason: 'the scan is bounded by weight' };
+  }
+  if (params.after !== undefined) {
+    // The planes yield slot order; resuming needs the clustered order.
+    return { kind: 'column', reason: 'the scan resumes after a position' };
   }
   return choosePrescreenPath(
     params.db,

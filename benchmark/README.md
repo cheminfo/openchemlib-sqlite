@@ -35,7 +35,7 @@ verification is spread over threads.
 
 OpenChemLib compiled to WebAssembly does the two expensive things this library
 does — build a fingerprint, match a fragment against a graph. Three scripts ask
-whether it can replace `openchemlib` here: two check that it answers *exactly*
+whether it can replace `openchemlib` here: two check that it answers _exactly_
 the same, one measures what that costs.
 
 Any list of idcodes, one per line, works as the dataset.
@@ -92,14 +92,14 @@ intersection plus turning survivors back into candidates.
 
 At 2 000 000 entries, warm cache:
 
-| query | bits | used | column | screen | plane | candidates |
-|---|---|---|---|---|---|---|
-| benzene | 3 | 0 | 10 486 ms | — | declined | 1 381 568 |
-| phenol | 8 | 3 | 3 921 ms | **3 ms** | 1 446 ms | 272 568 |
-| naphthalene | 4 | 1 | 2 005 ms | **1 ms** | 3 635 ms | 677 014 |
-| biphenyl-F | 13 | 7 | 216 ms | **6 ms** | 14 ms | 0 |
-| benzamide | 21 | 9 | 860 ms | **9 ms** | 995 ms | 127 105 |
-| sulfonamide-aryl | 24 | 12 | 407 ms | **6 ms** | 47 ms | 0 |
+| query            | bits | used | column    | screen   | plane    | candidates |
+| ---------------- | ---- | ---- | --------- | -------- | -------- | ---------- |
+| benzene          | 3    | 0    | 10 486 ms | —        | declined | 1 381 568  |
+| phenol           | 8    | 3    | 3 921 ms  | **3 ms** | 1 446 ms | 272 568    |
+| naphthalene      | 4    | 1    | 2 005 ms  | **1 ms** | 3 635 ms | 677 014    |
+| biphenyl-F       | 13   | 7    | 216 ms    | **6 ms** | 14 ms    | 0          |
+| benzamide        | 21   | 9    | 860 ms    | **9 ms** | 995 ms   | 127 105    |
+| sulfonamide-aryl | 24   | 12   | 407 ms    | **6 ms** | 47 ms    | 0          |
 
 Three things to read out of it.
 
@@ -120,13 +120,13 @@ With `exactFilter: false` (leaving the real matcher to reject the screen's false
 positives instead of checking each survivor's stored 512-bit fingerprint),
 resolution roughly halves and the plane path is never slower than the column one:
 
-| query | column | exactFilter on | off |
-|---|---|---|---|
-| phenol | 405 ms | 654 ms | **275 ms** |
-| naphthalene | 773 ms | 1 731 ms | **745 ms** |
-| benzamide | 276 ms | 371 ms | **157 ms** |
-| biphenyl-F | 162 ms | 9 ms | **9 ms** |
-| sulfonamide-aryl | 151 ms | 10 ms | **10 ms** |
+| query            | column | exactFilter on | off        |
+| ---------------- | ------ | -------------- | ---------- |
+| phenol           | 405 ms | 654 ms         | **275 ms** |
+| naphthalene      | 773 ms | 1 731 ms       | **745 ms** |
+| benzamide        | 276 ms | 371 ms         | **157 ms** |
+| biphenyl-F       | 162 ms | 9 ms           | **9 ms**   |
+| sulfonamide-aryl | 151 ms | 10 ms          | **10 ms**  |
 
 On this library the exact filter rejected **nothing at all** — 0 false positives
 on every query — because a fragment's rare bits already imply its common ones.
@@ -146,14 +146,14 @@ no truncation can make the slot order observable. Both columns below run the sam
 dispatcher, the baseline with the plane index switched off, so the only
 difference is the routing.
 
-| query | bits | used | plane index off | screen | routed | path | speedup |
-|---|---|---|---|---|---|---|---|
-| benzene | 3 | 0 | 1 716 ms | — | 1 792 ms | column | 1.0× |
-| phenol | 8 | 3 | 509 ms | 2 ms | 487 ms | column | 1.0× |
-| naphthalene | 4 | 1 | 994 ms | 1 ms | 962 ms | column | 1.0× |
-| biphenyl-F | 13 | 7 | 145 ms | 3 ms | 24 ms | **plane** | **5.9×** |
-| benzamide | 21 | 9 | 299 ms | 6 ms | 311 ms | column | 1.0× |
-| sulfonamide-aryl | 24 | 12 | 142 ms | 5 ms | 22 ms | **plane** | **6.5×** |
+| query            | bits | used | plane index off | screen | routed   | path      | speedup  |
+| ---------------- | ---- | ---- | --------------- | ------ | -------- | --------- | -------- |
+| benzene          | 3    | 0    | 1 716 ms        | —      | 1 792 ms | column    | 1.0×     |
+| phenol           | 8    | 3    | 509 ms          | 2 ms   | 487 ms   | column    | 1.0×     |
+| naphthalene      | 4    | 1    | 994 ms          | 1 ms   | 962 ms   | column    | 1.0×     |
+| biphenyl-F       | 13   | 7    | 145 ms          | 3 ms   | 24 ms    | **plane** | **5.9×** |
+| benzamide        | 21   | 9    | 299 ms          | 6 ms   | 311 ms   | column    | 1.0×     |
+| sulfonamide-aryl | 24   | 12   | 142 ms          | 5 ms   | 22 ms    | **plane** | **6.5×** |
 
 Never slower, 6× where the screen pays. Deciding is free in practice — the
 intersection it has to run to decide costs 1–6 ms, and it is thrown away when the
@@ -164,3 +164,57 @@ has to run through the same generator: counting raw rows instead flatters it by
 ~25%, because a real search builds a candidate object per row. And A/B passes
 have to be **interleaved** — three A passes then three B let machine drift land
 on one side and showed phantom regressions down to 0.76×.
+
+## Filters: `filteredScan.mjs`
+
+```sh
+node --experimental-strip-types benchmark/seedIdCodes.mjs idcodes.txt bench.sqlite
+node --experimental-strip-types benchmark/filteredScan.mjs bench.sqlite 115
+```
+
+A filter on something the index does not hold reaches the scan as a `candidates`
+subquery, and how it is applied decides what a page costs. The difference is one
+of scale, so the script first writes a copy of the bench database with every entry
+and fingerprint repeated `copies` times, never recomputed, and gives each entry two
+attributes to filter on: `band` (id % 100, no index) and `tag` (id % 10000,
+indexed). Every strategy of a case must give the same answer, or it says so.
+
+Measured on 4 023 045 entries (115 copies of 34 983 real molecules), benzene, a
+page of 24, best of three, node 24:
+
+| filter                     | membership | probe     | drive      | `mwRange` + probe |
+| -------------------------- | ---------- | --------- | ---------- | ----------------- |
+| `mw >= 260 AND band < 80`  | 497 ms     | —         | —          | **3.6 ms**        |
+| `band = 7` (1%, no index)  | 107 ms     | **11 ms** | —          | —                 |
+| `tag = 7` (0.01%, indexed) | 115 ms     | 214 ms    | **3.7 ms** | —                 |
+
+- A **membership** list costs the subquery, whatever the page: the broad filter
+  lists 2.4 M ids before the first candidate is read, and that grows with the
+  database — ten times the entries, ten times the wait.
+- A **probe** costs the page: the scan streams lightest-first and stops at 24.
+  It loses only when nearly every candidate is rejected, which is where…
+- …**drive** wins: it reads the few candidates' fingerprints through the entry
+  index and sorts them, so its cost is the subquery's own.
+- A weight bound is a **seek** with `mwRange`; written into the subquery it is a
+  test on every row, or, as membership, part of the list.
+
+## Computing the similarity inside SQLite
+
+```sh
+node --experimental-strip-types benchmark/similarityScan.mjs bench.sqlite
+node --experimental-strip-types benchmark/similarityScan.mjs search-naturals.sqlite collection_members id idCode
+```
+
+An A/B in one process: the Tanimoto coefficient computed in JavaScript for every
+row, as the scan did, against the same coefficient computed by a SQL function
+with the threshold in the WHERE clause, so only the hits leave SQLite. It checks
+that both return the same entries with the same coefficients before timing them.
+
+## Preparing the insert once
+
+```sh
+node --experimental-strip-types benchmark/insertPrecomputed.mjs 20000
+```
+
+An A/B in one process: a precomputed fingerprint written through a statement
+prepared for every insert, as `insert()` did, against one prepared once.

@@ -2,7 +2,9 @@ import type * as OpenChemLib from 'openchemlib';
 import { substructureSearch } from 'openchemlib-search-wasm';
 
 import type {
+  MwRange,
   SQLiteDatabase,
+  ScanPosition,
   SearchCandidates,
   SearchResponse,
   SearchResult,
@@ -10,6 +12,7 @@ import type {
 
 import type { PrescreenState } from './prescreen.ts';
 import { prescreen } from './prescreen.ts';
+import { byWeight, resumePosition } from './searchHelpers.ts';
 
 type OCLLibrary = typeof OpenChemLib;
 type OCLMolecule = InstanceType<OCLLibrary['Molecule']>;
@@ -41,6 +44,16 @@ export interface SubstructureSearchParams {
   onProgress?: (processed: number, total: number) => void;
   /** Restrict the scan to the entries returned by this subquery. */
   candidates?: SearchCandidates;
+  /**
+   * Bounds on the indexed weight, sought on the clustered key.
+   * @default {} — unbounded
+   */
+  mwRange?: MwRange;
+  /**
+   * Start after this candidate, sought on the clustered key.
+   * @default undefined — from the first candidate
+   */
+  after?: ScanPosition;
 }
 
 /**
@@ -60,7 +73,7 @@ export interface SubstructureSearchParams {
 export function runSubstructureSearch(
   params: SubstructureSearchParams,
 ): SearchResponse {
-  const { mol, from, limit, maxResults } = params;
+  const { mol, from, limit, maxResults, after } = params;
   const start = Date.now();
   const state: PrescreenState = { screened: 0, partial: false };
   const results: SearchResult[] = [];
@@ -97,7 +110,9 @@ export function runSubstructureSearch(
     batch.length = 0;
   };
 
+  let lastRead: SearchResult | undefined;
   for (const candidate of prescreen(params, state)) {
+    lastRead = candidate;
     batch.push(candidate);
     if (batch.length >= nextBatchSize()) {
       flush();
@@ -111,10 +126,9 @@ export function runSubstructureSearch(
   // path produces for free has to be restored here. It is a no-op for the column
   // path, whose stream is already in that order, so it is only paid when the
   // plane index actually answered.
-  const ordered = state.usedPlaneIndex
-    ? results.toSorted((a, b) => (a.mw ?? 0) - (b.mw ?? 0))
-    : results;
+  const ordered = state.usedPlaneIndex ? results.toSorted(byWeight) : results;
 
+  const resume = resumePosition(ordered, maxResults, state, lastRead, after);
   return {
     results: ordered.slice(from, from + limit),
     total: ordered.length,
@@ -122,5 +136,7 @@ export function runSubstructureSearch(
     matched: results.length,
     elapsedMs: Date.now() - start,
     partial: state.partial,
+    timedOut: state.timedOut === true,
+    ...(resume === undefined ? {} : { resume }),
   };
 }

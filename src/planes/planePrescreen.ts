@@ -180,6 +180,7 @@ export function* prescreenPlanes(
       onProgress?.(state.screened, state.screened);
       if (Date.now() > deadline) {
         state.partial = true;
+        state.timedOut = true;
         return;
       }
     }
