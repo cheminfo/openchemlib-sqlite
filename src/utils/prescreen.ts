@@ -101,14 +101,6 @@ export interface PrescreenParams {
    * @default 0.01
    */
   planeCandidateRatio?: number;
-  /**
-   * The table holding the fingerprints to screen.
-   *
-   * `ocl_ss_tail` has the same shape as `ocl_ss_index`, so either is screened
-   * with the same SQL.
-   * @default 'ocl_ss_index'
-   */
-  screenTable?: string;
 }
 
 /** Mutable counters the prescreen reports back to its caller. */
@@ -144,9 +136,11 @@ export interface PrescreenState {
  * streaming, and is what a common fragment with an early stop wants: it reads a
  * few hundred rows and abandons the cursor.
  *
- * A folded database still has whatever was inserted since, so the plane path
- * also screens the entries above the fold watermark and the tail. Both are
- * small by design, and empty right after a fold.
+ * The planes answer only for the entries up to the watermark, so the plane
+ * path also screens every entry above it, through `ocl_ss_index`'s entry index:
+ * what was inserted since the last fold, and whatever a write below the
+ * watermark has left untrusted. The router takes the plane path only while
+ * those are few.
  * @param params - Prescreen parameters; `params.mol.fragment` must already be true.
  * @param state - Mutable counters updated as the stream is consumed.
  * @yields {PrescreenedCandidate} Each prescreened candidate.
@@ -162,13 +156,17 @@ export function* prescreen(
   }
 
   state.usedPlaneIndex = true;
-  // What no fold has reached goes first: it is small by design, and the ids it
-  // yields are the ones the planes then skip, so an entry both folded and
-  // waiting to be folded again counts once.
-  const seen = new Set<number>();
-  yield* prescreenUnfolded(params, state, seen);
+  // The two never yield the same entry: the planes stop at the watermark and
+  // this starts above it. One deadline covers both.
+  const deadline = Date.now() + params.timeoutMs;
+  yield* prescreenUnfolded(params, state, plan.watermark);
   if (state.partial) return;
-  yield* prescreenPlanes({ ...params, exclude: seen }, state, plan.bits);
+  yield* prescreenPlanes(
+    { ...params, timeoutMs: Math.max(0, deadline - Date.now()) },
+    state,
+    plan.bits,
+    plan.watermark,
+  );
 }
 
 /**

@@ -3,7 +3,7 @@ import type { SQLiteDatabase, SQLiteStatement } from '../types.ts';
 import type { ChunkBuilder } from './ChunkBuilder.ts';
 import type { FoldCursor } from './foldState.ts';
 import { finishFold, saveFoldProgress } from './foldState.ts';
-import { BITSTAT_TABLE, SEGMENT_TABLE, TAIL_TABLE } from './planeSchema.ts';
+import { BITSTAT_TABLE, SEGMENT_TABLE } from './planeSchema.ts';
 
 /**
  * Slot rows written per transaction.
@@ -32,6 +32,10 @@ export interface ChunkWrite {
   /** The bits the index keeps planes for. */
   stored: ReadonlySet<number>;
   writePlane: SQLiteStatement;
+  /**
+   * Writes a slot, given the slot, the entry id, and the entry id again: the
+   * statement {@link buildSlotWriteSql} builds.
+   */
   writeSlot: SQLiteStatement;
   /**
    * Milliseconds to pause between transactions, leaving the write lock free.
@@ -77,7 +81,8 @@ export function writeChunkData(write: ChunkWrite): void {
     const until = Math.min(from + SLOT_BATCH, entryIds.length);
     inTransaction(db, () => {
       for (let index = from; index < until; index++) {
-        writeSlot.run(firstSlot + index, entryIds[index]);
+        const entryId = entryIds[index];
+        writeSlot.run(firstSlot + index, entryId, entryId);
       }
     });
     pause(pauseMs);
@@ -85,27 +90,40 @@ export function writeChunkData(write: ChunkWrite): void {
 }
 
 /**
+ * SQL writing one slot, unless its entry has left `ocl_ss_index` since the fold
+ * read it.
+ *
+ * Its transaction is not the one the fold read in, so an entry can be removed
+ * between the two. Written anyway, the slot would stand for an entry that is
+ * gone, and an id given to a new entry later would be taken for one the planes
+ * already hold. Removed after the slot is written, the delete trigger takes the
+ * slot with it.
+ * @param slotTable - The slot table.
+ * @returns SQL taking the slot, the entry id and the entry id again.
+ */
+export function buildSlotWriteSql(slotTable: string): string {
+  return `INSERT OR REPLACE INTO ${slotTable} (slot, entry_id)
+          SELECT ?, ? WHERE EXISTS
+            (SELECT 1 FROM ocl_ss_index WHERE entry_id = ?)`;
+}
+
+/**
  * Make a written chunk visible, in one short transaction.
  *
  * This is the only write of a fold that a search can observe, so it carries
  * everything that must not be seen before the chunk is whole: the segment the
- * chunk belongs to, the bit populations the router reads, the removal of the
- * tail rows the chunk folded, and the fold's progress.
- *
- * Tail rows are deleted one by one, and only when they still hold the values
- * folded: the tail keeps only out-of-order and repeated inserts, so there are
- * few, and a row inserted again since it was read stays for the next fold.
+ * chunk belongs to, the bit populations the router reads, and the fold's
+ * progress — or, for its last chunk, the watermark it moves.
  *
  * The populations are bumped here, not while the planes are written, so a chunk
  * that is interrupted and redone does not count its bits twice.
  * @param db - The database to write.
  * @param segment - The segment to extend, or null to start one.
- * @param info - The slots added, the populations seen, and what was consumed.
+ * @param info - The slots added, the populations seen, and where the fold is.
  * @param info.firstSlot - The slot the chunk's first entry took.
  * @param info.slots - How many slots the chunk added.
  * @param info.populations - How many of the chunk's entries set each bit.
  * @param info.stored - The bits the index keeps planes for.
- * @param info.consumed - The tail rows the chunk folded, as they were read.
  * @param info.cursor - The chunk's last row, or null when it ends the fold.
  * @returns The segment the chunk now belongs to.
  */
@@ -117,7 +135,6 @@ export function publishChunk(
     slots: number;
     populations: ReadonlyMap<number, number>;
     stored: ReadonlySet<number>;
-    consumed: ReadonlyArray<Record<string, unknown>>;
     cursor: FoldCursor | null;
   },
 ): number {
@@ -146,29 +163,6 @@ export function publishChunk(
       bump.run(bit, population, info.stored.has(bit) ? 1 : 0);
     }
 
-    if (info.consumed.length > 0) {
-      const remove = db.prepare(
-        `DELETE FROM ${TAIL_TABLE}
-          WHERE entry_id = ? AND mw = ? AND ss_index0 = ? AND ss_index1 = ?
-            AND ss_index2 = ? AND ss_index3 = ? AND ss_index4 = ?
-            AND ss_index5 = ? AND ss_index6 = ? AND ss_index7 = ?`,
-      );
-      for (const row of info.consumed) {
-        remove.run(
-          row.entry_id,
-          row.mw,
-          row.ss_index0,
-          row.ss_index1,
-          row.ss_index2,
-          row.ss_index3,
-          row.ss_index4,
-          row.ss_index5,
-          row.ss_index6,
-          row.ss_index7,
-        );
-      }
-    }
-
     if (info.cursor === null) {
       finishFold(db);
     } else {
@@ -183,7 +177,7 @@ export function publishChunk(
  * @param db - The database to write.
  * @param work - What to do inside it.
  */
-function inTransaction(db: SQLiteDatabase, work: () => void): void {
+export function inTransaction(db: SQLiteDatabase, work: () => void): void {
   db.exec('BEGIN');
   try {
     work();

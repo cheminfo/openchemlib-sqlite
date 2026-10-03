@@ -3,20 +3,23 @@ import { unpackSSIndex } from '../utils/packSSIndex.ts';
 
 import { ChunkBuilder } from './ChunkBuilder.ts';
 import type { FoldSource } from './foldRead.ts';
-import { buildFoldReadSql, foldedTailCopies } from './foldRead.ts';
-import type { FoldState } from './foldState.ts';
+import { buildFoldReadSql } from './foldRead.ts';
 import {
   beginFold,
   finishFold,
   fitsOneChunk,
   hasEntriesAbove,
-  hasTailRows,
   readFoldState,
 } from './foldState.ts';
 import { SLOTS_PER_CHUNK, bitsOfIndex } from './planeLayout.ts';
 import { PLANE_TABLE, SLOT_TABLE } from './planeSchema.ts';
 import { decideStoredBits, nextSlotOf, storedBitsOf } from './planeState.ts';
-import { publishChunk, writeChunkData } from './writeChunk.ts';
+import { resetPlanes } from './resetPlanes.ts';
+import {
+  buildSlotWriteSql,
+  publishChunk,
+  writeChunkData,
+} from './writeChunk.ts';
 
 /** How a fold decides what to store and how much to do in one call. */
 export interface FoldOptions {
@@ -28,7 +31,7 @@ export interface FoldOptions {
    * test on the survivors catches whatever it would have caught. Dropping those
    * planes is what keeps the index to a few bytes per molecule instead of 64.
    *
-   * Decided once, on the first fold, and never revisited: a bit stored for some
+   * Decided on the first fold, and kept until a `rebuild`: a bit stored for some
    * chunks and not others could not be read back, because a missing row has to
    * keep meaning "no entry here sets this bit".
    * @default 0.5
@@ -52,6 +55,16 @@ export interface FoldOptions {
    * @default 0
    */
   pauseMs?: number;
+  /**
+   * Empty the plane index first, and fold every entry again.
+   *
+   * A chunk is never rewritten, so an entry folded again after a write below
+   * the watermark leaves its old bits behind, answering nothing but still read.
+   * Rebuilding reclaims them, and is the only way to change
+   * `maxPopulationRatio`. Until it completes every search takes the column path.
+   * @default false
+   */
+  rebuild?: boolean;
 }
 
 /** What one fold did. */
@@ -68,7 +81,7 @@ export interface FoldResult {
 }
 
 /**
- * Fold waiting fingerprints into the plane index.
+ * Fold the entries above the watermark into the plane index.
  *
  * This is the whole maintenance story. Setting one molecule's bits in place
  * would rewrite a chunk of each of the 74–348 planes it sets, so nothing is ever
@@ -76,15 +89,16 @@ export interface FoldResult {
  * chunk carries 2^20 molecules, so the write comes to 64 bytes per molecule —
  * the size of the fingerprint itself, which is the least it could be.
  *
- * What waits is found without being copied: the entries above the watermark,
- * through `ocl_ss_index`'s entry index, plus the tail, which holds only what
- * that range cannot see — an entry inserted with an id below the watermark, or
- * inserted again. A caller whose ids only grow keeps the tail empty.
+ * What waits is found without being copied anywhere: it is every entry above
+ * the watermark, read through `ocl_ss_index` itself. When the fold completes,
+ * the watermark moves to the highest id it covered, unless a write the triggers
+ * caught while it ran keeps it below that entry.
  *
  * A fold reads in `(mw, entry_id)` order, so **every segment is internally
  * ascending by molecular weight**. It records its cursor with each chunk it
  * publishes, so a fold split over several calls by `maxChunks`, or interrupted,
- * resumes where it stopped and extends the same segment.
+ * resumes where it stopped and extends the same segment. One fold at a time:
+ * two running at once on the same file would share that cursor.
  * @param db - The database to fold.
  * @param options - What to store, and how much to do in one call.
  * @returns What this call folded, and whether anything is still waiting.
@@ -98,12 +112,14 @@ export function foldPlanes(
     maxChunks = Number.MAX_SAFE_INTEGER,
     onProgress,
     pauseMs = 0,
+    rebuild = false,
   } = options;
   const start = Date.now();
+  if (rebuild) resetPlanes(db);
 
-  let state: FoldState | null = readFoldState(db);
-  if (state.cursor === null) state = beginFold(db);
-  if (state?.cursor == null || state.tailThrough === null) {
+  let state = readFoldState(db);
+  if (state.cursor === null) state = beginFold(db) ?? state;
+  if (state.cursor === null || state.bound === null) {
     return {
       folded: 0,
       chunks: 0,
@@ -113,19 +129,16 @@ export function foldPlanes(
     };
   }
 
-  const after = state.foldedThrough;
-  const through = state.tailThrough;
+  const after = state.watermark;
   const source: FoldSource = {
     after,
-    through,
-    indexed: after !== null && fitsOneChunk(db, after, through),
+    through: state.bound,
+    indexed: after !== null && fitsOneChunk(db, after, state.bound),
   };
   const writePlane = db.prepare(
     `INSERT OR REPLACE INTO ${PLANE_TABLE} (chunk, bit, bits) VALUES (?, ?, ?)`,
   );
-  const writeSlot = db.prepare(
-    `INSERT OR REPLACE INTO ${SLOT_TABLE} (slot, entry_id) VALUES (?, ?)`,
-  );
+  const writeSlot = db.prepare(buildSlotWriteSql(SLOT_TABLE));
 
   let stored = storedBitsOf(db);
   const builder = new ChunkBuilder();
@@ -139,6 +152,13 @@ export function foldPlanes(
   let finished = false;
 
   while (chunks < maxChunks) {
+    // A write the triggers caught since the last page has lowered the bound:
+    // what lies above it is left to the next fold rather than folded for
+    // nothing.
+    source.through = Math.min(
+      source.through,
+      readFoldState(db).bound ?? source.through,
+    );
     const page = buildFoldReadSql(source, cursor, SLOTS_PER_CHUNK);
     const read = db.prepare(page.sql);
     read.setReadBigInts?.(true);
@@ -153,11 +173,9 @@ export function foldPlanes(
 
     builder.reset();
     const entryIds: number[] = [];
-    const consumed: Array<Record<string, unknown>> = [];
     for (const row of rows) {
       builder.add(bitsOfIndex(unpackSSIndex(row)));
       entryIds.push(Number(row.entry_id));
-      if (Number(row.from_tail) === 1) consumed.push(row);
     }
     const populations = builder.populations();
     stored ??= decideStoredBits(
@@ -193,7 +211,6 @@ export function foldPlanes(
       slots: rows.length,
       populations,
       stored,
-      consumed: [...consumed, ...foldedTailCopies(db, rows, source)],
       cursor: finished ? null : cursor,
     });
 
@@ -208,7 +225,7 @@ export function foldPlanes(
     folded,
     chunks,
     storedBits: stored?.size ?? 0,
-    pending: !finished || hasTailRows(db) || hasEntriesAbove(db, through),
+    pending: !finished || hasEntriesAbove(db, readFoldState(db).watermark),
     elapsedMs: Date.now() - start,
   };
 }

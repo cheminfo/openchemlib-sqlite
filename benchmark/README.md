@@ -218,3 +218,62 @@ node --experimental-strip-types benchmark/insertPrecomputed.mjs 20000
 
 An A/B in one process: a precomputed fingerprint written through a statement
 prepared for every insert, as `insert()` did, against one prepared once.
+
+## Inserting without a tail: `tailInsert.mjs`
+
+```sh
+node benchmark/tailInsert.mjs 1000
+```
+
+An A/B in one process: batches of 1 000 increasing ids written into a file
+whose `ocl_ss_index` carries version 5's tail trigger, which copied every row
+into `ocl_ss_tail`, against version 6's watermark triggers, against no trigger
+at all. Both schemas are written out in the script, so it measures the same
+thing whichever version is checked out.
+
+Node 24.15, WAL, `synchronous = OFF`, 30+ samples each (±1.5–2.4%):
+
+| schema                             | rows/s  | ns/row |
+| ---------------------------------- | ------- | ------ |
+| version 5, tail (5.2.0)            | 40 812  | 24 502 |
+| version 6, never folded            | 139 446 | 7 171  |
+| version 6, ids above the watermark | 138 246 | 7 233  |
+| no trigger at all                  | 189 027 | 5 290  |
+
+Without the tail an insert is **3.4× faster**: it writes one clustered row and
+one index entry instead of two of each. The watermark triggers cost ~1.9 µs a
+row over no trigger, whether or not anything was folded, and the same with one
+trigger as with two — most of it is the table having triggers at all.
+
+Bun has no `node:sqlite`, so neither this nor `foldedSearch.mjs` runs there.
+
+## Searching a folded index: `foldedSearch.mjs`
+
+```sh
+node benchmark/foldedSearch.mjs 200000
+```
+
+One synthetic library (the `planeScan.mjs` pool, sampled with replacement) in
+four files: never folded; folded; folded with 1% more inserted since, above the
+watermark; folded with 10% more, past the 5% the router accepts. Whole searches
+on one thread — prescreen and verification — with no result cache, 30+ samples
+each.
+
+At 200 000 entries, Node 24.15:
+
+| query            | unfolded   | folded   | +1% above | +10% above | matches |
+| ---------------- | ---------- | -------- | --------- | ---------- | ------- |
+| biphenyl-F       | 19.2 ms    | **15.5** | 18.2      | 24.9       | 0       |
+| sulfonamide-aryl | 17.4 ms    | **11.5** | 14.4      | 22.5       | 0       |
+| thiophene-amide  | 59.3 ms    | 63.3     | 63.8      | 67.4       | 3 174   |
+| benzamide        | 229.5 ms   | 233.2    | 234.7     | 256.4      | 12 869  |
+| naphthalene      | 1 139.2 ms | 1 149.6  | 1 160.6   | 1 264.5    | 47 258  |
+| benzene          | 2 022.7 ms | 2 031.9  | 2 030.9   | 2 217.6    | 88 202  |
+
+The plane index pays where the prescreen is the search: a selective fragment
+with few matches, 30–35% faster here and more as the library grows, since the
+column scan grows with it and the planes do not. A fragment with thousands of
+matches is verification-bound, so the router sends it to the column scan, and
+deciding costs the few milliseconds of the intersection. 1% of the library
+inserted since the fold costs ~3 ms of seeks on the entry index; at 10% the
+router has gone back to the column scan, which also reads the 10% more entries.

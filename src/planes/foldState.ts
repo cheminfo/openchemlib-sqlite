@@ -1,7 +1,8 @@
 import type { SQLiteDatabase } from '../types.ts';
 
 import { SLOTS_PER_CHUNK } from './planeLayout.ts';
-import { FOLD_TABLE, TAIL_TABLE } from './planeSchema.ts';
+import { SLOT_TABLE } from './planeSchema.ts';
+import { FOLD_TABLE } from './watermarkSchema.ts';
 
 /** A position in `(mw, entry_id)` order, the order a fold reads in. */
 export interface FoldCursor {
@@ -9,12 +10,12 @@ export interface FoldCursor {
   entryId: number;
 }
 
-/** How far the folds have reached, as {@link FOLD_TABLE} records it. */
+/** How far the plane index can be trusted, as {@link FOLD_TABLE} records it. */
 export interface FoldState {
-  /** Every entry whose id is at most this is folded or in the tail; null before the first fold. */
-  foldedThrough: number | null;
-  /** The tail trigger copies a fingerprint whose entry id is at most this. */
-  tailThrough: number | null;
+  /** The planes hold every entry whose id is at most this; null for none. */
+  watermark: number | null;
+  /** Writes at or below this lower the watermark; null when nothing is folded. */
+  bound: number | null;
   /** The last row the fold in progress published, or null when none is in progress. */
   cursor: FoldCursor | null;
   /** The segment the fold in progress extends, or null before its first chunk. */
@@ -25,20 +26,20 @@ export interface FoldState {
 export const START_CURSOR: FoldCursor = { mw: -1e308, entryId: 0 };
 
 /**
- * Read how far the folds have reached.
+ * Read how far the plane index can be trusted.
  * @param db - The database to read.
  * @returns The recorded state.
  */
 export function readFoldState(db: SQLiteDatabase): FoldState {
   const row = db
     .prepare(
-      `SELECT folded_through, tail_through, cursor_mw, cursor_entry_id, segment
+      `SELECT watermark, bound, cursor_mw, cursor_entry_id, segment
          FROM ${FOLD_TABLE} WHERE id = 1`,
     )
     .get() as Record<string, unknown> | undefined;
   return {
-    foldedThrough: numberOrNull(row?.folded_through),
-    tailThrough: numberOrNull(row?.tail_through),
+    watermark: numberOrNull(row?.watermark),
+    bound: numberOrNull(row?.bound),
     cursor:
       row?.cursor_mw == null
         ? null
@@ -50,40 +51,26 @@ export function readFoldState(db: SQLiteDatabase): FoldState {
 /**
  * Start a fold, unless nothing waits for one.
  *
- * The fold covers every entry up to the highest id present now. That bound is
- * written as the tail's before the fold reads a row, in one statement, so an
- * entry inserted while it runs with an id at or below it is copied into the
- * tail — the fold may have read past it already — and one above it is left to
- * the next fold's range.
+ * The fold covers every entry above the watermark up to the highest id present
+ * now. That id is written as the bound before the fold reads a row, so a write
+ * at or below it while the fold runs — the fold may have read past that entry
+ * already — keeps the watermark the fold sets below it, and an entry above it
+ * is simply left to the next fold.
  * @param db - The database to fold.
  * @returns The state of the fold just started, or null when nothing waits.
  */
 export function beginFold(db: SQLiteDatabase): FoldState | null {
-  const state = readFoldState(db);
-  const highest = numberOrNull(
-    (
-      db.prepare('SELECT MAX(entry_id) AS id FROM ocl_ss_index').get() as
-        Record<string, unknown> | undefined
-    )?.id,
-  );
-  // Never lowered: an entry deleted since may still have its copy in the tail.
-  const through = maxOf(highest, state.tailThrough, state.foldedThrough);
-  const above =
-    through !== null &&
-    (state.foldedThrough === null || through > state.foldedThrough);
-  if (!above && !hasTailRows(db)) return null;
-
+  const { watermark } = readFoldState(db);
+  const highest = highestEntryId(db);
+  if (highest === null || (watermark !== null && highest <= watermark)) {
+    return null;
+  }
   db.prepare(
     `UPDATE ${FOLD_TABLE}
-        SET tail_through = ?, cursor_mw = ?, cursor_entry_id = ?, segment = NULL
+        SET bound = ?, cursor_mw = ?, cursor_entry_id = ?, segment = NULL
       WHERE id = 1`,
-  ).run(through, START_CURSOR.mw, START_CURSOR.entryId);
-  return {
-    foldedThrough: state.foldedThrough,
-    tailThrough: through,
-    cursor: START_CURSOR,
-    segment: null,
-  };
+  ).run(highest, START_CURSOR.mw, START_CURSOR.entryId);
+  return { watermark, bound: highest, cursor: START_CURSOR, segment: null };
 }
 
 /**
@@ -106,14 +93,30 @@ export function saveFoldProgress(
 }
 
 /**
- * Close the fold in progress: everything up to its bound is folded or in the
- * tail, so the watermark moves there.
+ * Close the fold in progress: every entry up to its bound is now in the planes,
+ * so the watermark moves there.
+ *
+ * The bound is read as it is now, not as the fold started: a write the triggers
+ * caught while the fold ran has lowered it below that entry.
  * @param db - The database being folded.
  */
 export function finishFold(db: SQLiteDatabase): void {
   db.exec(
     `UPDATE ${FOLD_TABLE}
-        SET folded_through = tail_through, cursor_mw = NULL,
+        SET watermark = bound, cursor_mw = NULL, cursor_entry_id = NULL,
+            segment = NULL
+      WHERE id = 1`,
+  );
+}
+
+/**
+ * Forget everything the planes hold: nothing is trusted until a fold completes.
+ * @param db - The database whose plane tables have just been emptied.
+ */
+export function resetFoldState(db: SQLiteDatabase): void {
+  db.exec(
+    `UPDATE ${FOLD_TABLE}
+        SET watermark = NULL, bound = NULL, cursor_mw = NULL,
             cursor_entry_id = NULL, segment = NULL
       WHERE id = 1`,
   );
@@ -134,62 +137,90 @@ export function fitsOneChunk(
   after: number,
   through: number,
 ): boolean {
-  const row = db
-    .prepare(
-      `SELECT COUNT(*) AS n FROM (
-         SELECT 1 FROM ocl_ss_index INDEXED BY idx_ocl_ss_entry
-          WHERE entry_id > ? AND entry_id <= ? LIMIT ?)`,
-    )
-    .get(after, through, SLOTS_PER_CHUNK + 1) as Record<string, unknown>;
-  return Number(row.n) <= SLOTS_PER_CHUNK;
+  return countAbove(db, after, SLOTS_PER_CHUNK + 1, through) <= SLOTS_PER_CHUNK;
 }
 
 /**
- * How many entries of `ocl_ss_index` no fold has reached.
+ * How many entries of `ocl_ss_index` lie above the watermark.
  *
  * Counted through the entry index from the watermark, so it walks only those
- * entries — before the first fold, that is all of them.
+ * entries — before the first fold, that is all of them — and never more than
+ * `cap` of them.
  * @param db - The database to read.
- * @param after - The watermark, or null before the first fold.
- * @returns The number of entries above it.
+ * @param watermark - The watermark, or null to count every entry.
+ * @param cap - The count stops here.
+ * @param through - An upper bound on the ids counted, inclusive.
+ * @returns The number of entries above the watermark, at most `cap`.
  */
-export function countAbove(db: SQLiteDatabase, after: number | null): number {
-  const row = (
-    after === null
-      ? db.prepare('SELECT COUNT(*) AS n FROM ocl_ss_index').get()
-      : db
-          .prepare(
-            `SELECT COUNT(*) AS n FROM ocl_ss_index INDEXED BY idx_ocl_ss_entry
-              WHERE entry_id > ?`,
-          )
-          .get(after)
-  ) as Record<string, unknown>;
+export function countAbove(
+  db: SQLiteDatabase,
+  watermark: number | null,
+  cap: number = Number.MAX_SAFE_INTEGER,
+  through: number | null = null,
+): number {
+  const conditions: string[] = [];
+  const values: number[] = [];
+  if (watermark !== null) {
+    conditions.push('entry_id > ?');
+    values.push(watermark);
+  }
+  if (through !== null) {
+    conditions.push('entry_id <= ?');
+    values.push(through);
+  }
+  const row = db
+    .prepare(
+      `SELECT COUNT(*) AS n FROM (
+         SELECT 1 FROM ocl_ss_index INDEXED BY idx_ocl_ss_entry${
+           conditions.length > 0 ? ` WHERE ${conditions.join(' AND ')}` : ''
+         } LIMIT ?)`,
+    )
+    .get(...values, cap) as Record<string, unknown>;
   return Number(row.n);
 }
 
 /**
- * Whether any entry of `ocl_ss_index` has an id above a bound.
+ * Whether any entry of `ocl_ss_index` lies above the watermark.
  * @param db - The database to read.
- * @param through - The bound.
+ * @param watermark - The watermark, or null for any entry at all.
  * @returns True when one does; a seek on the entry index.
  */
-export function hasEntriesAbove(db: SQLiteDatabase, through: number): boolean {
-  return (
-    db
-      .prepare(
-        'SELECT 1 FROM ocl_ss_index INDEXED BY idx_ocl_ss_entry WHERE entry_id > ? LIMIT 1',
-      )
-      .get(through) !== undefined
-  );
+export function hasEntriesAbove(
+  db: SQLiteDatabase,
+  watermark: number | null,
+): boolean {
+  const highest = highestEntryId(db);
+  return highest !== null && (watermark === null || highest > watermark);
 }
 
 /**
- * Whether the tail holds anything.
+ * Whether the planes hold entries above the watermark: entries folded once,
+ * then left untrusted by a write at or below their id.
  * @param db - The database to read.
- * @returns True when it holds at least one row.
+ * @param watermark - The watermark.
+ * @returns True when a slot stands for an entry above it; a seek.
  */
-export function hasTailRows(db: SQLiteDatabase): boolean {
-  return db.prepare(`SELECT 1 FROM ${TAIL_TABLE} LIMIT 1`).get() !== undefined;
+export function hasSlotsAbove(
+  db: SQLiteDatabase,
+  watermark: number | null,
+): boolean {
+  const row = db
+    .prepare(`SELECT MAX(entry_id) AS id FROM ${SLOT_TABLE}`)
+    .get() as Record<string, unknown> | undefined;
+  const highest = numberOrNull(row?.id);
+  return highest !== null && (watermark === null || highest > watermark);
+}
+
+/**
+ * The highest entry id of `ocl_ss_index`.
+ * @param db - The database to read.
+ * @returns It, or null when the index is empty; a seek on the entry index.
+ */
+export function highestEntryId(db: SQLiteDatabase): number | null {
+  const row = db
+    .prepare('SELECT MAX(entry_id) AS id FROM ocl_ss_index')
+    .get() as Record<string, unknown> | undefined;
+  return numberOrNull(row?.id);
 }
 
 /**
@@ -199,19 +230,4 @@ export function hasTailRows(db: SQLiteDatabase): boolean {
  */
 function numberOrNull(value: unknown): number | null {
   return value == null ? null : Number(value);
-}
-
-/**
- * The largest of several bounds, ignoring the absent ones.
- * @param values - The bounds.
- * @returns The largest, or null when all are null.
- */
-function maxOf(...values: Array<number | null>): number | null {
-  let largest: number | null = null;
-  for (const value of values) {
-    if (value !== null && (largest === null || value > largest)) {
-      largest = value;
-    }
-  }
-  return largest;
 }

@@ -161,8 +161,6 @@ function scale(source, target, copies) {
     pkColumn: 'id',
     idCodeColumn: 'id_code',
   }).migrate();
-  // The fold's tail would copy every row a second time; nothing here reads it.
-  out.exec('DROP TRIGGER IF EXISTS ocl_ss_tail_insert');
   const copy = `WITH RECURSIVE copy(k) AS (SELECT 0 UNION ALL SELECT k + 1 FROM copy WHERE k < ${copies - 1})`;
   // Copy k of entry i is id i * copies + k, so copies interleave as real entries of every weight do.
   const id = `s.entry_id * ${copies} + c.k`;

@@ -210,8 +210,9 @@ test('an entry inserted after a fold is screened until the next fold', async () 
   expect(molDB.planeStatus()).toStrictEqual({
     folded: SMILES.length,
     segments: 1,
+    watermark: SMILES.length,
     pending: 0,
-    tail: 0,
+    refoldAdvisable: false,
   });
 
   const idCode = OCL.Molecule.fromSmiles(
@@ -222,10 +223,10 @@ test('an entry inserted after a fold is screened until the next fold', async () 
     .run(idCode);
   molDB.insert(Number(lastInsertRowid), idCode);
 
-  // Its id is above the watermark, so it waits without being copied.
-  expect(molDB.planeStatus()).toMatchObject({ pending: 1, tail: 0 });
+  // Its id is above the watermark, so it waits without touching the planes.
+  expect(molDB.planeStatus()).toMatchObject({ pending: 1 });
 
-  // Not folded yet, so only the screen of unfolded entries can find it.
+  // Not folded yet, so only the screen above the watermark can find it.
   const found = await molDB.search('Fc1ccc(-c2ccccc2)cc1', {
     mode: 'substructure',
   });
@@ -240,7 +241,8 @@ test('an entry inserted after a fold is screened until the next fold', async () 
   expect(molDB.planeStatus()).toStrictEqual({
     folded: SMILES.length + 1,
     segments: 2,
+    watermark: SMILES.length + 1,
     pending: 0,
-    tail: 0,
+    refoldAdvisable: false,
   });
 });

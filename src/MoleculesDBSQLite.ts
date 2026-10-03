@@ -8,10 +8,8 @@ import type { SearchWorkerPool } from './SearchWorkerPool.ts';
 import { SCHEMA_VERSION, runMigrations } from './migrations.ts';
 import type { FoldOptions, FoldResult } from './planes/foldPlanes.ts';
 import { foldPlanes } from './planes/foldPlanes.ts';
-import { countAbove, readFoldState } from './planes/foldState.ts';
-import { planeCoverage } from './planes/planePrescreen.ts';
-import { SLOT_TABLE, TAIL_TABLE } from './planes/planeSchema.ts';
-import { countOf } from './planes/planeState.ts';
+import type { PlaneStatus } from './planes/planeStatus.ts';
+import { planeStatusOf } from './planes/planeStatus.ts';
 import {
   MAX_TAUTOMERS_SETTING,
   NO_STEREO_HASH_TABLE,
@@ -306,7 +304,7 @@ export class MoleculesDBSQLite {
   }
 
   /**
-   * Fold waiting fingerprints into the plane index.
+   * Fold the entries above the watermark into the plane index.
    *
    * The plane index is the transposed form of `ocl_ss_index`: one bitmap per
    * fingerprint bit, so a substructure prescreen reads only the planes of the
@@ -318,14 +316,22 @@ export class MoleculesDBSQLite {
    * of its 512 bits, so writing those in place would rewrite a chunk of each of
    * that many planes per insert. A fold appends whole chunks of 2^20 entries
    * instead, which comes to 64 bytes a molecule — the size of the fingerprint
-   * itself. `insert()` meanwhile only adds a row to a small tail, which the next
-   * search screens the old way and the next fold drains.
+   * itself.
+   *
+   * The planes are trusted for the entries up to a watermark, the highest id
+   * the last fold covered; every entry above it is read from `ocl_ss_index`,
+   * which is where `insert()` writes and all it writes. That is exact as long
+   * as **entry ids only grow**. A write at or below the watermark — a new id
+   * below it, an entry inserted again with another fingerprint, an id given
+   * again after its entry was removed — lowers the watermark below that id, so
+   * searches stay exact and slow down to the unfolded speed for what lies
+   * above it, until this is called again.
    *
    * Call it after a bulk load, and periodically afterwards: between folds the
-   * tail grows and search slowly returns to its unfolded speed. It is resumable
-   * and commits per chunk, so interrupting it loses only the chunk in progress.
-   * Nothing has to be folded for the database to work — until it is, every
-   * search simply takes the column path.
+   * entries above the watermark grow and search slowly returns to its unfolded
+   * speed. It is resumable and commits per chunk, so interrupting it loses only
+   * the chunk in progress. Nothing has to be folded for the database to work —
+   * until it is, every search simply takes the column path.
    * @param options - What to store, and how much to do in one call.
    * @returns What this call folded, and whether anything is still waiting.
    */
@@ -338,55 +344,35 @@ export class MoleculesDBSQLite {
   }
 
   /**
-   * What the plane index currently covers, and what waiting costs.
+   * What the plane index currently covers, and whether to fold again.
    *
-   * `pending` is what `foldPlanes()` would pick up: the entries no fold has
-   * reached, which every search still screens the slower way. It is the number
-   * to watch to decide how often to fold. Before the first fold it is every
-   * entry, counted; during a fold split over several calls it counts that
-   * fold's whole range.
-   *
-   * `tail` is the part of it stored twice: entries inserted with an id at or
-   * below the fold watermark, or inserted again, which a fold can only find by
-   * copy. Ids that only grow — `AUTOINCREMENT`, or a table nothing is deleted
-   * from — keep it at 0.
-   * @returns The folded entry count, the number of folds, what is waiting, and
-   *   how much of it is copied.
+   * `pending` counts the entries above the watermark: what `foldPlanes()` would
+   * pick up, and what every search still screens the slower way. It is counted
+   * through the entry index, so before the first fold it walks every entry.
+   * `refoldAdvisable` says when folding now would make searches faster.
+   * @returns The status of the plane index.
    */
-  planeStatus(): {
-    folded: number;
-    segments: number;
-    pending: number;
-    tail: number;
-  } {
-    const { segments, slots } = planeCoverage(this.#db);
-    const tail = countOf(this.#db, TAIL_TABLE);
-    const { foldedThrough } = readFoldState(this.#db);
-    return {
-      folded: slots,
-      segments,
-      pending: tail + countAbove(this.#db, foldedThrough),
-      tail,
-    };
+  planeStatus(): PlaneStatus {
+    return planeStatusOf(this.#db);
   }
 
   /**
-   * Take an entry out of the index: its fingerprint, its structure hashes, its
-   * tail row and its slot.
+   * Take an entry out of the index: its fingerprint, its structure hashes, and
+   * — through a trigger on `ocl_ss_index` — its slot.
    *
    * Call it before deleting the entry itself. In one database the index's
-   * foreign keys refuse to delete an entry that is still indexed, and a folded
-   * entry holds a slot as well as a fingerprint.
+   * foreign keys refuse to delete an entry that is still indexed.
    *
    * Its bits stay in the planes, since a chunk is never rewritten; with no slot
    * to resolve to they answer nothing, but they still count as survivors when
-   * the router weighs a query.
+   * the router weighs a query. The watermark does not move, so removing entries
+   * never slows a search down; an id given to a new entry afterwards is
+   * another matter — see `foldPlanes()`.
    * @param entryId - Primary key of the entry in the entries table.
    */
   remove(entryId: number): void {
     for (const table of [
       'ocl_ss_index',
-      SLOT_TABLE,
       NO_STEREO_HASH_TABLE,
       NO_STEREO_TAUTOMER_HASH_TABLE,
     ]) {
@@ -409,6 +395,14 @@ export class MoleculesDBSQLite {
   /**
    * Store the OCL SS fingerprint for an entry that already exists in the
    * entries table.
+   *
+   * Give entries **ids that only grow**, and index them in that order. An entry
+   * above the watermark of the plane index never touches it; one written at or
+   * below it — a smaller new id, or an entry inserted again with another
+   * fingerprint — is found all the same, but lowers the watermark below it, so
+   * searches lose the plane index's speed for every entry above it until the
+   * next `foldPlanes()`. Inserting an entry again with the same fingerprint
+   * changes nothing.
    * @param entryId - Primary key of the entry in the entries table.
    * @param molecule - OCL Molecule instance or idCode string.
    * @param precomputed - Values the caller already holds, so this does not
@@ -477,7 +471,6 @@ export class MoleculesDBSQLite {
     this.#insertStatements.row.run(mw, entryId, ...packed);
   }
 
-  /** Clear the in-memory structure-search result cache. */
   /**
    * Whether the index's `mw` can be relied on to be the molecular weight.
    *
@@ -491,6 +484,7 @@ export class MoleculesDBSQLite {
     return this.#cfg.mwColumn === null || this.#cfg.trustMwColumn;
   }
 
+  /** Clear the in-memory structure-search result cache. */
   clearSearchCache(): void {
     this.#searchCache?.clear();
   }

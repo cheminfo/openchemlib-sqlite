@@ -494,39 +494,71 @@ do {
 } while (result.pending);
 ```
 
-### What waits for a fold is not copied — when ids only grow
+### Ids that only grow: the watermark
 
-A fold covers every entry up to the highest id present when it starts, and
-records that id as its watermark. The next one finds what came after through
-`ocl_ss_index`'s entry index, so **ids assigned by `AUTOINCREMENT`, or by a
-table nothing is ever deleted from, and indexed in id order are stored once.**
-
-Only an entry the range above the watermark cannot see is copied into
-`ocl_ss_tail`, by a trigger: one inserted with an id at or below the watermark,
-or inserted again. A table without `AUTOINCREMENT` hands out `max(id) + 1`, so
-deleting its newest rows makes the next inserts reuse their ids, and each of
-those is copied. Nothing is wrong when that happens, it only costs the copy:
+The planes are appended to and never rewritten, so they are trusted only up to a
+**watermark**: the highest entry id the last fold covered. Every entry at or
+below it is in the planes with its current fingerprint; every entry above it is
+read straight from `ocl_ss_index`, sought on its entry index. Nothing is copied
+anywhere, so **an id larger than the watermark — `AUTOINCREMENT`, or ids
+assigned in insertion order — never touches the plane index**: the insert writes
+its row of `ocl_ss_index` and nothing else, and the next fold picks it up.
 
 ```js
 molDB.planeStatus();
-// { folded: 1048576, segments: 1, pending: 1200, tail: 0 }
+// { folded: 1048576, segments: 1, watermark: 1048576, pending: 1200, refoldAdvisable: false }
 ```
 
-`tail` is the part of `pending` stored twice. It stays at 0 for ids that only
-grow.
+`pending` counts the entries above the watermark: what every search still
+screens the slower way, and what the next fold takes. Once it passes 5% of
+`folded` (and 1 024 entries) the router stops using the plane index
+altogether, and `refoldAdvisable` turns true.
+
+### What happens when an id does not grow
+
+Triggers on `ocl_ss_index` check every write at or below the watermark, and the
+answer never changes: **searches stay exact.** What changes is how fast they
+are:
+
+| write at or below the watermark                   | effect                       |
+| ------------------------------------------------- | ---------------------------- |
+| a new entry with a smaller id                     | the watermark drops below it |
+| an entry inserted again with another fingerprint  | the watermark drops below it |
+| an id given again after its entry was removed     | the watermark drops below it |
+| an entry inserted again with the same fingerprint | nothing                      |
+| `remove()`, or a row deleted from `ocl_ss_index`  | nothing — its slot goes      |
+
+Every entry above the lowered watermark is then read from `ocl_ss_index`, as if
+it had never been folded, until `foldPlanes()` folds them again and raises the
+watermark. A write far below it therefore costs a refold of almost everything,
+and leaves the old bits of what it refolds in the planes, where they answer
+nothing but are still read. `foldPlanes({ rebuild: true })` empties the planes
+and folds every entry once, which reclaims them:
+
+```js
+const status = molDB.planeStatus();
+if (status.refoldAdvisable) {
+  molDB.foldPlanes({ rebuild: status.folded > 1.5 * molDB.count() });
+}
+```
+
+A table without `AUTOINCREMENT` hands out `max(id) + 1`, so deleting its newest
+rows makes the next inserts reuse their ids, and each of those lowers the
+watermark. The triggers run in the writing statement's own transaction, so they
+cover a caller writing `ocl_ss_index` itself, and a fold running on another
+connection at the same time.
 
 ### Deleting an entry
 
 Call `molDB.remove(entryId)` before deleting the entry itself. It takes out the
-fingerprint, both structure hashes, any tail row and the entry's slot; in one
-database the foreign keys refuse to delete an entry that still has them.
+fingerprint and both structure hashes, and a trigger takes the entry's slot; in
+one database the foreign keys refuse to delete an entry that still has them.
 
 A chunk is never rewritten, so the entry's bits stay in the planes. With no slot
 they resolve to nothing, and no search returns the entry, but they still count
 as survivors when the router weighs a query, and the bit populations that order
 the screen are not decreased. Many deletions therefore slow the plane path
-without making it wrong. An id given to a new entry afterwards is copied into
-the tail until the next fold, then folded again.
+without making it wrong.
 
 ### Run it beside the service, not inside it
 
@@ -561,15 +593,13 @@ not been extended is invisible and cannot answer. The next fold writes over it.
 This is why visibility is not read from `ocl_ss_plane` directly. It would make a
 half-written chunk look complete, and a search would return false negatives
 without any sign of it — a missing plane row legitimately means "no entry in this
-chunk sets this bit". For the same reason the tail rows a chunk folded are
-cleared in that publishing transaction, together with the fold's progress, and
-only when they still hold the values folded: an interruption cannot lose an
-entry from both the tail and the index, and an entry inserted again mid-fold is
-kept for the next one.
+chunk sets this bit".
 
-An entry inserted while a fold runs, with an id between the watermark and the
-fold's bound, is copied into the tail too: the fold may have read past its
-weight already. Should the fold reach it after all, the copy goes with the chunk.
+The watermark only moves when a fold completes, in the transaction that
+publishes its last chunk. Before reading anything, a fold records the highest id
+it will cover as its bound, and the triggers check writes against that bound
+while it runs: an entry written below it — which the fold may already have read
+past — keeps the watermark the fold sets below that entry.
 
 ## Structure hashes
 
@@ -608,7 +638,7 @@ together would leave both modes half-answered for the whole run.
 Per 400 000 entries on one core: the no-stereo pass takes ~30 s; the tautomer
 pass takes 2.4 h uncapped, or ~21 min at the default cap.
 
-### Hashes written before version 6
+### Hashes written before openchemlib-search-wasm 2.0.0
 
 `openchemlib-search-wasm` 2.0.0 fixed a defect that gave the wrong hash to a
 molecule whose stereogenic double bond carries no configuration — around 1.5% of
@@ -713,8 +743,7 @@ ocl_ss_plane                (chunk, bit, bits)                      -- the trans
 ocl_ss_slot                 (slot, entry_id)                        -- which entry each plane slot stands for
 ocl_ss_bitstat              (bit, population, stored)               -- how many entries set each bit
 ocl_ss_segment              (segment, first_slot, slot_count, mw_ordered)
-ocl_ss_tail                 (mw, entry_id, ss_index0 .. ss_index7)  -- entries a fold can only find by copy
-ocl_ss_fold                 (folded_through, tail_through, cursor_mw, cursor_entry_id, segment)
+ocl_ss_fold                 (watermark, bound, cursor_mw, cursor_entry_id, segment)  -- one row: how far the planes are trusted
 ocl_ss_schema               (version, applied_at)                   -- which schema version this database is at
 ```
 
@@ -722,6 +751,10 @@ ocl_ss_schema               (version, applied_at)                   -- which sch
 of its own. The eight `ss_indexN` columns store the 512-bit OCL fingerprint packed as signed 64-bit
 integers for efficient SQL bitwise prefiltering. `mw` leads the primary key so the table is physically
 stored lightest-first — see [above](#why-the-index-is-ordered-by-molecular-weight).
+
+Four triggers on `ocl_ss_index` — `ocl_ss_watermark_insert`, `_replace`, `_update` and `_delete` —
+keep the watermark honest (see [above](#what-happens-when-an-id-does-not-grow)). `migrate()` puts them
+back if anything has dropped them.
 
 Both hash tables are created empty and filled by `backfillHashes()` — see
 [Structure hashes](#structure-hashes). Each carries a partial index on `hash` (skipping the NULLs,
@@ -763,9 +796,29 @@ Version 3 adds the two structure hash tables. They are created **empty**, so the
 instant; filling them is a separate long-running job — see
 [Structure hashes](#structure-hashes).
 
-Version 6 stops copying every insert into `ocl_ss_tail`. A database never folded drops its tail,
-which then held a copy of every entry; one already folded keeps it, and its watermark starts at the
-highest id present. Both are instant.
+Version 6 drops `ocl_ss_tail`, its index and its trigger: nothing is copied any more, and the planes
+are trusted up to a watermark instead. A database that never folded starts with no watermark and reads
+everything from `ocl_ss_index`, as before; dropping its tail frees one copy of every fingerprint, which
+takes a moment on a large index (`VACUUM` gives the space back to the file system). A database already
+folded starts its watermark below the first entry its planes do not hold exactly — the lowest id its
+tail held, or the lowest id no published slot stands for, found by walking the entry index up to it. Searches
+give the same answers before and after.
+
+### Rolling back from version 6
+
+**Do not open a version 6 file with 5.2.0 or earlier; keep a copy of the file from before the upgrade
+if you may need to go back.** An older release reads the version, finds nothing to apply, and does not
+complain — but it expects a tail that is no longer there:
+
+- a search it sends to the plane index throws `no such table: ocl_ss_tail`;
+- `planeStatus()` and `foldPlanes()` throw the same error;
+- a search it sends to the column scan reads `ocl_ss_index`, which version 6 keeps complete, and is
+  exact.
+
+So it fails loudly or answers in full, never with fewer matches. Its writes are still checked: the
+triggers live in the file, not in the library. One thing does stick: on a file that never folded, its
+`foldPlanes()` publishes every chunk before it fails. Back on version 6 those planes are not trusted,
+and `foldPlanes({ rebuild: true })` replaces them.
 
 Each version is applied in its own transaction, so an interrupted upgrade leaves the database at the
 last version that fully completed — never half-way through one. A migration only ever discards rows it

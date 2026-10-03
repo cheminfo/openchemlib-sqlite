@@ -4,19 +4,22 @@ import type {
   PrescreenState,
   PrescreenedCandidate,
 } from '../utils/prescreen.ts';
-
-import { readFoldState } from './foldState.ts';
-import { TAIL_TABLE } from './planeSchema.ts';
+import {
+  installScanDeadline,
+  isScanDeadline,
+  scanDeadlineGuard,
+} from '../utils/scanDeadline.ts';
 
 /**
- * Build the statement screening one source of unfolded entries.
+ * Build the statement screening the entries above the watermark.
  *
- * Exported so a test can assert the plan: the entries above the watermark must
- * be read through the entry index, or this screen would walk the whole index
- * and the plane path would cost what the column path does.
+ * Exported so a test can assert the plan: the range must be sought on the
+ * entry index, or this screen would walk the whole index and the plane path
+ * would cost what the column path does.
  * @param params - Prescreen parameters; `params.mol.fragment` must already be true.
- * @param source - `'tail'`, or the watermark the entries above it start from
- *   (null reads every entry, which only a database never folded would need).
+ * @param watermark - The planes hold every entry up to this id.
+ * @param deadline - When the scan must stop, in ms since the epoch, or null to
+ *   leave the guard out on a connection that lacks its function.
  * @returns The SQL and the parameters to bind, in order.
  */
 export function buildUnfoldedSql(
@@ -24,55 +27,51 @@ export function buildUnfoldedSql(
     PrescreenParams,
     'entriesTable' | 'pkColumn' | 'idCodeColumn' | 'mol'
   >,
-  source: 'tail' | { after: number | null },
+  watermark: number,
+  deadline: number | null = null,
 ): { sql: string; params: unknown[] } {
   const { entriesTable, pkColumn, idCodeColumn, mol } = params;
   const prefilter = buildSSPrefilter(mol.getIndex());
-  let from = `${TAIL_TABLE} s`;
-  let range = '';
-  const rangeParams: unknown[] = [];
-  if (source !== 'tail') {
-    if (source.after === null) {
-      from = 'ocl_ss_index s';
-    } else {
-      from = 'ocl_ss_index s INDEXED BY idx_ocl_ss_entry';
-      range = ' AND s.entry_id > ?';
-      rangeParams.push(source.after);
-    }
-  }
+  // The guard comes first, so the rows the prefilter rejects meet the clock too.
+  const guard =
+    deadline === null ? '' : `${scanDeadlineGuard('s.entry_id')} AND `;
   return {
     sql: `SELECT s.entry_id, s.mw, e.${idCodeColumn} AS id_code
-            FROM ${from}
+            FROM ocl_ss_index s INDEXED BY idx_ocl_ss_entry
             JOIN ${entriesTable} e ON e.${pkColumn} = s.entry_id
-           WHERE ${prefilter.sql}${range}`,
-    params: [...prefilter.params, ...rangeParams],
+           WHERE ${guard}s.entry_id > ? AND ${prefilter.sql}`,
+    params: [
+      ...(deadline === null ? [] : [deadline]),
+      watermark,
+      ...prefilter.params,
+    ],
   };
 }
 
 /**
- * Yield every entry no fold has reached whose fingerprint is a superset of the
- * query's: the tail first, then the entries above the watermark.
- *
- * An entry can be in both during a fold, and in the planes as well once a chunk
- * holding it is published before the watermark moves; `seen` is what makes each
- * one count once. It starts with the ids already yielded and gains every id
- * this yields.
+ * Yield every entry above the watermark whose fingerprint is a superset of the
+ * query's: what no fold has reached, and what a write below the old watermark
+ * has left untrusted. No entry is both here and in the planes' answer, which
+ * stops at the watermark.
  * @param params - Prescreen parameters; `params.mol.fragment` must already be true.
  * @param state - Mutable counters updated as the stream is consumed.
- * @param seen - Entry ids already yielded, extended with each new one.
- * @yields {PrescreenedCandidate} Each candidate, once.
+ * @param watermark - The planes hold every entry up to this id.
+ * @yields {PrescreenedCandidate} Each candidate, in entry id order.
  */
 export function* prescreenUnfolded(
   params: PrescreenParams,
   state: PrescreenState,
-  seen: Set<number>,
+  watermark: number,
 ): Generator<PrescreenedCandidate> {
   const { db, timeoutMs, maxCandidates, onProgress } = params;
-  const { foldedThrough } = readFoldState(db);
   const deadline = Date.now() + timeoutMs;
-  for (const source of ['tail', { after: foldedThrough }] as const) {
-    const query = buildUnfoldedSql(params, source);
-    const statement = db.prepare(query.sql);
+  const query = buildUnfoldedSql(
+    params,
+    watermark,
+    installScanDeadline(db) ? deadline : null,
+  );
+  const statement = db.prepare(query.sql);
+  try {
     // Streamed when the driver can, so a search stopping early does not read
     // every entry inserted since the last fold.
     const rows = (
@@ -81,15 +80,16 @@ export function* prescreenUnfolded(
         : statement.all(...query.params)
     ) as Iterable<Record<string, unknown>>;
     for (const row of rows) {
-      const entryId = Number(row.entry_id);
-      if (seen.has(entryId)) continue;
       if (state.screened >= maxCandidates) {
         state.partial = true;
         return;
       }
-      seen.add(entryId);
       state.screened++;
-      yield { entryId, idCode: row.id_code as string, mw: Number(row.mw) };
+      yield {
+        entryId: Number(row.entry_id),
+        idCode: row.id_code as string,
+        mw: Number(row.mw),
+      };
       if (state.screened % 500 === 0) {
         onProgress?.(state.screened, state.screened);
         if (Date.now() > deadline) {
@@ -99,5 +99,9 @@ export function* prescreenUnfolded(
         }
       }
     }
+  } catch (error: unknown) {
+    if (!isScanDeadline(error)) throw error;
+    state.partial = true;
+    state.timedOut = true;
   }
 }

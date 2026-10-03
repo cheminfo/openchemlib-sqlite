@@ -1,249 +1,202 @@
-import { DatabaseSync } from 'node:sqlite';
-
 import * as OCL from 'openchemlib';
 import { expect, test } from 'vitest';
 
-import { MoleculesDBSQLite } from '../../MoleculesDBSQLite.ts';
-import type { PrescreenState } from '../../utils/prescreen.ts';
-import { prescreen } from '../../utils/prescreen.ts';
-import { beginFold } from '../foldState.ts';
-import { TAIL_TABLE } from '../planeSchema.ts';
+import { readFoldState } from '../foldState.ts';
 
-const SMILES = [
-  'Oc1ccccc1',
-  'Cc1ccccc1',
-  'O=C(N)c1ccccc1',
-  'NS(=O)(=O)c1ccccc1',
-  'CCO',
-  'C1CCCCC1',
-  'Cn1cnc2c1c(=O)n(C)c(=O)n2C',
-  'CC(=O)Oc1ccccc1C(=O)O',
-];
+import {
+  add,
+  expectSameAsColumn,
+  foldedLibrary as folded,
+  planeSnapshot,
+  slotsOf,
+} from './fixture.ts';
 
-/**
- * A library of entries 1 to 8, folded, with every plane stored so the plane
- * index answers any fragment.
- * @returns The connection and the molecules DB.
- */
-function folded() {
-  const db = new DatabaseSync(':memory:');
-  db.exec(
-    'CREATE TABLE molecules (id INTEGER PRIMARY KEY, id_code TEXT NOT NULL UNIQUE)',
-  );
-  const molDB = new MoleculesDBSQLite(db, OCL, {
-    entriesTable: 'molecules',
-    poolSize: 1,
-    planeCandidateRatio: 1,
-  });
-  molDB.migrate();
-  for (const smiles of SMILES) add(db, molDB, smiles);
-  molDB.foldPlanes({ maxPopulationRatio: 1 });
-  return { db, molDB };
-}
-
-/**
- * Add a molecule to the entries table and the index.
- * @param db - The connection.
- * @param molDB - The molecules DB.
- * @param smiles - The molecule.
- * @param id - The id to give it; the next one when omitted.
- * @returns The entry id.
- */
-function add(
-  db: DatabaseSync,
-  molDB: MoleculesDBSQLite,
-  smiles: string,
-  id?: number,
-): number {
-  const idCode = OCL.Molecule.fromSmiles(smiles).getIDCode();
-  const { lastInsertRowid } =
-    id === undefined
-      ? db.prepare('INSERT INTO molecules (id_code) VALUES (?)').run(idCode)
-      : db
-          .prepare('INSERT INTO molecules (id, id_code) VALUES (?, ?)')
-          .run(id, idCode);
-  molDB.insert(Number(lastInsertRowid), idCode);
-  return Number(lastInsertRowid);
-}
-
-/**
- * The candidates the prescreen yields for a fragment.
- * @param db - The connection.
- * @param smiles - The fragment.
- * @param planeIndex - Whether the plane index may answer.
- * @returns The candidate ids, ascending and with any repeat kept, and the path.
- */
-function screen(db: DatabaseSync, smiles: string, planeIndex = true) {
-  const mol = OCL.Molecule.fromSmiles(smiles);
-  mol.setFragment(true);
-  const state: PrescreenState = { screened: 0, partial: false };
-  const found = [
-    ...prescreen(
-      {
-        db,
-        entriesTable: 'molecules',
-        pkColumn: 'id',
-        idCodeColumn: 'id_code',
-        mol,
-        timeoutMs: 10_000,
-        maxCandidates: Number.MAX_SAFE_INTEGER,
-        planeCandidateRatio: 1,
-        planeIndex,
-      },
-      state,
-    ),
-  ];
-  return {
-    ids: found.map((c) => c.entryId).toSorted((a, b) => a - b),
-    usedPlaneIndex: state.usedPlaneIndex === true,
-  };
-}
-
-/**
- * Assert the plane path answers a fragment exactly as the column path does.
- * @param db - The connection.
- * @param smiles - The fragment.
- * @returns The candidate ids.
- */
-function expectSameAsColumn(db: DatabaseSync, smiles: string): number[] {
-  const planes = screen(db, smiles);
-
-  expect(planes.usedPlaneIndex).toBe(true);
-  expect(planes.ids).toStrictEqual(screen(db, smiles, false).ids);
-
-  return planes.ids;
-}
-
-/**
- * The entry ids the tail holds.
- * @param db - The connection.
- * @returns Them, ascending.
- */
-function tailIds(db: DatabaseSync): number[] {
-  const rows = db
-    .prepare(`SELECT entry_id FROM ${TAIL_TABLE} ORDER BY entry_id`)
-    .all() as Array<Record<string, unknown>>;
-  return rows.map((row) => Number(row.entry_id));
-}
-
-test('an id above the watermark is never copied, and is screened until folded', () => {
+test('increasing inserts above the watermark never touch the planes', () => {
   const { db, molDB } = folded();
-  const id = add(db, molDB, 'Oc1ccc(Cl)cc1');
+  const before = planeSnapshot(db);
 
-  expect(tailIds(db)).toStrictEqual([]);
+  add(db, molDB, 'Oc1ccc(Br)cc1', 90);
+  add(db, molDB, 'Oc1ccc(I)cc1', 100);
+  add(db, molDB, 'CCCC', 110);
+
+  expect(planeSnapshot(db)).toBe(before);
   expect(molDB.planeStatus()).toStrictEqual({
-    folded: SMILES.length,
+    folded: 8,
     segments: 1,
-    pending: 1,
-    tail: 0,
+    watermark: 80,
+    pending: 3,
+    refoldAdvisable: false,
   });
-  expect(expectSameAsColumn(db, 'Oc1ccccc1')).toContain(id);
+  expect(expectSameAsColumn(db, 'Oc1ccccc1')).toStrictEqual([
+    10, 70, 80, 90, 100,
+  ]);
 
   expect(molDB.foldPlanes({ maxPopulationRatio: 1 })).toMatchObject({
-    folded: 1,
+    folded: 3,
     pending: false,
   });
-  expect(expectSameAsColumn(db, 'Oc1ccccc1')).toContain(id);
+  expect(readFoldState(db).watermark).toBe(110);
+  expect(expectSameAsColumn(db, 'Oc1ccccc1')).toStrictEqual([
+    10, 70, 80, 90, 100,
+  ]);
 });
 
-test('an id below the watermark waits in the tail, and the next fold takes it', () => {
+test('an out-of-order insert is found, and lowers the watermark until a fold raises it', () => {
   const { db, molDB } = folded();
-  add(db, molDB, 'Oc1ccc(Cl)cc1', 0);
+  add(db, molDB, 'Oc1ccc(Br)cc1', 35);
 
-  expect(tailIds(db)).toStrictEqual([0]);
-  expect(molDB.planeStatus()).toMatchObject({ pending: 1, tail: 1 });
-  expect(expectSameAsColumn(db, 'Oc1ccccc1')).toContain(0);
+  expect(molDB.planeStatus()).toStrictEqual({
+    folded: 8,
+    segments: 1,
+    watermark: 34,
+    pending: 6,
+    refoldAdvisable: true,
+  });
+  expect(expectSameAsColumn(db, 'Oc1ccccc1')).toStrictEqual([10, 35, 70, 80]);
 
+  // Everything above the new watermark is folded again: 35 and 40 to 80.
   expect(molDB.foldPlanes({ maxPopulationRatio: 1 })).toMatchObject({
-    folded: 1,
+    folded: 6,
     pending: false,
   });
-  expect(tailIds(db)).toStrictEqual([]);
-  expect(expectSameAsColumn(db, 'Oc1ccccc1')).toContain(0);
+  expect(molDB.planeStatus()).toStrictEqual({
+    folded: 14,
+    segments: 2,
+    watermark: 80,
+    pending: 0,
+    refoldAdvisable: false,
+  });
+  expect(expectSameAsColumn(db, 'Oc1ccccc1')).toStrictEqual([10, 35, 70, 80]);
 });
 
-test('an id reused after a delete answers for its new structure only', () => {
+test('an entry inserted again with another fingerprint is found by its new one only', async () => {
   const { db, molDB } = folded();
-  // Entry 1 is phenol, and folded: its bits stay in the planes.
-  molDB.remove(1);
-  db.prepare('DELETE FROM molecules WHERE id = 1').run();
-  add(db, molDB, 'C1CCNCC1', 1);
+  // Entry 10 is phenol, and its bits stay in the planes.
+  add(db, molDB, 'C1CCNCC1', 10);
 
-  expect(tailIds(db)).toStrictEqual([1]);
-
-  expect(expectSameAsColumn(db, 'Oc1ccccc1')).not.toContain(1);
-  expect(expectSameAsColumn(db, 'C1CCNCC1')).toContain(1);
+  expect(readFoldState(db).watermark).toBe(9);
+  expect(expectSameAsColumn(db, 'Oc1ccccc1')).toStrictEqual([70, 80]);
+  expect(expectSameAsColumn(db, 'C1CCNCC1')).toStrictEqual([10]);
 
   molDB.foldPlanes({ maxPopulationRatio: 1 });
 
-  expect(expectSameAsColumn(db, 'Oc1ccccc1')).not.toContain(1);
-  expect(expectSameAsColumn(db, 'C1CCNCC1')).toContain(1);
-  expect(tailIds(db)).toStrictEqual([]);
+  expect(readFoldState(db).watermark).toBe(80);
+  expect(expectSameAsColumn(db, 'Oc1ccccc1')).toStrictEqual([70, 80]);
+  expect(expectSameAsColumn(db, 'C1CCNCC1')).toStrictEqual([10]);
+
+  const found = await molDB.search('C1CCNCC1', { mode: 'substructure' });
+
+  expect(found.results.map((result) => result.entryId)).toStrictEqual([10]);
 });
 
-test('an id inserted mid-fold between the watermark and the bound is not lost', () => {
+test('an entry inserted again with the same fingerprint leaves the watermark alone', () => {
   const { db, molDB } = folded();
-  add(db, molDB, 'Oc1ccc(Cl)cc1', 9);
-  add(db, molDB, 'Oc1ccc(Br)cc1', 11);
-  // Entry 10 arrives while the fold writes the chunk it has already read: after
-  // it took 9 and 11, before it moves the watermark from 8 to 11. A trigger
-  // bound by the old watermark would not copy it, and no fold would find it.
+  const before = planeSnapshot(db);
+  molDB.insert(30, OCL.Molecule.fromSmiles('O=C(N)c1ccccc1').getIDCode());
+
+  expect(planeSnapshot(db)).toBe(before);
+  expect(readFoldState(db).watermark).toBe(80);
+});
+
+test('a removed entry is never returned, and leaves the watermark alone', async () => {
+  const { db, molDB } = folded();
+  molDB.remove(10);
+  db.prepare('DELETE FROM molecules WHERE id = 10').run();
+
+  expect(slotsOf(db, 10)).toBe(0);
+  expect(readFoldState(db).watermark).toBe(80);
+  expect(expectSameAsColumn(db, 'Oc1ccccc1')).toStrictEqual([70, 80]);
+
+  const found = await molDB.search('Oc1ccccc1', { mode: 'substructure' });
+
+  expect(found.results.map((result) => result.entryId)).toStrictEqual([70, 80]);
+});
+
+test('an id given again after its entry was removed answers for its new structure only', () => {
+  const { db, molDB } = folded();
+  molDB.remove(10);
+  db.prepare('DELETE FROM molecules WHERE id = 10').run();
+  add(db, molDB, 'C1CCNCC1', 10);
+
+  expect(readFoldState(db).watermark).toBe(9);
+  expect(expectSameAsColumn(db, 'Oc1ccccc1')).toStrictEqual([70, 80]);
+  expect(expectSameAsColumn(db, 'C1CCNCC1')).toStrictEqual([10]);
+});
+
+test('an id written mid-fold between the watermark and the bound is not lost', () => {
+  const { db, molDB } = folded();
+  add(db, molDB, 'Oc1ccc(Cl)cc1C', 90);
+  add(db, molDB, 'Oc1ccc(Br)cc1', 110);
+  // Entry 100 arrives while the fold writes the chunk it has already read:
+  // after it took 90 and 110, before it moves the watermark from 80 to 110.
   const mol = OCL.Molecule.fromSmiles('Oc1ccc(I)cc1');
   const words = new BigInt64Array(new Uint32Array(mol.getIndex()).buffer);
   db.exec(`
     CREATE TEMP TRIGGER mid_fold AFTER INSERT ON ocl_ss_slot
-    WHEN NEW.entry_id = 11
+    WHEN NEW.entry_id = 110
     BEGIN
-      INSERT INTO molecules (id, id_code) VALUES (10, '${mol.getIDCode()}');
+      INSERT INTO molecules (id, id_code) VALUES (100, '${mol.getIDCode()}');
       INSERT INTO ocl_ss_index (mw, entry_id, ss_index0, ss_index1, ss_index2,
         ss_index3, ss_index4, ss_index5, ss_index6, ss_index7)
-      VALUES (${mol.getMolecularFormula().relativeWeight}, 10, ${[...words].join(', ')});
+      VALUES (${mol.getMolecularFormula().relativeWeight}, 100, ${[...words].join(', ')});
     END;`);
 
+  // The fold may have read past 100, so it stops the watermark below it.
   expect(molDB.foldPlanes({ maxPopulationRatio: 1 })).toMatchObject({
     folded: 2,
     pending: true,
   });
-  expect(tailIds(db)).toStrictEqual([10]);
-  expect(expectSameAsColumn(db, 'Oc1ccccc1')).toStrictEqual([1, 8, 9, 10, 11]);
+  expect(readFoldState(db).watermark).toBe(99);
+  expect(expectSameAsColumn(db, 'Oc1ccccc1')).toStrictEqual([
+    10, 70, 80, 90, 100, 110,
+  ]);
 
   db.exec('DROP TRIGGER mid_fold');
 
   expect(molDB.foldPlanes({ maxPopulationRatio: 1 })).toMatchObject({
-    folded: 1,
-    pending: false,
-  });
-  expect(tailIds(db)).toStrictEqual([]);
-  expect(expectSameAsColumn(db, 'Oc1ccccc1')).toStrictEqual([1, 8, 9, 10, 11]);
-});
-
-test('a copy the fold reaches anyway goes with the chunk', () => {
-  const { db, molDB } = folded();
-  add(db, molDB, 'Oc1ccc(Br)cc1', 11);
-  // The fold has begun, bound 11, but read nothing yet when 10 arrives: it is
-  // copied in case the fold were past it, then read from ocl_ss_index anyway.
-  beginFold(db);
-  add(db, molDB, 'Oc1ccc(I)cc1', 10);
-
-  expect(tailIds(db)).toStrictEqual([10]);
-  expect(molDB.foldPlanes({ maxPopulationRatio: 1 })).toMatchObject({
     folded: 2,
     pending: false,
   });
-  expect(tailIds(db)).toStrictEqual([]);
-  expect(expectSameAsColumn(db, 'Oc1ccccc1')).toStrictEqual([1, 8, 10, 11]);
+  expect(readFoldState(db).watermark).toBe(110);
+  expect(expectSameAsColumn(db, 'Oc1ccccc1')).toStrictEqual([
+    10, 70, 80, 90, 100, 110,
+  ]);
 });
 
-test('an entry both folded and waiting in the tail is answered once', async () => {
+test('an entry removed mid-fold is given no slot', () => {
   const { db, molDB } = folded();
-  // Inserted again under its own id, below the watermark: copied to the tail
-  // while its slot still holds it.
-  molDB.insert(1, OCL.Molecule.fromSmiles('Oc1ccccc1').getIDCode());
+  add(db, molDB, 'Oc1ccc(Br)cc1', 90);
+  add(db, molDB, 'Oc1ccc(I)cc1', 100);
+  // The fold has read 90 and 100 when 100 leaves the index.
+  db.exec(`
+    CREATE TEMP TRIGGER mid_fold AFTER INSERT ON ocl_ss_slot
+    WHEN NEW.entry_id = 90
+    BEGIN
+      DELETE FROM ocl_ss_index WHERE entry_id = 100;
+    END;`);
+  molDB.foldPlanes({ maxPopulationRatio: 1 });
 
-  expect(tailIds(db)).toStrictEqual([1]);
-  expect(expectSameAsColumn(db, 'Oc1ccccc1')).toStrictEqual([1, 8]);
+  expect(slotsOf(db, 100)).toBe(0);
+  expect(readFoldState(db).watermark).toBe(100);
+  expect(expectSameAsColumn(db, 'Oc1ccccc1')).toStrictEqual([10, 70, 80, 90]);
+});
 
-  const found = await molDB.search('Oc1ccccc1', { mode: 'substructure' });
+test('a rebuild folds every entry again, into one segment', () => {
+  const { db, molDB } = folded();
+  add(db, molDB, 'Oc1ccc(Br)cc1', 35);
+  molDB.foldPlanes({ maxPopulationRatio: 1 });
 
-  expect(found.results.map((result) => result.entryId)).toStrictEqual([1, 8]);
+  expect(molDB.planeStatus()).toMatchObject({ folded: 14, segments: 2 });
+
+  expect(
+    molDB.foldPlanes({ maxPopulationRatio: 1, rebuild: true }),
+  ).toMatchObject({ folded: 9, chunks: 1, pending: false });
+  expect(molDB.planeStatus()).toStrictEqual({
+    folded: 9,
+    segments: 1,
+    watermark: 80,
+    pending: 0,
+    refoldAdvisable: false,
+  });
+  expect(expectSameAsColumn(db, 'Oc1ccccc1')).toStrictEqual([10, 35, 70, 80]);
 });

@@ -8,7 +8,6 @@ import type { PrescreenState } from '../../utils/prescreen.ts';
 import { prescreen } from '../../utils/prescreen.ts';
 import { readFoldState } from '../foldState.ts';
 import type * as PlaneLayout from '../planeLayout.ts';
-import { TAIL_TABLE } from '../planeSchema.ts';
 
 // Chunks of four slots, so a handful of molecules spans several chunks and a
 // fold can be split over calls.
@@ -104,40 +103,23 @@ function phenols(db: DatabaseSync, planeIndex = true) {
   };
 }
 
-/**
- * The entry ids the tail holds.
- * @param db - The connection.
- * @returns Them, ascending.
- */
-function tailIds(db: DatabaseSync): number[] {
-  const rows = db
-    .prepare(`SELECT entry_id FROM ${TAIL_TABLE} ORDER BY entry_id`)
-    .all() as Array<Record<string, unknown>>;
-  return rows.map((row) => Number(row.entry_id));
-}
-
 test('a fold split over calls resumes where it stopped, in one segment', () => {
   const { db, molDB } = seed();
   const fold = () => molDB.foldPlanes({ maxPopulationRatio: 1, maxChunks: 1 });
 
   expect(fold()).toMatchObject({ folded: 4, chunks: 1, pending: true });
   expect(readFoldState(db)).toMatchObject({
-    foldedThrough: null,
-    tailThrough: 10,
+    watermark: null,
+    bound: 10,
     segment: 1,
   });
 
-  // Arriving between two calls: 11 above the fold's bound, left to the next
-  // fold; 0 below it, copied in case the fold has read past it.
+  // Arriving between two calls, above the fold's bound: left to the next fold.
   add(db, molDB, 'Clc1ccccc1');
-  add(db, molDB, 'Oc1ccc(Br)cc1', 0);
 
-  expect(tailIds(db)).toStrictEqual([0]);
-
-  const midFold = phenols(db);
-
-  expect(midFold.usedPlaneIndex).toBe(true);
-  expect(midFold.ids).toStrictEqual(phenols(db, false).ids);
+  expect(readFoldState(db)).toMatchObject({ watermark: null, bound: 10 });
+  // No fold has completed, so nothing is trusted yet.
+  expect(phenols(db).usedPlaneIndex).toBe(false);
 
   // Bounded, so a fold that stopped making progress fails instead of hanging.
   const foldedPerCall: number[] = [];
@@ -147,18 +129,52 @@ test('a fold split over calls resumes where it stopped, in one segment', () => {
     if (!result.pending) break;
   }
 
-  // The first fold's last two chunks, 0 among them, then 11 on its own.
-  expect(foldedPerCall).toStrictEqual([4, 3, 1]);
+  // The first fold's last two chunks, then 11 on its own.
+  expect(foldedPerCall).toStrictEqual([4, 2, 1]);
   expect(molDB.planeStatus()).toStrictEqual({
-    folded: 12,
+    folded: 11,
     segments: 2,
+    watermark: 11,
     pending: 0,
-    tail: 0,
+    refoldAdvisable: false,
+  });
+  expect(phenols(db)).toStrictEqual({
+    ids: [1, 7, 8, 9],
+    usedPlaneIndex: true,
+  });
+});
+
+test('a write below the bound between two calls keeps the watermark below it', () => {
+  const { db, molDB } = seed();
+  const fold = () => molDB.foldPlanes({ maxPopulationRatio: 1, maxChunks: 1 });
+  fold();
+  add(db, molDB, 'Oc1ccc(Br)cc1', 0);
+
+  // The fold may have read past 0's weight: its bound drops below it.
+  expect(readFoldState(db)).toMatchObject({ watermark: null, bound: -1 });
+
+  const foldedPerCall: number[] = [];
+  for (let call = 0; call < 10; call++) {
+    const result = fold();
+    foldedPerCall.push(result.folded);
+    if (!result.pending) break;
+  }
+
+  // The interrupted fold closes on nothing more, at -1; the next one takes
+  // all eleven entries, in chunks of four.
+  expect(foldedPerCall).toStrictEqual([0, 4, 4, 3]);
+  expect(molDB.planeStatus()).toStrictEqual({
+    folded: 15,
+    segments: 2,
+    watermark: 10,
+    pending: 0,
+    refoldAdvisable: false,
   });
   expect(phenols(db)).toStrictEqual({
     ids: [0, 1, 7, 8, 9],
     usedPlaneIndex: true,
   });
+  expect(phenols(db, false).ids).toStrictEqual([0, 1, 7, 8, 9]);
 });
 
 test('a range wider than a chunk is folded in clustered order, one narrower through the index', () => {
@@ -187,8 +203,9 @@ test('a range wider than a chunk is folded in clustered order, one narrower thro
   expect(molDB.planeStatus()).toStrictEqual({
     folded: 17,
     segments: 3,
+    watermark: 17,
     pending: 0,
-    tail: 0,
+    refoldAdvisable: false,
   });
   expect(phenols(db).ids).toStrictEqual(phenols(db, false).ids);
 });

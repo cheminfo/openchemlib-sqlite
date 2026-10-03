@@ -6,19 +6,15 @@ import { expect, test } from 'vitest';
 import { MoleculesDBSQLite } from '../../MoleculesDBSQLite.ts';
 import { buildPrescreenSql } from '../../utils/prescreen.ts';
 import { foldPlanes } from '../foldPlanes.ts';
-import { bitsOfIndex, countBits, readBit, setBit } from '../planeLayout.ts';
+import { readFoldState } from '../foldState.ts';
 import {
   planeChunks,
   planeCoverage,
   planeQueryBits,
-  prescreenPlanes,
-} from '../planePrescreen.ts';
-import {
-  BITSTAT_TABLE,
-  PLANE_TABLE,
-  SLOT_TABLE,
-  TAIL_TABLE,
-} from '../planeSchema.ts';
+} from '../planeCoverage.ts';
+import { bitsOfIndex, countBits, readBit, setBit } from '../planeLayout.ts';
+import { prescreenPlanes } from '../planePrescreen.ts';
+import { BITSTAT_TABLE, PLANE_TABLE, SLOT_TABLE } from '../planeSchema.ts';
 import { nextSlotOf } from '../planeState.ts';
 
 const SMILES = [
@@ -101,51 +97,11 @@ function planeCandidates(db: DatabaseSync, fragment: string): number[] {
       },
       state,
       bits,
+      readFoldState(db).watermark ?? 0,
     ),
   ];
   return found.map((entry) => entry.entryId).toSorted((a, b) => a - b);
 }
-
-test('migration 5 creates the plane tables and the tail trigger', () => {
-  const { db } = makeDB();
-  const names = (
-    db
-      .prepare(`SELECT name FROM sqlite_master WHERE name LIKE 'ocl_ss_%'`)
-      .all() as Array<{ name: string }>
-  ).map((row) => row.name);
-
-  expect(names).toContain(PLANE_TABLE);
-  expect(names).toContain(TAIL_TABLE);
-  expect(names).toContain('ocl_ss_tail_insert');
-});
-
-test('before the first fold, no fingerprint is copied into the tail', () => {
-  const { db } = makeDB();
-  const { n } = db
-    .prepare(`SELECT COUNT(*) AS n FROM ${TAIL_TABLE}`)
-    .get() as Record<string, unknown>;
-
-  expect(Number(n)).toBe(0);
-});
-
-test('a fold seeds from ocl_ss_index, empties the tail and records one segment', () => {
-  const { db } = makeDB();
-  const result = foldPlanes(db);
-
-  expect(result.folded).toBe(SMILES.length);
-  expect(result.chunks).toBe(1);
-  expect(result.pending).toBe(false);
-  expect(planeCoverage(db)).toStrictEqual({
-    segments: 1,
-    slots: SMILES.length,
-  });
-
-  const { n } = db
-    .prepare(`SELECT COUNT(*) AS n FROM ${TAIL_TABLE}`)
-    .get() as Record<string, unknown>;
-
-  expect(Number(n)).toBe(0);
-});
 
 const FRAGMENTS = [
   'c1ccccc1',
@@ -239,36 +195,6 @@ test('bit helpers round-trip a fingerprint', () => {
   expect(countBits(blob)).toBe(positions.length);
 
   for (const bit of positions) expect(readBit(blob, bit)).toBe(true);
-});
-
-test('migrate puts the tail triggers back when a rebuild has dropped them', () => {
-  const { db, molDB } = makeDB();
-  foldPlanes(db, { maxPopulationRatio: 1 });
-  // SQLite drops a trigger with the table it watches, which is what any future
-  // migration rebuilding ocl_ss_index would do.
-  db.exec('DROP TRIGGER ocl_ss_tail_insert');
-  db.exec('DROP TRIGGER ocl_ss_tail_delete');
-
-  expect(molDB.migrate()).toStrictEqual([]);
-
-  // Id 0 is below the watermark, so only the tail can hold it.
-  const idCode = OCL.Molecule.fromSmiles('Brc1ccccc1').getIDCode();
-  db.prepare('INSERT INTO molecules (id, id_code) VALUES (0, ?)').run(idCode);
-  molDB.insert(0, idCode);
-  const count = () =>
-    Number(
-      (
-        db
-          .prepare(`SELECT COUNT(*) AS n FROM ${TAIL_TABLE} WHERE entry_id = 0`)
-          .get() as Record<string, unknown>
-      ).n,
-    );
-
-  expect(count()).toBe(1);
-
-  molDB.remove(0);
-
-  expect(count()).toBe(0);
 });
 
 test('a chunk no segment covers is invisible to a search', () => {

@@ -1,68 +1,68 @@
-import { DatabaseSync } from 'node:sqlite';
+import type { DatabaseSync } from 'node:sqlite';
 
 import * as OCL from 'openchemlib';
 import { expect, test } from 'vitest';
 
-import { MoleculesDBSQLite } from '../../MoleculesDBSQLite.ts';
+import type { MoleculesDBSQLite } from '../../MoleculesDBSQLite.ts';
+import { installScanDeadline } from '../../utils/scanDeadline.ts';
 import { buildFoldReadSql } from '../foldRead.ts';
 import { START_CURSOR, readFoldState } from '../foldState.ts';
-import { TAIL_TABLE, buildTailTriggerSqlV5 } from '../planeSchema.ts';
+import {
+  SLOT_TABLE,
+  TAIL_TABLE,
+  buildPlaneSchemaSqlV5,
+} from '../planeSchema.ts';
 import { buildUnfoldedSql } from '../unfoldedPrescreen.ts';
+import { WATERMARK_TRIGGERS } from '../watermarkSchema.ts';
+
+import { add, emptyLibrary, expectSameAsColumn } from './fixture.ts';
 
 const SMILES = ['Oc1ccccc1', 'Cc1ccccc1', 'CCO', 'C1CCCCC1', 'O=C(N)c1ccccc1'];
 
 /**
- * A migrated, empty library.
- * @returns The connection and the molecules DB.
+ * Turn a database back into what version 5 left: no fold table, a tail filled
+ * by a trigger copying every insert, and version 5 recorded as the last.
+ * @param db - The connection.
  */
-function empty() {
-  const db = new DatabaseSync(':memory:');
-  db.exec(
-    'CREATE TABLE molecules (id INTEGER PRIMARY KEY, id_code TEXT NOT NULL UNIQUE)',
-  );
-  const molDB = new MoleculesDBSQLite(db, OCL, { entriesTable: 'molecules' });
-  molDB.migrate();
-  return { db, molDB };
+function rewindToVersion5(db: DatabaseSync) {
+  for (const trigger of WATERMARK_TRIGGERS) db.exec(`DROP TRIGGER ${trigger}`);
+  db.exec('DROP TABLE ocl_ss_fold');
+  db.exec('DELETE FROM ocl_ss_schema WHERE version > 5');
+  db.exec(buildPlaneSchemaSqlV5({ entriesTable: 'molecules', pkColumn: 'id' }));
 }
 
 /**
- * Add molecules to the entries table and the index, under the next ids.
+ * Add molecules under the next ids.
  * @param db - The connection.
  * @param molDB - The molecules DB.
  * @param smiles - The molecules.
  */
-function add(db: DatabaseSync, molDB: MoleculesDBSQLite, smiles: string[]) {
-  for (const one of smiles) {
-    const idCode = OCL.Molecule.fromSmiles(one).getIDCode();
-    const { lastInsertRowid } = db
-      .prepare('INSERT INTO molecules (id_code) VALUES (?)')
-      .run(idCode);
-    molDB.insert(Number(lastInsertRowid), idCode);
-  }
+function addAll(db: DatabaseSync, molDB: MoleculesDBSQLite, smiles: string[]) {
+  for (const one of smiles) add(db, molDB, one);
 }
 
 /**
- * Turn a database back into what version 5 left: no fold table, the trigger
- * that copied every insert, and version 5 recorded as the last.
+ * The names of the tables, indexes and triggers about the tail.
  * @param db - The connection.
+ * @returns Them, sorted.
  */
-function rewindToVersion5(db: DatabaseSync) {
-  db.exec(`
-    DROP TRIGGER ocl_ss_tail_insert;
-    DROP TRIGGER ocl_ss_tail_delete;
-    DROP TABLE ocl_ss_fold;
-    DELETE FROM ocl_ss_schema WHERE version > 5;`);
-  db.exec(buildTailTriggerSqlV5());
+function tailObjects(db: DatabaseSync): string[] {
+  const rows = db
+    .prepare(
+      `SELECT name FROM sqlite_schema WHERE name LIKE '%tail%' ORDER BY name`,
+    )
+    .all() as Array<{ name: string }>;
+  return rows.map((row) => row.name);
 }
 
 /**
- * The entry ids the tail holds.
+ * The entry ids the slot table holds.
  * @param db - The connection.
  * @returns Them, ascending.
  */
-function tailIds(db: DatabaseSync): number[] {
+function slotted(db: DatabaseSync): number[] {
   const rows = db
-    .prepare(`SELECT entry_id FROM ${TAIL_TABLE} ORDER BY entry_id`)
+    .prepare(`SELECT entry_id FROM ${SLOT_TABLE} ORDER BY entry_id`)
     .all() as Array<Record<string, unknown>>;
   return rows.map((row) => Number(row.entry_id));
 }
@@ -82,48 +82,100 @@ function planOf(db: DatabaseSync, query: { sql: string; params: unknown[] }) {
   return rows.map((row) => row.detail).join('\n');
 }
 
-test('a version 5 database never folded drops its copies on upgrade', () => {
-  const { db, molDB } = empty();
+test('a version 5 database never folded drops its tail on upgrade', () => {
+  const { db, molDB } = emptyLibrary();
   rewindToVersion5(db);
-  add(db, molDB, SMILES);
+  addAll(db, molDB, SMILES);
 
-  expect(tailIds(db)).toStrictEqual([1, 2, 3, 4, 5]);
+  expect(tailObjects(db)).toStrictEqual([
+    'idx_ocl_ss_tail_entry',
+    'ocl_ss_tail',
+    'ocl_ss_tail_insert',
+  ]);
   expect(molDB.migrate()).toStrictEqual([6]);
-  expect(tailIds(db)).toStrictEqual([]);
+  expect(tailObjects(db)).toStrictEqual([]);
   expect(molDB.planeStatus()).toStrictEqual({
     folded: 0,
     segments: 0,
+    watermark: null,
     pending: 5,
-    tail: 0,
+    refoldAdvisable: false,
   });
 
-  add(db, molDB, ['Clc1ccccc1']);
+  addAll(db, molDB, ['Clc1ccccc1']);
 
-  expect(tailIds(db)).toStrictEqual([]);
   expect(molDB.foldPlanes()).toMatchObject({ folded: 6, pending: false });
-  expect(readFoldState(db).foldedThrough).toBe(6);
+  expect(readFoldState(db).watermark).toBe(6);
 });
 
-test('a version 5 database already folded keeps its tail on upgrade', () => {
-  const { db, molDB } = empty();
-  add(db, molDB, SMILES);
-  molDB.foldPlanes();
+test('a version 5 database already folded starts below what its tail holds', () => {
+  const { db, molDB } = emptyLibrary();
+  addAll(db, molDB, SMILES);
+  molDB.foldPlanes({ maxPopulationRatio: 1 });
   rewindToVersion5(db);
-  add(db, molDB, ['Clc1ccccc1']);
+  // What version 5 had not folded yet: a new entry, and entry 2 inserted again
+  // with another fingerprint, its old bits still in the planes.
+  addAll(db, molDB, ['Clc1ccccc1']);
+  add(db, molDB, 'Oc1ccccc1C', 2);
 
-  expect(tailIds(db)).toStrictEqual([6]);
+  const tail = db
+    .prepare(`SELECT entry_id FROM ${TAIL_TABLE} ORDER BY entry_id`)
+    .all() as Array<Record<string, unknown>>;
+
+  expect(tail.map((row) => Number(row.entry_id))).toStrictEqual([2, 6]);
   expect(molDB.migrate()).toStrictEqual([6]);
-  // What version 5 had not folded is in its tail, so the watermark starts at
-  // the highest id present.
-  expect(tailIds(db)).toStrictEqual([6]);
-  expect(readFoldState(db).foldedThrough).toBe(6);
-  expect(molDB.planeStatus()).toMatchObject({ pending: 1, tail: 1 });
-  expect(molDB.foldPlanes()).toMatchObject({ folded: 1, pending: false });
-  expect(tailIds(db)).toStrictEqual([]);
+  expect(tailObjects(db)).toStrictEqual([]);
+  expect(molDB.planeStatus()).toStrictEqual({
+    folded: 5,
+    segments: 1,
+    watermark: 1,
+    pending: 5,
+    refoldAdvisable: true,
+  });
+  expect(expectSameAsColumn(db, 'Oc1ccccc1')).toStrictEqual([1, 2]);
+
+  expect(molDB.foldPlanes({ maxPopulationRatio: 1 })).toMatchObject({
+    folded: 5,
+    pending: false,
+  });
+  expect(readFoldState(db).watermark).toBe(6);
+  expect(expectSameAsColumn(db, 'Oc1ccccc1')).toStrictEqual([1, 2]);
+});
+
+test('an entry no published slot stands for keeps the watermark below it', () => {
+  const { db, molDB } = emptyLibrary();
+  addAll(db, molDB, SMILES);
+  molDB.foldPlanes({ maxPopulationRatio: 1 });
+  rewindToVersion5(db);
+  // What a version 5 fold split over calls could leave: an entry never folded,
+  // which only the column path still found.
+  db.exec(`DELETE FROM ${SLOT_TABLE} WHERE entry_id = 3`);
+
+  expect(molDB.migrate()).toStrictEqual([6]);
+  expect(readFoldState(db).watermark).toBe(2);
+});
+
+test('a slot whose entry has left the index is dropped on upgrade', () => {
+  const { db, molDB } = emptyLibrary();
+  addAll(db, molDB, SMILES);
+  molDB.foldPlanes({ maxPopulationRatio: 1 });
+  rewindToVersion5(db);
+  // Version 5 never removed a slot with its entry.
+  db.exec('DELETE FROM ocl_ss_index WHERE entry_id = 4');
+
+  expect(slotted(db)).toStrictEqual([1, 2, 3, 4, 5]);
+  expect(molDB.migrate()).toStrictEqual([6]);
+  expect(slotted(db)).toStrictEqual([1, 2, 3, 5]);
+  expect(readFoldState(db).watermark).toBe(5);
+
+  // Id 4 given again is new to the planes, and lowers the watermark.
+  molDB.insert(4, OCL.Molecule.fromSmiles('C1CCCCC1').getIDCode());
+
+  expect(readFoldState(db).watermark).toBe(3);
 });
 
 test('a fold reads one chunk of range through the entry index, more in clustered order', () => {
-  const { db } = empty();
+  const { db } = emptyLibrary();
   const read = (indexed: boolean, after: number | null) =>
     planOf(
       db,
@@ -137,13 +189,14 @@ test('a fold reads one chunk of range through the entry index, more in clustered
   expect(read(true, 5)).toContain(
     'SEARCH ocl_ss_index USING INDEX idx_ocl_ss_entry (entry_id>? AND entry_id<?)',
   );
-  // A larger range stays in clustered order, merged with the tail unsorted.
+  // A larger range stays in clustered order, and needs no sort.
   expect(read(false, 5)).not.toContain('idx_ocl_ss_entry');
   expect(read(false, 5)).not.toContain('TEMP B-TREE');
 });
 
-test('the screen of unfolded entries seeks the range above the watermark', () => {
-  const { db } = empty();
+test('the entries above the watermark are sought on the entry index', () => {
+  const { db } = emptyLibrary();
+  installScanDeadline(db);
   const mol = OCL.Molecule.fromSmiles('Oc1ccccc1');
   mol.setFragment(true);
   const params = {
@@ -153,7 +206,7 @@ test('the screen of unfolded entries seeks the range above the watermark', () =>
     mol,
   };
 
-  expect(planOf(db, buildUnfoldedSql(params, { after: 5 }))).toContain(
+  expect(planOf(db, buildUnfoldedSql(params, 5, Date.now()))).toContain(
     'SEARCH s USING INDEX idx_ocl_ss_entry (entry_id>?)',
   );
 });

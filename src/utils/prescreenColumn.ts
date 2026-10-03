@@ -35,7 +35,6 @@ export function buildPrescreenSql(
     | 'mwRange'
     | 'after'
     | 'deadline'
-    | 'screenTable'
   >,
 ): { sql: string; params: unknown[] } {
   const {
@@ -48,7 +47,6 @@ export function buildPrescreenSql(
     mwRange,
     after,
     deadline,
-    screenTable = 'ocl_ss_index',
   } = params;
   const strategy = candidates ? (candidates.strategy ?? 'membership') : null;
 
@@ -58,8 +56,8 @@ export function buildPrescreenSql(
   const from =
     candidates && strategy === 'drive'
       ? `FROM (SELECT DISTINCT entry_id FROM (${candidates.sql})) c
-     CROSS JOIN ${screenTable} s ON s.entry_id = c.entry_id`
-      : `FROM ${screenTable} s`;
+     CROSS JOIN ocl_ss_index s ON s.entry_id = c.entry_id`
+      : `FROM ocl_ss_index s`;
   const select = `SELECT s.entry_id, s.mw, e.${idCodeColumn} AS id_code
      ${from}
      JOIN ${entriesTable} e ON e.${pkColumn} = s.entry_id`;

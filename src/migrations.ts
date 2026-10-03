@@ -1,24 +1,22 @@
 import type * as OpenChemLib from 'openchemlib';
 
+import { buildPlaneSchemaSqlV5 } from './planes/planeSchema.ts';
+import { upgradeToWatermark } from './planes/upgradeToWatermark.ts';
 import {
   FOLD_TABLE,
-  TAIL_TABLE,
-  buildPlaneSchemaSql,
-  buildTailTriggerSql,
-} from './planes/planeSchema.ts';
-import { upgradeToFoldWatermark } from './planes/upgradeToFoldWatermark.ts';
+  buildWatermarkTriggersSql,
+} from './planes/watermarkSchema.ts';
 import {
   NO_STEREO_HASH_TABLE,
   NO_STEREO_TAUTOMER_HASH_TABLE,
   VERSION_TABLE,
-  buildEntryIndexSql,
   buildHashTableSql,
   buildSchemaSqlV1,
-  buildSchemaSqlV2,
   buildSettingsTableSql,
   buildVersionTableSql,
 } from './schema.ts';
 import type { MigrationEvent, SQLiteDatabase } from './types.ts';
+import { upgradeToMwClustered } from './upgradeToMwClustered.ts';
 
 type OCLLibrary = typeof OpenChemLib;
 
@@ -44,10 +42,6 @@ export interface Migration {
    */
   up: (context: MigrationContext) => number | void;
 }
-
-// Rows rewritten between progress reports. Small enough that a large migration
-// reports often, large enough that reporting is not the cost.
-const PROGRESS_EVERY = 2000;
 
 /**
  * Every schema version, in order. A database at version N applies N+1, N+2, ...
@@ -121,13 +115,13 @@ export const MIGRATIONS: Migration[] = [
       //
       // Until it has run the index is empty, every search stays on the column
       // path, and nothing about the database's behaviour changes.
-      db.exec(buildPlaneSchemaSql({ entriesTable, pkColumn }));
+      db.exec(buildPlaneSchemaSqlV5({ entriesTable, pkColumn }));
     },
   },
   {
     version: 6,
-    description: 'fold up to an entry-id watermark; the tail keeps the rest',
-    up: ({ db }) => upgradeToFoldWatermark(db),
+    description: 'drop the tail; trust the planes up to an entry-id watermark',
+    up: ({ db }) => upgradeToWatermark(db),
   },
 ];
 
@@ -179,28 +173,28 @@ export function runMigrations(context: MigrationContext): number[] {
     applied.push(migration.version);
   }
 
-  reassertTailTrigger(db);
+  reassertWatermarkTriggers(db);
   return applied;
 }
 
 /**
- * Put the tail triggers back if anything has dropped them.
+ * Put the watermark triggers back if anything has dropped them.
  *
  * SQLite drops a trigger with the table it watches, so any later migration that
  * rebuilds `ocl_ss_index` — as version 2 did, under a temporary name before
- * swapping it in — takes `ocl_ss_tail_insert` and `ocl_ss_tail_delete` with it.
- * Nothing would report that: inserts would keep working, an out-of-order entry
- * would simply never reach the tail, no fold would find it, and a search
- * answered from the plane index would quietly stop finding it.
+ * swapping it in — takes them with it. Nothing would report that: inserts would
+ * keep working, an entry written below the watermark would simply leave it
+ * where it is, and a search answered from the plane index would quietly miss
+ * that entry.
  *
  * So they are re-asserted on every `migrate()` rather than trusted to the one
  * migration that created them. `CREATE TRIGGER IF NOT EXISTS` makes that free
  * when they are already there.
  * @param db - The database to repair.
  */
-function reassertTailTrigger(db: SQLiteDatabase): void {
-  if (!tableExists(db, TAIL_TABLE) || !tableExists(db, FOLD_TABLE)) return;
-  db.exec(buildTailTriggerSql());
+function reassertWatermarkTriggers(db: SQLiteDatabase): void {
+  if (!tableExists(db, FOLD_TABLE)) return;
+  db.exec(buildWatermarkTriggersSql());
 }
 
 /**
@@ -235,131 +229,4 @@ function hasColumn(db: SQLiteDatabase, table: string, column: string): boolean {
     .prepare(`SELECT name FROM pragma_table_info(?)`)
     .all(table) as Array<{ name: string }>;
   return rows.some((row) => row.name === column);
-}
-
-/**
- * Rebuild ocl_ss_index clustered by molecular weight.
- *
- * The fingerprints are carried over, not recomputed: they are the expensive part
- * (~6 ms a molecule) and the schema change does not affect them. Only `mw` is
- * new. When the caller configured an mwColumn it comes straight from the entries
- * table in one INSERT ... SELECT; otherwise it is derived from each idCode, which
- * is a parse plus a formula and still an order of magnitude cheaper than
- * re-fingerprinting.
- *
- * The whole rebuild is one transaction (the caller's), which is what makes it
- * safe to interrupt — but it does hold the write lock for its duration. That is
- * accepted here: it runs once, at startup, and a half-swapped index has no valid
- * intermediate state to expose.
- * @param context - The database, OCL, the column config, and the log callback.
- * @returns How many orphaned fingerprints were dropped.
- */
-function upgradeToMwClustered(context: MigrationContext): number {
-  const {
-    db,
-    ocl,
-    entriesTable,
-    pkColumn,
-    idCodeColumn,
-    mwColumn,
-    onMigration,
-  } = context;
-  const temporary = 'ocl_ss_index_migrating';
-  const columns =
-    'ss_index0, ss_index1, ss_index2, ss_index3, ss_index4, ss_index5, ss_index6, ss_index7';
-
-  db.exec(`DROP TABLE IF EXISTS ${temporary}`);
-  db.exec(buildSchemaSqlV2({ entriesTable, pkColumn }, temporary));
-
-  const total = (
-    db.prepare('SELECT COUNT(*) AS n FROM ocl_ss_index').get() as { n: number }
-  ).n;
-  const report = (done: number) =>
-    onMigration?.({
-      version: 2,
-      description: 'cluster ocl_ss_index by molecular weight',
-      phase: 'progress',
-      done,
-      total,
-    });
-
-  // A fingerprint whose entry no longer exists cannot be carried over: the new
-  // table has the same foreign key the old one did, and the search inner-joins
-  // the entries table anyway, so such a row could never match. It is dropped —
-  // but counted and reported, because a migration that quietly discards rows is
-  // indistinguishable from one that loses them.
-  const orphans = (
-    db
-      .prepare(
-        `SELECT COUNT(*) AS n FROM ocl_ss_index o
-         WHERE NOT EXISTS (SELECT 1 FROM ${entriesTable} e WHERE e.${pkColumn} = o.entry_id)`,
-      )
-      .get() as { n: number }
-  ).n;
-
-  if (mwColumn) {
-    // The weight is already in the entries table: pure SQL, no molecule parsed.
-    db.exec(
-      `INSERT INTO ${temporary} (mw, entry_id, ${columns})
-       SELECT COALESCE(e.${mwColumn}, 0), o.entry_id, ${columns}
-       FROM ocl_ss_index o
-       JOIN ${entriesTable} e ON e.${pkColumn} = o.entry_id`,
-    );
-    report(total);
-  } else {
-    const insert = db.prepare(
-      `INSERT INTO ${temporary} (mw, entry_id, ${columns})
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-    );
-    const read = db.prepare(
-      `SELECT o.entry_id, ${columns}, e.${idCodeColumn} AS id_code
-       FROM ocl_ss_index o
-       JOIN ${entriesTable} e ON e.${pkColumn} = o.entry_id`,
-    );
-    read.setReadBigInts?.(true);
-    // Stream when the driver can, so a large index is not held in memory twice
-    // while it is being rewritten.
-    const rows = (read.iterate ? read.iterate() : read.all()) as Iterable<
-      Record<string, unknown>
-    >;
-    let done = 0;
-    for (const row of rows) {
-      insert.run(
-        molecularWeight(ocl, row.id_code as string | null),
-        Number(row.entry_id),
-        row.ss_index0,
-        row.ss_index1,
-        row.ss_index2,
-        row.ss_index3,
-        row.ss_index4,
-        row.ss_index5,
-        row.ss_index6,
-        row.ss_index7,
-      );
-      if (++done % PROGRESS_EVERY === 0) report(done);
-    }
-    report(done);
-  }
-
-  db.exec('DROP TABLE ocl_ss_index');
-  db.exec(`ALTER TABLE ${temporary} RENAME TO ocl_ss_index`);
-  db.exec(buildEntryIndexSql());
-  return orphans;
-}
-
-/**
- * Molecular weight of an idCode, or 0 when it cannot be computed.
- * @param ocl - OpenChemLib namespace.
- * @param idCode - The stored idCode, or null for an orphaned fingerprint.
- * @returns The relative weight; 0 sorts such a row first, as insert() does.
- */
-function molecularWeight(ocl: OCLLibrary, idCode: string | null): number {
-  if (!idCode) return 0;
-  try {
-    // `false` skips 2D-coordinate invention: the formula is graph-derived.
-    return ocl.Molecule.fromIDCode(idCode, false).getMolecularFormula()
-      .relativeWeight;
-  } catch {
-    return 0;
-  }
 }
