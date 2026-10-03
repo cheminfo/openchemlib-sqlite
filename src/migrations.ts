@@ -1,10 +1,12 @@
 import type * as OpenChemLib from 'openchemlib';
 
 import {
+  FOLD_TABLE,
   TAIL_TABLE,
   buildPlaneSchemaSql,
   buildTailTriggerSql,
 } from './planes/planeSchema.ts';
+import { upgradeToFoldWatermark } from './planes/upgradeToFoldWatermark.ts';
 import {
   NO_STEREO_HASH_TABLE,
   NO_STEREO_TAUTOMER_HASH_TABLE,
@@ -122,6 +124,11 @@ export const MIGRATIONS: Migration[] = [
       db.exec(buildPlaneSchemaSql({ entriesTable, pkColumn }));
     },
   },
+  {
+    version: 6,
+    description: 'fold up to an entry-id watermark; the tail keeps the rest',
+    up: ({ db }) => upgradeToFoldWatermark(db),
+  },
 ];
 
 /** The version a freshly-migrated database ends up at. */
@@ -177,22 +184,22 @@ export function runMigrations(context: MigrationContext): number[] {
 }
 
 /**
- * Put the tail trigger back if anything has dropped it.
+ * Put the tail triggers back if anything has dropped them.
  *
  * SQLite drops a trigger with the table it watches, so any later migration that
  * rebuilds `ocl_ss_index` — as version 2 did, under a temporary name before
- * swapping it in — takes `ocl_ss_tail_insert` with it. Nothing would report
- * that: inserts would keep working, the tail would simply stop filling, the
- * entries added after it would never be folded, and a search answered from the
- * plane index would quietly stop finding them.
+ * swapping it in — takes `ocl_ss_tail_insert` and `ocl_ss_tail_delete` with it.
+ * Nothing would report that: inserts would keep working, an out-of-order entry
+ * would simply never reach the tail, no fold would find it, and a search
+ * answered from the plane index would quietly stop finding it.
  *
- * So it is re-asserted on every `migrate()` rather than trusted to the one
- * migration that created it. `CREATE TRIGGER IF NOT EXISTS` makes that free when
- * it is already there, and it is skipped entirely until the plane tables exist.
+ * So they are re-asserted on every `migrate()` rather than trusted to the one
+ * migration that created them. `CREATE TRIGGER IF NOT EXISTS` makes that free
+ * when they are already there.
  * @param db - The database to repair.
  */
 function reassertTailTrigger(db: SQLiteDatabase): void {
-  if (!tableExists(db, TAIL_TABLE)) return;
+  if (!tableExists(db, TAIL_TABLE) || !tableExists(db, FOLD_TABLE)) return;
   db.exec(buildTailTriggerSql());
 }
 

@@ -1,6 +1,8 @@
 import type { SQLiteDatabase, SQLiteStatement } from '../types.ts';
 
 import type { ChunkBuilder } from './ChunkBuilder.ts';
+import type { FoldCursor } from './foldState.ts';
+import { finishFold, saveFoldProgress } from './foldState.ts';
 import { BITSTAT_TABLE, SEGMENT_TABLE, TAIL_TABLE } from './planeSchema.ts';
 
 /**
@@ -87,24 +89,24 @@ export function writeChunkData(write: ChunkWrite): void {
  *
  * This is the only write of a fold that a search can observe, so it carries
  * everything that must not be seen before the chunk is whole: the segment the
- * chunk belongs to, the bit populations the router reads, and the removal of the
- * tail rows the chunk now covers.
+ * chunk belongs to, the bit populations the router reads, the removal of the
+ * tail rows the chunk folded, and the fold's progress.
  *
- * The tail is cleared by one range delete over its clustered key rather than a
- * delete per entry — a million statements is the other way to hold the lock for
- * seconds. It is sound because the fold reads the tail in `(mw, entry_id)` order
- * and `cursor` is the last row it took.
+ * Tail rows are deleted one by one, and only when they still hold the values
+ * folded: the tail keeps only out-of-order and repeated inserts, so there are
+ * few, and a row inserted again since it was read stays for the next fold.
  *
  * The populations are bumped here, not while the planes are written, so a chunk
  * that is interrupted and redone does not count its bits twice.
  * @param db - The database to write.
  * @param segment - The segment to extend, or null to start one.
- * @param info - The slots added, the populations seen, and where the tail ends.
+ * @param info - The slots added, the populations seen, and what was consumed.
  * @param info.firstSlot - The slot the chunk's first entry took.
  * @param info.slots - How many slots the chunk added.
  * @param info.populations - How many of the chunk's entries set each bit.
  * @param info.stored - The bits the index keeps planes for.
- * @param info.cursor - The last tail row folded, or null when seeding.
+ * @param info.consumed - The tail rows the chunk folded, as they were read.
+ * @param info.cursor - The chunk's last row, or null when it ends the fold.
  * @returns The segment the chunk now belongs to.
  */
 export function publishChunk(
@@ -115,7 +117,8 @@ export function publishChunk(
     slots: number;
     populations: ReadonlyMap<number, number>;
     stored: ReadonlySet<number>;
-    cursor: { mw: number; entryId: number } | null;
+    consumed: ReadonlyArray<Record<string, unknown>>;
+    cursor: FoldCursor | null;
   },
 ): number {
   let id = segment;
@@ -143,10 +146,33 @@ export function publishChunk(
       bump.run(bit, population, info.stored.has(bit) ? 1 : 0);
     }
 
-    if (info.cursor !== null) {
-      db.prepare(
-        `DELETE FROM ${TAIL_TABLE} WHERE (mw, entry_id) <= (?, ?)`,
-      ).run(info.cursor.mw, info.cursor.entryId);
+    if (info.consumed.length > 0) {
+      const remove = db.prepare(
+        `DELETE FROM ${TAIL_TABLE}
+          WHERE entry_id = ? AND mw = ? AND ss_index0 = ? AND ss_index1 = ?
+            AND ss_index2 = ? AND ss_index3 = ? AND ss_index4 = ?
+            AND ss_index5 = ? AND ss_index6 = ? AND ss_index7 = ?`,
+      );
+      for (const row of info.consumed) {
+        remove.run(
+          row.entry_id,
+          row.mw,
+          row.ss_index0,
+          row.ss_index1,
+          row.ss_index2,
+          row.ss_index3,
+          row.ss_index4,
+          row.ss_index5,
+          row.ss_index6,
+          row.ss_index7,
+        );
+      }
+    }
+
+    if (info.cursor === null) {
+      finishFold(db);
+    } else {
+      saveFoldProgress(db, info.cursor, id);
     }
   });
   return id as number;

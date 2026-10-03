@@ -3,7 +3,7 @@ import type * as OpenChemLib from 'openchemlib';
 import { prescreenPlanes } from '../planes/planePrescreen.ts';
 import type { PrescreenPlan } from '../planes/planeRouter.ts';
 import { choosePrescreenPath } from '../planes/planeRouter.ts';
-import { TAIL_TABLE } from '../planes/planeSchema.ts';
+import { prescreenUnfolded } from '../planes/unfoldedPrescreen.ts';
 import type {
   MwRange,
   SQLiteDatabase,
@@ -104,9 +104,8 @@ export interface PrescreenParams {
   /**
    * The table holding the fingerprints to screen.
    *
-   * `ocl_ss_tail` has the same shape as `ocl_ss_index` and holds what has been
-   * inserted since the last fold, so the plane path screens the folded entries
-   * from its planes and the rest through this, with the same SQL.
+   * `ocl_ss_tail` has the same shape as `ocl_ss_index`, so either is screened
+   * with the same SQL.
    * @default 'ocl_ss_index'
    */
   screenTable?: string;
@@ -146,7 +145,7 @@ export interface PrescreenState {
  * few hundred rows and abandons the cursor.
  *
  * A folded database still has whatever was inserted since, so the plane path
- * chains the column path over `ocl_ss_tail` behind its own stream. The tail is
+ * also screens the entries above the fold watermark and the tail. Both are
  * small by design, and empty right after a fold.
  * @param params - Prescreen parameters; `params.mol.fragment` must already be true.
  * @param state - Mutable counters updated as the stream is consumed.
@@ -163,9 +162,13 @@ export function* prescreen(
   }
 
   state.usedPlaneIndex = true;
-  yield* prescreenPlanes(params, state, plan.bits);
+  // What no fold has reached goes first: it is small by design, and the ids it
+  // yields are the ones the planes then skip, so an entry both folded and
+  // waiting to be folded again counts once.
+  const seen = new Set<number>();
+  yield* prescreenUnfolded(params, state, seen);
   if (state.partial) return;
-  yield* prescreenColumn({ ...params, screenTable: TAIL_TABLE }, state);
+  yield* prescreenPlanes({ ...params, exclude: seen }, state, plan.bits);
 }
 
 /**

@@ -8,8 +8,9 @@ import type { SearchWorkerPool } from './SearchWorkerPool.ts';
 import { SCHEMA_VERSION, runMigrations } from './migrations.ts';
 import type { FoldOptions, FoldResult } from './planes/foldPlanes.ts';
 import { foldPlanes } from './planes/foldPlanes.ts';
+import { countAbove, readFoldState } from './planes/foldState.ts';
 import { planeCoverage } from './planes/planePrescreen.ts';
-import { TAIL_TABLE } from './planes/planeSchema.ts';
+import { SLOT_TABLE, TAIL_TABLE } from './planes/planeSchema.ts';
 import { countOf } from './planes/planeState.ts';
 import {
   MAX_TAUTOMERS_SETTING,
@@ -337,16 +338,61 @@ export class MoleculesDBSQLite {
   }
 
   /**
-   * What the plane index currently covers.
+   * What the plane index currently covers, and what waiting costs.
    *
-   * `pending` is what `foldPlanes()` would pick up: entries inserted since the
-   * last fold, which every search still screens the slower way. It is the number
-   * to watch to decide how often to fold.
-   * @returns The folded entry count, the number of folds, and what is waiting.
+   * `pending` is what `foldPlanes()` would pick up: the entries no fold has
+   * reached, which every search still screens the slower way. It is the number
+   * to watch to decide how often to fold. Before the first fold it is every
+   * entry, counted; during a fold split over several calls it counts that
+   * fold's whole range.
+   *
+   * `tail` is the part of it stored twice: entries inserted with an id at or
+   * below the fold watermark, or inserted again, which a fold can only find by
+   * copy. Ids that only grow — `AUTOINCREMENT`, or a table nothing is deleted
+   * from — keep it at 0.
+   * @returns The folded entry count, the number of folds, what is waiting, and
+   *   how much of it is copied.
    */
-  planeStatus(): { folded: number; segments: number; pending: number } {
+  planeStatus(): {
+    folded: number;
+    segments: number;
+    pending: number;
+    tail: number;
+  } {
     const { segments, slots } = planeCoverage(this.#db);
-    return { folded: slots, segments, pending: countOf(this.#db, TAIL_TABLE) };
+    const tail = countOf(this.#db, TAIL_TABLE);
+    const { foldedThrough } = readFoldState(this.#db);
+    return {
+      folded: slots,
+      segments,
+      pending: tail + countAbove(this.#db, foldedThrough),
+      tail,
+    };
+  }
+
+  /**
+   * Take an entry out of the index: its fingerprint, its structure hashes, its
+   * tail row and its slot.
+   *
+   * Call it before deleting the entry itself. In one database the index's
+   * foreign keys refuse to delete an entry that is still indexed, and a folded
+   * entry holds a slot as well as a fingerprint.
+   *
+   * Its bits stay in the planes, since a chunk is never rewritten; with no slot
+   * to resolve to they answer nothing, but they still count as survivors when
+   * the router weighs a query.
+   * @param entryId - Primary key of the entry in the entries table.
+   */
+  remove(entryId: number): void {
+    for (const table of [
+      'ocl_ss_index',
+      SLOT_TABLE,
+      NO_STEREO_HASH_TABLE,
+      NO_STEREO_TAUTOMER_HASH_TABLE,
+    ]) {
+      this.#db.prepare(`DELETE FROM ${table} WHERE entry_id = ?`).run(entryId);
+    }
+    this.#searchCache?.clear();
   }
 
   /**

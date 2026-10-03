@@ -46,6 +46,12 @@ export interface PlanePrescreenParams {
    * @default true
    */
   exactFilter?: boolean;
+  /**
+   * Entries already yielded by another screen, skipped here before they are
+   * counted, so an entry both folded and waiting in the tail counts once.
+   * @default empty
+   */
+  exclude?: ReadonlySet<number>;
 }
 
 /**
@@ -131,6 +137,7 @@ export function* prescreenPlanes(
     onProgress,
     timeoutMs,
     exactFilter = true,
+    exclude,
   } = params;
   const query = packSSIndex(mol.getIndex());
   // Enumerated rather than counted: a fold starts on a chunk boundary, so an
@@ -174,6 +181,7 @@ export function* prescreenPlanes(
         exactFilter ? query : null,
         state,
         maxCandidates,
+        exclude,
       );
       batch = [];
       if (state.partial) return;
@@ -191,6 +199,7 @@ export function* prescreenPlanes(
         exactFilter ? query : null,
         state,
         maxCandidates,
+        exclude,
       );
       if (state.partial) return;
     }
@@ -210,6 +219,7 @@ export function* prescreenPlanes(
  *   to accept every survivor and let the real matcher reject the false ones.
  * @param state - Mutable counters updated as candidates are yielded.
  * @param maxCandidates - How many candidates the caller will take.
+ * @param exclude - Entries another screen already yielded.
  * @yields {PrescreenedCandidate} Each candidate of the batch, in slot order.
  */
 function* resolveBatch(
@@ -218,12 +228,14 @@ function* resolveBatch(
   query: bigint[] | null,
   state: PrescreenState,
   maxCandidates: number,
+  exclude: ReadonlySet<number> | undefined,
 ): Generator<PrescreenedCandidate> {
   const rows = resolve.all(JSON.stringify(slots)) as Array<
     Record<string, unknown>
   >;
   for (const row of rows) {
     if (query !== null && !isSuperset(row, query)) continue;
+    if (exclude?.has(Number(row.entry_id))) continue;
     if (state.screened >= maxCandidates) {
       state.partial = true;
       return;

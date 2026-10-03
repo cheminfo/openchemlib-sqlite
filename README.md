@@ -482,9 +482,10 @@ column scan exactly as before, so a database that never folds simply never gets
 faster.
 
 It is manual for the same reason `backfillHashes()` is: at ~38 µs an entry a
-first fold of 150 M takes about 95 minutes. It is resumable, and
-`planeStatus().pending` is the number to watch — entries inserted since the last
-fold, which every search still screens the slower way.
+first fold of 150 M takes about 95 minutes. It is resumable — each chunk it
+publishes records where it stopped, so the next call carries on from there — and
+`planeStatus().pending` is the number to watch: entries no fold has reached,
+which every search still screens the slower way.
 
 ```js
 let result;
@@ -492,6 +493,40 @@ do {
   result = molDB.foldPlanes({ maxChunks: 1 });
 } while (result.pending);
 ```
+
+### What waits for a fold is not copied — when ids only grow
+
+A fold covers every entry up to the highest id present when it starts, and
+records that id as its watermark. The next one finds what came after through
+`ocl_ss_index`'s entry index, so **ids assigned by `AUTOINCREMENT`, or by a
+table nothing is ever deleted from, and indexed in id order are stored once.**
+
+Only an entry the range above the watermark cannot see is copied into
+`ocl_ss_tail`, by a trigger: one inserted with an id at or below the watermark,
+or inserted again. A table without `AUTOINCREMENT` hands out `max(id) + 1`, so
+deleting its newest rows makes the next inserts reuse their ids, and each of
+those is copied. Nothing is wrong when that happens, it only costs the copy:
+
+```js
+molDB.planeStatus();
+// { folded: 1048576, segments: 1, pending: 1200, tail: 0 }
+```
+
+`tail` is the part of `pending` stored twice. It stays at 0 for ids that only
+grow.
+
+### Deleting an entry
+
+Call `molDB.remove(entryId)` before deleting the entry itself. It takes out the
+fingerprint, both structure hashes, any tail row and the entry's slot; in one
+database the foreign keys refuse to delete an entry that still has them.
+
+A chunk is never rewritten, so the entry's bits stay in the planes. With no slot
+they resolve to nothing, and no search returns the entry, but they still count
+as survivors when the router weighs a query, and the bit populations that order
+the screen are not decreased. Many deletions therefore slow the plane path
+without making it wrong. An id given to a new entry afterwards is copied into
+the tail until the next fold, then folded again.
 
 ### Run it beside the service, not inside it
 
@@ -526,9 +561,15 @@ not been extended is invisible and cannot answer. The next fold writes over it.
 This is why visibility is not read from `ocl_ss_plane` directly. It would make a
 half-written chunk look complete, and a search would return false negatives
 without any sign of it — a missing plane row legitimately means "no entry in this
-chunk sets this bit". For the same reason the tail rows a chunk covers are
-cleared in that publishing transaction, never before it, so an interruption
-cannot lose an entry from both the tail and the index.
+chunk sets this bit". For the same reason the tail rows a chunk folded are
+cleared in that publishing transaction, together with the fold's progress, and
+only when they still hold the values folded: an interruption cannot lose an
+entry from both the tail and the index, and an entry inserted again mid-fold is
+kept for the next one.
+
+An entry inserted while a fold runs, with an id between the watermark and the
+fold's bound, is copied into the tail too: the fold may have read past its
+weight already. Should the fold reach it after all, the copy goes with the chunk.
 
 ## Structure hashes
 
@@ -661,12 +702,19 @@ rest.
 
 ![The tables migrate() adds](docs/schema.svg)
 
-`migrate()` creates four tables:
+`migrate()` creates these tables:
 
 ```sql
 ocl_ss_index                (mw, entry_id, ss_index0 .. ss_index7)  -- WITHOUT ROWID, PK (mw, entry_id)
 ocl_no_stereo_hash          (entry_id, hash)                        -- NULL = no hash for this molecule
 ocl_no_stereo_tautomer_hash (entry_id, hash)                        -- NULL = no hash for this molecule
+ocl_ss_settings             (name, value)                           -- settings the hashes were built under
+ocl_ss_plane                (chunk, bit, bits)                      -- the transposed fingerprints, filled by foldPlanes()
+ocl_ss_slot                 (slot, entry_id)                        -- which entry each plane slot stands for
+ocl_ss_bitstat              (bit, population, stored)               -- how many entries set each bit
+ocl_ss_segment              (segment, first_slot, slot_count, mw_ordered)
+ocl_ss_tail                 (mw, entry_id, ss_index0 .. ss_index7)  -- entries a fold can only find by copy
+ocl_ss_fold                 (folded_through, tail_through, cursor_mw, cursor_entry_id, segment)
 ocl_ss_schema               (version, applied_at)                   -- which schema version this database is at
 ```
 
@@ -714,6 +762,10 @@ Compare with ~5 minutes to re-fingerprint the same index from scratch.
 Version 3 adds the two structure hash tables. They are created **empty**, so the migration is
 instant; filling them is a separate long-running job — see
 [Structure hashes](#structure-hashes).
+
+Version 6 stops copying every insert into `ocl_ss_tail`. A database never folded drops its tail,
+which then held a copy of every entry; one already folded keeps it, and its watermark starts at the
+highest id present. Both are instant.
 
 Each version is applied in its own transaction, so an interrupted upgrade leaves the database at the
 last version that fully completed — never half-way through one. A migration only ever discards rows it

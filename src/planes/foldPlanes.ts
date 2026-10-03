@@ -2,19 +2,20 @@ import type { SQLiteDatabase } from '../types.ts';
 import { unpackSSIndex } from '../utils/packSSIndex.ts';
 
 import { ChunkBuilder } from './ChunkBuilder.ts';
+import type { FoldSource } from './foldRead.ts';
+import { buildFoldReadSql, foldedTailCopies } from './foldRead.ts';
+import type { FoldState } from './foldState.ts';
+import {
+  beginFold,
+  finishFold,
+  fitsOneChunk,
+  hasEntriesAbove,
+  hasTailRows,
+  readFoldState,
+} from './foldState.ts';
 import { SLOTS_PER_CHUNK, bitsOfIndex } from './planeLayout.ts';
-import {
-  PLANE_TABLE,
-  SEGMENT_TABLE,
-  SLOT_TABLE,
-  TAIL_TABLE,
-} from './planeSchema.ts';
-import {
-  countOf,
-  decideStoredBits,
-  nextSlotOf,
-  storedBitsOf,
-} from './planeState.ts';
+import { PLANE_TABLE, SLOT_TABLE } from './planeSchema.ts';
+import { decideStoredBits, nextSlotOf, storedBitsOf } from './planeState.ts';
 import { publishChunk, writeChunkData } from './writeChunk.ts';
 
 /** How a fold decides what to store and how much to do in one call. */
@@ -71,18 +72,19 @@ export interface FoldResult {
  *
  * This is the whole maintenance story. Setting one molecule's bits in place
  * would rewrite a chunk of each of the 74–348 planes it sets, so nothing is ever
- * written per insert: `insert()` only adds a row to the tail, and a fold later
- * appends a batch of them as whole new chunks. One chunk carries 2^20 molecules,
- * so the write comes to 64 bytes per molecule — the size of the fingerprint
- * itself, which is the least it could be.
+ * written per insert, and a fold later appends a batch as whole new chunks. One
+ * chunk carries 2^20 molecules, so the write comes to 64 bytes per molecule —
+ * the size of the fingerprint itself, which is the least it could be.
  *
- * Each fold appends one segment, and reads its source in `(mw, entry_id)` order,
- * so **every segment is internally ascending by molecular weight**. A search
- * therefore merges the segments by mw and gets exactly the lightest-first order
- * the clustered `ocl_ss_index` scan produces, however many folds have run.
+ * What waits is found without being copied: the entries above the watermark,
+ * through `ocl_ss_index`'s entry index, plus the tail, which holds only what
+ * that range cannot see — an entry inserted with an id below the watermark, or
+ * inserted again. A caller whose ids only grow keeps the tail empty.
  *
- * The first fold seeds from `ocl_ss_index` itself, so an existing database needs
- * no re-insertion; later ones drain the tail the trigger fills.
+ * A fold reads in `(mw, entry_id)` order, so **every segment is internally
+ * ascending by molecular weight**. It records its cursor with each chunk it
+ * publishes, so a fold split over several calls by `maxChunks`, or interrupted,
+ * resumes where it stopped and extends the same segment.
  * @param db - The database to fold.
  * @param options - What to store, and how much to do in one call.
  * @returns What this call folded, and whether anything is still waiting.
@@ -99,22 +101,25 @@ export function foldPlanes(
   } = options;
   const start = Date.now();
 
-  const segments = countOf(db, SEGMENT_TABLE);
-  const source = segments === 0 ? 'ocl_ss_index' : TAIL_TABLE;
-  const nextSlot = nextSlotOf(db);
-  // A fold starts on a chunk boundary so it only ever writes whole chunks and
-  // never reads one back to extend it.
-  const firstSlot = Math.ceil(nextSlot / SLOTS_PER_CHUNK) * SLOTS_PER_CHUNK;
+  let state: FoldState | null = readFoldState(db);
+  if (state.cursor === null) state = beginFold(db);
+  if (state?.cursor == null || state.tailThrough === null) {
+    return {
+      folded: 0,
+      chunks: 0,
+      storedBits: storedBitsOf(db)?.size ?? 0,
+      pending: false,
+      elapsedMs: Date.now() - start,
+    };
+  }
 
-  const read = db.prepare(
-    `SELECT mw, entry_id, ss_index0, ss_index1, ss_index2, ss_index3,
-            ss_index4, ss_index5, ss_index6, ss_index7
-       FROM ${source}
-      WHERE (mw, entry_id) > (?, ?)
-      ORDER BY mw, entry_id
-      LIMIT ?`,
-  );
-  read.setReadBigInts?.(true);
+  const after = state.foldedThrough;
+  const through = state.tailThrough;
+  const source: FoldSource = {
+    after,
+    through,
+    indexed: after !== null && fitsOneChunk(db, after, through),
+  };
   const writePlane = db.prepare(
     `INSERT OR REPLACE INTO ${PLANE_TABLE} (chunk, bit, bits) VALUES (?, ?, ?)`,
   );
@@ -124,41 +129,50 @@ export function foldPlanes(
 
   let stored = storedBitsOf(db);
   const builder = new ChunkBuilder();
-  let slot = firstSlot;
+  // A fold starts on a chunk boundary so it only ever writes whole chunks and
+  // never reads one back to extend it. A resumed fold is on one already: every
+  // chunk it published was full, or it would have finished.
+  let slot = Math.ceil(nextSlotOf(db) / SLOTS_PER_CHUNK) * SLOTS_PER_CHUNK;
+  let { cursor, segment } = state;
   let folded = 0;
   let chunks = 0;
-  let cursor = { mw: -1e308, entryId: -1 };
-  let pending = false;
-
-  let segment: number | null = null;
+  let finished = false;
 
   while (chunks < maxChunks) {
-    const rows = read.all(cursor.mw, cursor.entryId, SLOTS_PER_CHUNK) as Array<
+    const page = buildFoldReadSql(source, cursor, SLOTS_PER_CHUNK);
+    const read = db.prepare(page.sql);
+    read.setReadBigInts?.(true);
+    const rows = read.all(...(page.params as never[])) as Array<
       Record<string, unknown>
     >;
-    if (rows.length === 0) break;
+    if (rows.length === 0) {
+      finishFold(db);
+      finished = true;
+      break;
+    }
 
     builder.reset();
     const entryIds: number[] = [];
+    const consumed: Array<Record<string, unknown>> = [];
     for (const row of rows) {
       builder.add(bitsOfIndex(unpackSSIndex(row)));
       entryIds.push(Number(row.entry_id));
+      if (Number(row.from_tail) === 1) consumed.push(row);
     }
     const populations = builder.populations();
-    if (stored === null) {
-      stored = decideStoredBits(
-        db,
-        populations,
-        rows.length,
-        maxPopulationRatio,
-      );
-    }
+    stored ??= decideStoredBits(
+      db,
+      populations,
+      rows.length,
+      maxPopulationRatio,
+    );
 
     const last = rows.at(-1);
-    const reached = {
+    cursor = {
       mw: Number(last?.mw ?? 0),
       entryId: Number(last?.entry_id ?? 0),
     };
+    finished = rows.length < SLOTS_PER_CHUNK;
 
     // Written first and published second: until the segment covers it, no
     // search can see this chunk, so an interruption costs the chunk rather than
@@ -179,35 +193,22 @@ export function foldPlanes(
       slots: rows.length,
       populations,
       stored,
-      cursor: source === TAIL_TABLE ? reached : null,
+      consumed: [...consumed, ...foldedTailCopies(db, rows, source)],
+      cursor: finished ? null : cursor,
     });
 
-    cursor = reached;
     slot += rows.length;
     folded += rows.length;
     chunks++;
     onProgress?.(folded);
-    if (rows.length < SLOTS_PER_CHUNK) break;
-    pending = true;
+    if (finished) break;
   }
-
-  if (folded > 0) {
-    // The trigger has been filling the tail since the migration ran, so after a
-    // seed from ocl_ss_index the tail holds rows that now have a slot.
-    db.exec(
-      `DELETE FROM ${TAIL_TABLE}
-        WHERE EXISTS (SELECT 1 FROM ${SLOT_TABLE} s
-                       WHERE s.entry_id = ${TAIL_TABLE}.entry_id)`,
-    );
-  }
-
-  if (!pending) pending = countOf(db, TAIL_TABLE) > 0;
 
   return {
     folded,
     chunks,
     storedBits: stored?.size ?? 0,
-    pending,
+    pending: !finished || hasTailRows(db) || hasEntriesAbove(db, through),
     elapsedMs: Date.now() - start,
   };
 }

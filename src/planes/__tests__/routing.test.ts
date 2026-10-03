@@ -204,13 +204,14 @@ test('a search returns the same results, in the same order, either way', async (
   }
 });
 
-test('an entry inserted after a fold is screened through the tail', async () => {
+test('an entry inserted after a fold is screened until the next fold', async () => {
   const { db, molDB } = seed({ fold: true, planeCandidateRatio: 1 });
 
   expect(molDB.planeStatus()).toStrictEqual({
     folded: SMILES.length,
     segments: 1,
     pending: 0,
+    tail: 0,
   });
 
   const idCode = OCL.Molecule.fromSmiles(
@@ -221,9 +222,10 @@ test('an entry inserted after a fold is screened through the tail', async () => 
     .run(idCode);
   molDB.insert(Number(lastInsertRowid), idCode);
 
-  expect(molDB.planeStatus().pending).toBe(1);
+  // Its id is above the watermark, so it waits without being copied.
+  expect(molDB.planeStatus()).toMatchObject({ pending: 1, tail: 0 });
 
-  // Not folded yet, so it can only be found by the tail the plane path chains.
+  // Not folded yet, so only the screen of unfolded entries can find it.
   const found = await molDB.search('Fc1ccc(-c2ccccc2)cc1', {
     mode: 'substructure',
   });
@@ -239,5 +241,6 @@ test('an entry inserted after a fold is screened through the tail', async () => 
     folded: SMILES.length + 1,
     segments: 2,
     pending: 0,
+    tail: 0,
   });
 });

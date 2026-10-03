@@ -78,7 +78,7 @@ test('a 2.x database is upgraded in place instead of rejected', async () => {
 
   const applied = molDB.migrate();
 
-  expect(applied).toStrictEqual([2, 3, 4, 5]);
+  expect(applied).toStrictEqual([2, 3, 4, 5, 6]);
   expect(schemaOf(db)).toContain('WITHOUT ROWID');
 
   // The whole point: searching an upgraded database works and is mw-ordered.
@@ -112,7 +112,7 @@ test('the upgrade carries the fingerprints over rather than recomputing them', (
 test('migrate is idempotent and does nothing on an already-current database', () => {
   const { molDB } = legacyDatabase();
 
-  expect(molDB.migrate()).toStrictEqual([2, 3, 4, 5]);
+  expect(molDB.migrate()).toStrictEqual([2, 3, 4, 5, 6]);
   expect(molDB.migrate()).toStrictEqual([]);
   expect(molDB.migrate()).toStrictEqual([]);
 });
@@ -124,7 +124,7 @@ test('a fresh database walks every migration and records the version', () => {
   );
   const molDB = new MoleculesDBSQLite(db, OCL, { entriesTable: 'ligands' });
 
-  expect(molDB.migrate()).toStrictEqual([1, 2, 3, 4, 5]);
+  expect(molDB.migrate()).toStrictEqual([1, 2, 3, 4, 5, 6]);
 
   const recorded = db
     .prepare('SELECT MAX(version) AS version FROM ocl_ss_schema')
@@ -261,7 +261,7 @@ test('a pre-versioning mw-clustered database is recognised as version 2', () => 
   const molDB = new MoleculesDBSQLite(db, OCL, { entriesTable: 'ligands' });
 
   // Only version 3 is owed: 1 and 2 are already in the schema.
-  expect(molDB.migrate()).toStrictEqual([3, 4, 5]);
+  expect(molDB.migrate()).toStrictEqual([3, 4, 5, 6]);
   expect(molDB.migrate()).toStrictEqual([]);
 });
 
@@ -328,7 +328,7 @@ test('an entry whose idCode will not parse is carried over with mw 0', () => {
 
   const molDB = new MoleculesDBSQLite(db, OCL, { entriesTable: 'ligands' });
 
-  expect(molDB.migrate()).toStrictEqual([2, 3, 4, 5]);
+  expect(molDB.migrate()).toStrictEqual([2, 3, 4, 5, 6]);
 
   const rows = db
     .prepare(
@@ -363,7 +363,7 @@ test('the upgrade works on a driver whose statements cannot iterate', () => {
     entriesTable: 'ligands',
   });
 
-  expect(molDB.migrate()).toStrictEqual([2, 3, 4, 5]);
+  expect(molDB.migrate()).toStrictEqual([2, 3, 4, 5, 6]);
 
   const rows = db
     .prepare('SELECT mw FROM ocl_ss_index ORDER BY mw')
@@ -393,7 +393,7 @@ test('an entry with a NULL idCode is carried over with mw 0', () => {
   db.exec('INSERT INTO ocl_ss_index (entry_id) VALUES (1), (2)');
   const molDB = new MoleculesDBSQLite(db, OCL, { entriesTable: 'ligands' });
 
-  expect(molDB.migrate()).toStrictEqual([2, 3, 4, 5]);
+  expect(molDB.migrate()).toStrictEqual([2, 3, 4, 5, 6]);
 
   const rows = db
     .prepare(
