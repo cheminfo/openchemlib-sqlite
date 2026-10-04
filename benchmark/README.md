@@ -372,3 +372,25 @@ candidates), warm, node 26.7, 30+ samples each:
 | rot ≤ 1, logP ≤ −2 | 1.59 µs/cand.        | 1.40 µs/cand. | 0.18 µs/cand. | 246.6 ms    | 43.0 ms       |
 
 Every variant counted and returned the same entries.
+
+## A similarity scan bounded by bit counts: `similarityWindow.mjs`
+
+```sh
+node benchmark/similarityWindow.mjs test-new-1M.sqlite
+```
+
+Tanimoto ≥ t needs `t·|q| ≤ |r| ≤ |q|/t`, so a row whose fingerprint sets too
+few or too many bits cannot reach the threshold. The script copies the index,
+stores every row's bit count in it, and times in one process, with the
+library's own coefficient function and guard: the scan computing every row,
+the scan testing the stored count first, and the same without the NULL test
+that keeps a row of unknown count. All three return the same entries.
+
+The first 1 M molecules of PubChem, warm, node 26.7, 30+ samples each:
+
+| query     | threshold | rows in window | every row    | window       | window, no NULL test |
+| --------- | --------- | -------------- | ------------ | ------------ | -------------------- |
+| quercetin | 0.8       | 27.1%          | 1 834 ns/row | 514 ns/row   | 498 ns/row           |
+| quercetin | 0.6       | 58.8%          | 2 077 ns/row | 1 129 ns/row | 1 117 ns/row         |
+| flavone   | 0.8       | 18.1%          | 1 814 ns/row | 374 ns/row   | 359 ns/row           |
+| flavone   | 0.6       | 41.0%          | 2 046 ns/row | 663 ns/row   | 649 ns/row           |
