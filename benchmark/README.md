@@ -394,3 +394,27 @@ The first 1 M molecules of PubChem, warm, node 26.7, 30+ samples each:
 | quercetin | 0.6       | 58.8%          | 2 077 ns/row | 1 129 ns/row | 1 117 ns/row         |
 | flavone   | 0.8       | 18.1%          | 1 814 ns/row | 374 ns/row   | 359 ns/row           |
 | flavone   | 0.6       | 41.0%          | 2 046 ns/row | 663 ns/row   | 649 ns/row           |
+
+## The prefilter sample on a cold index: `coldSample.mjs`
+
+```sh
+node benchmark/coldSample.mjs molapp-10M-none.sqlite   # Linux: evicts the file
+```
+
+A scan running past 30 ms measures its prefilter on a sample spread over the
+index: 32 entry seeks, then 32 runs of 64 rows. Warm that costs about a
+millisecond. Each operation here first drops the file from the page cache and
+opens a connection set up as molecules.cheminfo.org's readers are (2 GB mmap),
+then reads the whole sample, or the sample with a 20 ms budget.
+
+The first 10 M molecules of PubChem on a SATA SSD, 30+ samples each, eviction
+and open included:
+
+| sample       | per operation | runs read |
+| ------------ | ------------- | --------- |
+| whole        | 1 067.2 ms    | 32        |
+| 20 ms budget | 55.0 ms       | 0         |
+
+Through the library, a cold first page of benzene (24, 10 M, NVMe) took
+957–977 ms before the sample existed, 1 941–1 958 ms with it, and
+988–1 026 ms with its budget.
