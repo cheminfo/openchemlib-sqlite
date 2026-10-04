@@ -221,6 +221,50 @@ test('a scan that measures its plan yields what a guessing one yields, in order'
   }
 });
 
+test('a slow scan measures its prefilter only once it has read enough rows', () => {
+  const db = library();
+  const { mol } = fragment('c1ccccc1');
+  const params = {
+    db,
+    entriesTable: 'molecules',
+    pkColumn: 'id',
+    idCodeColumn: 'id_code',
+    mol,
+    timeoutMs: 60_000,
+    maxCandidates: Number.MAX_SAFE_INTEGER,
+  };
+  /**
+   * Read a scan as a slow consumer would: 40 ms on its first candidate, past
+   * the moment a scan considers measuring.
+   * @param measureMinRows - The rows it must have read to measure.
+   * @returns The state the scan leaves.
+   */
+  function slowly(measureMinRows?: number): PrescreenState {
+    const state: PrescreenState = { screened: 0, partial: false };
+    let first = true;
+    for (const candidate of prescreenColumn(
+      {
+        ...params,
+        ...(measureMinRows === undefined ? {} : { measureMinRows }),
+      },
+      state,
+    )) {
+      if (first) {
+        const until = Date.now() + 40;
+        while (Date.now() < until);
+        first = false;
+      }
+
+      expect(candidate.entryId).toBeGreaterThan(0);
+    }
+    return state;
+  }
+
+  // 3 000 rows are far fewer than a measure needs to pay.
+  expect(slowly().prefilterPlan).toBeUndefined();
+  expect(slowly(0).prefilterPlan?.measured).toBe(true);
+});
+
 test('a guard after the first word still stops a scan on time', () => {
   const db = library();
   const { mol } = fragment('FC(F)(F)c1ccccc1');

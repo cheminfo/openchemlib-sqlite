@@ -13,6 +13,7 @@ import {
   installScanDeadline,
   isScanDeadline,
   newGuardKey,
+  takeGuardClockReads,
   takeGuardPosition,
 } from './scanDeadline.ts';
 import { BEFORE_EVERY_ENTRY } from './searchHelpers.ts';
@@ -25,17 +26,17 @@ export { buildPrescreenSql } from './prescreenSql.ts';
  */
 const REPLAN_MS = 30;
 
-/**
- * The most a measure may take. On a cold index its random reads cost far more
- * than the ~1 ms they take warm, and a short scan would pay for them in full.
- */
+/** The most a measure may take: cold, its random reads cost far more. */
 const MEASURE_BUDGET_MS = 20;
 
-/**
- * Measures a scan tries before it keeps its guessed plan; each waits four
- * times as long as the last, by which time more of the index is in memory.
- */
+/** Measures tried, each four times later than the last, before giving up. */
 const MEASURE_ATTEMPTS = 3;
+
+/**
+ * Rows a scan must have read before it measures: one slow because its index
+ * is cold or its verifiers busy has little to gain from a better order.
+ */
+const MEASURE_MIN_ROWS = 16_384;
 
 /** Where a column scan stops to let its caller reconsider the plan. */
 export interface ColumnScanOptions {
@@ -78,7 +79,7 @@ export function* prescreenColumn(
   state: PrescreenState,
   options: ColumnScanOptions = {},
 ): Generator<PrescreenedCandidate> {
-  const { db, timeoutMs, mol, candidates } = params;
+  const { db, timeoutMs, mol, candidates, measureMinRows } = params;
   const { checkpoint = null } = options;
   const queryIndex = params.queryIndex ?? mol.getIndex();
   const scan = { ...params, queryIndex, mwFloor: weightFloor(params) };
@@ -98,6 +99,8 @@ export function* prescreenColumn(
       ? null
       : Date.now() + REPLAN_MS;
   let attempts = 0;
+  const guarded = installScanDeadline(db);
+  const rows = { read: 0 };
 
   for (;;) {
     const stopAt = Math.min(
@@ -105,7 +108,7 @@ export function* prescreenColumn(
       checkpoint ?? Number.POSITIVE_INFINITY,
       replanAt ?? Number.POSITIVE_INFINITY,
     );
-    const position = yield* scanUntil(scan, state, plan, stopAt);
+    const position = yield* scanUntil(scan, state, plan, stopAt, rows);
     if (position === undefined) return;
     if (Date.now() > deadline) {
       state.partial = true;
@@ -115,6 +118,11 @@ export function* prescreenColumn(
     if (checkpoint !== null && Date.now() >= checkpoint) {
       state.checkpoint = position;
       return;
+    }
+    if (guarded && rows.read < (measureMinRows ?? MEASURE_MIN_ROWS)) {
+      replanAt = Date.now() + REPLAN_MS;
+      scan.after = position;
+      continue;
     }
     const measured = measurePrefilterPlan(
       db,
@@ -143,6 +151,8 @@ export function* prescreenColumn(
  * @param state - Mutable counters updated as the stream is consumed.
  * @param plan - The prefilter plan.
  * @param stopAt - When to stop, in ms since the epoch.
+ * @param rows - Counts the rows read, as the guard's clock reads tell them.
+ * @param rows.read - The rows read so far.
  * @yields {PrescreenedCandidate} Each prescreened candidate, in ascending molecular weight.
  * @returns Where the scan stood when it stopped at that moment; undefined when
  *   it read every candidate or stopped on `maxCandidates`.
@@ -152,6 +162,7 @@ function* scanUntil(
   state: PrescreenState,
   plan: PrefilterPlan,
   stopAt: number,
+  rows: { read: number },
 ): Generator<PrescreenedCandidate, ScanPosition | undefined> {
   const { db, maxCandidates, onProgress, after } = params;
   const guardKey = newGuardKey();
@@ -193,6 +204,8 @@ function* scanUntil(
     return at === undefined
       ? (last ?? after ?? BEFORE_EVERY_ENTRY)
       : { mw: at.mw, entryId: at.entryId - 1 };
+  } finally {
+    rows.read += takeGuardClockReads(guardKey) * (plan.guardMask + 1);
   }
   return undefined;
 }

@@ -247,10 +247,11 @@ const { results, screened, partial } = molDB.search('c1ccccc1', {
 
 A 512-bit fingerprint prefilter (bitwise AND) discards non-candidates before running the full OCL substructure check.
 Only the 64-bit words the query sets bits in are tested, and a scan still
-running after 30 ms measures them on 2 048 rows sampled across what it has left
-to read and tests the most selective first, so most rows are rejected after one
-column read. The sample has 20 ms: on a cold index its random reads would cost
-a short scan a second, so it is given up there and tried again later.
+running after 30 ms, with 16 384 rows read, measures them on 2 048 rows sampled
+across what it has left to read and tests the most selective first, so most
+rows are rejected after one column read. The sample has 20 ms: on a cold index
+its random reads would cost a short scan a second, so it is given up there and
+tried again later.
 
 On the first 10 M molecules of PubChem, a scan of the whole index costs, per
 row read ([benchmark/prefilterGuard.mjs](benchmark/prefilterGuard.mjs)):

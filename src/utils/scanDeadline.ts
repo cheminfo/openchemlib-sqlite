@@ -37,6 +37,9 @@ const installed = new WeakSet<SQLiteDatabase>();
 /** The row each stopped scan was testing, by the key its statement binds. */
 const stoppedAt = new Map<number, GuardPosition>();
 
+/** How many times each keyed guard read the clock, by key. */
+const clockReads = new Map<number, number>();
+
 let nextKey = 1;
 
 /**
@@ -59,6 +62,9 @@ export function installScanDeadline(db: SQLiteDatabase): boolean {
     DEADLINE_FUNCTION,
     { deterministic: false, varargs: true },
     (deadline, key, mw, entryId) => {
+      if (key !== undefined) {
+        clockReads.set(Number(key), (clockReads.get(Number(key)) ?? 0) + 1);
+      }
       if (Date.now() <= Number(deadline)) return 1;
       if (key !== undefined) {
         stoppedAt.set(Number(key), {
@@ -91,6 +97,18 @@ export function takeGuardPosition(key: number): GuardPosition | undefined {
   const position = stoppedAt.get(key);
   stoppedAt.delete(key);
   return position;
+}
+
+/**
+ * How many times the guard of a statement read the clock, forgotten once read:
+ * with a guard tested first and a mask of 1023, about one per 1024 rows read.
+ * @param key - The key the statement bound.
+ * @returns The count.
+ */
+export function takeGuardClockReads(key: number): number {
+  const count = clockReads.get(key) ?? 0;
+  clockReads.delete(key);
+  return count;
 }
 
 /**

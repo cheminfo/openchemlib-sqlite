@@ -111,6 +111,12 @@ export interface PrescreenParams {
    */
   planeCheckpointMs?: number;
   /**
+   * Rows a column scan must have read before it measures its prefilter.
+   * Meant for tests, which cannot read that many rows quickly.
+   * @default 16384
+   */
+  measureMinRows?: number;
+  /**
    * The caller's bounds on columns the index carries, already turned into
    * conditions on `s`; every path tests them on the row it reads.
    * @default undefined — none
