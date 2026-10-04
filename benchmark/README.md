@@ -418,3 +418,22 @@ and open included:
 Through the library, a cold first page of benzene (24, 10 M, NVMe) took
 957–977 ms before the sample existed, 1 941–1 958 ms with it, and
 988–1 026 ms with its budget.
+
+## A first page on a cold index, two builds: `coldPage.mjs`
+
+```sh
+node benchmark/coldPage.mjs index.sqlite molecules.sqlite a/lib/index.js b/lib/index.js
+```
+
+Each operation drops the index and the entries from the page cache, opens a
+reader as molecules.cheminfo.org does and asks one of two builds for a first
+page of 24, worker start included. A scan slowed by a cold index or by its
+verifiers has read few rows, and measuring its prefilter there costs it the
+sample's budget for nothing.
+
+The first 10 M molecules of PubChem on a SATA SSD, 30+ samples each:
+
+| query             | sample after 30 ms | sample after 30 ms and 16 384 rows |
+| ----------------- | ------------------ | ---------------------------------- |
+| benzene           | 463.6 ms           | 432.2 ms                           |
+| benzene, mw ≥ 610 | 273.9 ms           | 234.2 ms                           |
