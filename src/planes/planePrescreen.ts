@@ -25,6 +25,7 @@ export type PlanePrescreenParams = Pick<
   | 'idCodeColumn'
   | 'mol'
   | 'queryIndex'
+  | 'columnBounds'
   | 'timeoutMs'
   | 'maxCandidates'
   | 'onProgress'
@@ -74,6 +75,7 @@ export function* prescreenPlanes(
     db,
     mol,
     queryIndex,
+    columnBounds,
     maxCandidates,
     onProgress,
     timeoutMs,
@@ -84,7 +86,13 @@ export function* prescreenPlanes(
   const prefilter = exactFilter
     ? buildSSPrefilter(queryIndex ?? mol.getIndex())
     : null;
-  const resolve = db.prepare(buildResolveSql(params, prefilter?.sql ?? null));
+  const bounds = columnBounds ?? { conditions: [], values: [] };
+  const resolve = db.prepare(
+    buildResolveSql(params, [
+      ...(prefilter === null ? [] : [prefilter.sql]),
+      ...bounds.conditions,
+    ]),
+  );
 
   for (let from = 0; from < survivors.length; from += RESOLVE_BATCH) {
     const batch = survivors.subarray(from, from + RESOLVE_BATCH);
@@ -92,6 +100,7 @@ export function* prescreenPlanes(
       JSON.stringify(Array.from(batch)),
       watermark,
       ...(prefilter?.params ?? []),
+      ...bounds.values,
     ) as Array<Record<string, unknown>>;
     for (const row of rows) {
       if (state.screened >= maxCandidates) {
@@ -125,8 +134,9 @@ export function* prescreenPlanes(
  * The entries table is joined on the index's own entry id, so it can only be
  * read after the index row — and the exact test on it — have been.
  * @param params - The entries table and its columns.
- * @param prefilter - The exact test on the fingerprint, or null for none.
- * @returns SQL taking the slots as JSON, the watermark, then the prefilter's
+ * @param conditions - The exact test on the fingerprint and the bounds on
+ *   carried columns, each on `s`.
+ * @returns SQL taking the slots as JSON, the watermark, then the conditions'
  *   parameters.
  */
 function buildResolveSql(
@@ -134,7 +144,7 @@ function buildResolveSql(
     PlanePrescreenParams,
     'entriesTable' | 'pkColumn' | 'idCodeColumn'
   >,
-  prefilter: string | null,
+  conditions: string[],
 ): string {
   const { entriesTable, pkColumn, idCodeColumn } = params;
   return `SELECT s.entry_id, s.mw, e.${idCodeColumn} AS id_code
@@ -142,6 +152,6 @@ function buildResolveSql(
             JOIN ${SLOT_TABLE} t ON t.slot = j.value
             JOIN ocl_ss_index s ON s.entry_id = t.entry_id
             JOIN ${entriesTable} e ON e.${pkColumn} = s.entry_id
-           WHERE t.entry_id <= ?${prefilter === null ? '' : ` AND ${prefilter}`}
+           WHERE t.entry_id <= ?${conditions.map((condition) => ` AND ${condition}`).join('')}
            ORDER BY t.slot`;
 }

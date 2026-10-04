@@ -17,6 +17,7 @@ import {
 } from './schema.ts';
 import type { MigrationEvent, SQLiteDatabase } from './types.ts';
 import { upgradeToMwClustered } from './upgradeToMwClustered.ts';
+import { buildColumnsTableSql } from './utils/indexColumns.ts';
 
 type OCLLibrary = typeof OpenChemLib;
 
@@ -120,8 +121,14 @@ export const MIGRATIONS: Migration[] = [
   },
   {
     version: 6,
-    description: 'drop the tail; trust the planes up to an entry-id watermark',
-    up: ({ db }) => upgradeToWatermark(db),
+    description:
+      'drop the tail; trust the planes up to an entry-id watermark; record carried columns',
+    up: ({ db }) => {
+      upgradeToWatermark(db);
+      // Only the record: the columns themselves are the caller's to declare,
+      // and `migrate()` adds them whatever version a database is at.
+      db.exec(buildColumnsTableSql());
+    },
   },
 ];
 

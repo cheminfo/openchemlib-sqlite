@@ -1,4 +1,6 @@
-import type { MwRange, SearchCandidates } from '../types.ts';
+import type { ColumnRange, MwRange, SearchCandidates } from '../types.ts';
+
+import type { ColumnConditions } from './indexColumns.ts';
 
 /** The pieces that restrict a query over `entriesTable e JOIN ocl_ss_index s`. */
 export interface EntryRestriction {
@@ -24,11 +26,12 @@ export interface EntryRestriction {
  * subquery, which SQLite materialises once.
  *
  * The weight range is a test on `s.mw` in these queries — none of them walks
- * the clustered key.
+ * the clustered key — and so are the bounds on carried columns.
  * @param pkColumn - The entries table's primary key.
  * @param perRow - Whether the query reads few enough rows to test each one.
  * @param candidates - The caller's subquery, if any.
  * @param mwRange - The caller's weight range, if any.
+ * @param columns - The caller's bounds on carried columns, as conditions.
  * @returns The pieces to splice into the query.
  */
 export function restrictEntries(
@@ -36,6 +39,7 @@ export function restrictEntries(
   perRow: boolean,
   candidates?: SearchCandidates,
   mwRange?: MwRange,
+  columns?: ColumnConditions,
 ): EntryRestriction {
   const correlated =
     candidates !== undefined && (perRow || candidates.strategy === 'probe');
@@ -54,6 +58,10 @@ export function restrictEntries(
     where.push('s.mw <= ?');
     values.push(mwRange.max);
   }
+  if (columns !== undefined) {
+    where.push(...columns.conditions);
+    values.push(...columns.values);
+  }
   return {
     join:
       candidates && !correlated
@@ -70,13 +78,19 @@ export function restrictEntries(
  * never returns another subset's — or the unrestricted — cached results.
  * @param candidates - The subquery restricting the search, if any.
  * @param mwRange - The weight range restricting it, if any.
- * @returns A key fragment identifying the subquery, its values and the range.
+ * @param columnRanges - The bounds on carried columns, if any.
+ * @returns A key fragment identifying the subquery, its values and the ranges.
  */
 export function restrictionKey(
   candidates: SearchCandidates | undefined,
   mwRange: MwRange | undefined,
+  columnRanges?: Record<string, ColumnRange>,
 ): string {
-  const range = `${mwRange?.min ?? ''}..${mwRange?.max ?? ''}`;
+  const columns =
+    columnRanges === undefined || Object.keys(columnRanges).length === 0
+      ? ''
+      : `|${JSON.stringify(columnRanges)}`;
+  const range = `${mwRange?.min ?? ''}..${mwRange?.max ?? ''}${columns}`;
   if (!candidates) return range;
   return `${candidates.strategy ?? 'membership'}|${candidates.sql}|${JSON.stringify(candidates.params ?? {})}|${range}`;
 }

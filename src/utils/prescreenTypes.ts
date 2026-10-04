@@ -7,6 +7,7 @@ import type {
   SearchCandidates,
 } from '../types.ts';
 
+import type { ColumnConditions } from './indexColumns.ts';
 import type { PrefilterPlan } from './prefilterPlan.ts';
 
 type OCLMolecule = InstanceType<(typeof OpenChemLib)['Molecule']>;
@@ -109,6 +110,12 @@ export interface PrescreenParams {
    * @default undefined — the router's checkpoint, and the cost weighed
    */
   planeCheckpointMs?: number;
+  /**
+   * The caller's bounds on columns the index carries, already turned into
+   * conditions on `s`; every path tests them on the row it reads.
+   * @default undefined — none
+   */
+  columnBounds?: ColumnConditions;
 }
 
 /** Mutable counters the prescreen reports back to its caller. */

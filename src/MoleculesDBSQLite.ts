@@ -22,6 +22,11 @@ import {
 import type {
   BackfillOptions,
   BackfillResult,
+  ColumnRange,
+  ColumnStatus,
+  FillColumnsOptions,
+  FillColumnsResult,
+  IndexColumnType,
   MigrateOptions,
   MoleculesDBConfig,
   MwRange,
@@ -35,6 +40,17 @@ import type {
   SearchResult,
 } from './types.ts';
 import { backfillHashes } from './utils/backfillHashes.ts';
+import type { ColumnReader } from './utils/fillColumns.ts';
+import { fillColumns } from './utils/fillColumns.ts';
+import type { ColumnConditions } from './utils/indexColumns.ts';
+import {
+  boundableColumns,
+  columnConditions,
+  columnSqlName,
+  columnStatusOf,
+  reconcileColumns,
+} from './utils/indexColumns.ts';
+import { buildInsertSql, columnValues } from './utils/insertRow.ts';
 import {
   packGivenIndex,
   packSSIndex,
@@ -78,10 +94,17 @@ interface ResolvedConfig {
   batchSize: number;
   searchCacheSize: number;
   maxTautomers: number;
+  /** The carried columns, by SQL name. */
+  columns: Map<string, IndexColumnType>;
 }
 
 function resolveConfig(config: MoleculesDBConfig): ResolvedConfig {
+  const columns = new Map<string, IndexColumnType>();
+  for (const [name, type] of Object.entries(config.columns ?? {})) {
+    columns.set(columnSqlName(name), type);
+  }
   return {
+    columns,
     entriesTable: config.entriesTable,
     pkColumn: config.pkColumn ?? 'id',
     idCodeColumn: config.idCodeColumn ?? 'id_code',
@@ -221,7 +244,8 @@ export class MoleculesDBSQLite {
    * @returns The schema versions applied, in order (empty when already current).
    */
   migrate(options: MigrateOptions = {}): number[] {
-    const { entriesTable, pkColumn, idCodeColumn, mwColumn } = this.#cfg;
+    const { entriesTable, pkColumn, idCodeColumn, mwColumn, columns } =
+      this.#cfg;
     const applied = runMigrations({
       db: this.#db,
       ocl: this.#ocl,
@@ -231,6 +255,8 @@ export class MoleculesDBSQLite {
       mwColumn,
       onMigration: options.onMigration,
     });
+    // The columns this instance declares, added to the index if it lacks them.
+    reconcileColumns(this.#db, columns);
     // A migration may have rewritten the table those statements were written
     // for, so they are prepared again on the next insert.
     this.#insertStatements = {};
@@ -357,6 +383,44 @@ export class MoleculesDBSQLite {
   }
 
   /**
+   * The columns the index carries, and whether every entry has a value in
+   * each — a search may bound only those that are complete and declared.
+   * @returns One status per column.
+   */
+  columnStatus(): ColumnStatus[] {
+    return columnStatusOf(this.#db, this.#cfg.columns);
+  }
+
+  /**
+   * Fill the carried columns of the entries indexed before those columns
+   * were declared.
+   *
+   * Declaring a column on an index that already holds entries adds it to
+   * `ocl_ss_index` at once and empty: a search may not bound it until every
+   * entry has its value. This walks those entries in id order, a chunk per
+   * short transaction, asks `read` for their values and writes them; an entry
+   * it returns nothing for is stored NULL. Resumable — progress is committed
+   * with each chunk — and it yields between chunks, so run it in the
+   * background, as `backfillHashes()` is.
+   * @param read - Returns the values of the declared columns for some entries.
+   * @param options - Chunk size, limit, progress and abort signal.
+   * @returns What this call filled, and whether anything is still pending.
+   */
+  async fillColumns(
+    read: ColumnReader,
+    options: FillColumnsOptions = {},
+  ): Promise<FillColumnsResult> {
+    const result = await fillColumns(
+      this.#db,
+      this.#cfg.columns,
+      read,
+      options,
+    );
+    if (result.filled > 0) this.#searchCache?.clear();
+    return result;
+  }
+
+  /**
    * Take an entry out of the index: its fingerprint, its structure hashes, and
    * — through a trigger on `ocl_ss_index` — its slot.
    *
@@ -430,15 +494,22 @@ export class MoleculesDBSQLite {
       packed = packSSIndex(molecule.getIndex());
     }
 
+    const columns = [...this.#cfg.columns.keys()];
+    const values = columnValues(columns, precomputed.columns);
     if (precomputed.mw !== undefined) {
-      this.#insertIndexRow(entryId, precomputed.mw, packed);
+      this.#insertIndexRow(entryId, precomputed.mw, packed, values);
     } else if (mwColumn) {
       // Take mw from the entries table so the clustered order matches whatever
       // a bulk index path stores; the entry already exists there.
       this.#insertStatements.fromColumn ??= this.#db.prepare(
-        `INSERT OR REPLACE INTO ocl_ss_index (mw, entry_id, ss_index0, ss_index1, ss_index2, ss_index3, ss_index4, ss_index5, ss_index6, ss_index7) VALUES ((SELECT COALESCE(${mwColumn}, 0) FROM ${entriesTable} WHERE ${pkColumn} = ?), ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        buildInsertSql(columns, { mwColumn, entriesTable, pkColumn }),
       );
-      this.#insertStatements.fromColumn.run(entryId, entryId, ...packed);
+      this.#insertStatements.fromColumn.run(
+        entryId,
+        entryId,
+        ...packed,
+        ...values,
+      );
     } else {
       // Only this branch needs the molecule itself. `false` skips 2D-coordinate invention: the
       // molecular weight never reads a coordinate, and inventing them is ~20x the cost of the parse.
@@ -452,7 +523,7 @@ export class MoleculesDBSQLite {
       } catch {
         // a molecule with no computable formula sorts first (mw = 0)
       }
-      this.#insertIndexRow(entryId, mw, packed);
+      this.#insertIndexRow(entryId, mw, packed, values);
     }
     // The data changed, so cached search results are stale.
     this.#searchCache?.clear();
@@ -463,12 +534,18 @@ export class MoleculesDBSQLite {
    * @param entryId - Primary key of the entry.
    * @param mw - The weight the index is clustered by.
    * @param packed - The eight 64-bit fingerprint words.
+   * @param values - The carried columns' values, in declaration order.
    */
-  #insertIndexRow(entryId: number, mw: number, packed: bigint[]): void {
+  #insertIndexRow(
+    entryId: number,
+    mw: number,
+    packed: bigint[],
+    values: Array<number | null>,
+  ): void {
     this.#insertStatements.row ??= this.#db.prepare(
-      'INSERT OR REPLACE INTO ocl_ss_index (mw, entry_id, ss_index0, ss_index1, ss_index2, ss_index3, ss_index4, ss_index5, ss_index6, ss_index7) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
+      buildInsertSql([...this.#cfg.columns.keys()]),
     );
-    this.#insertStatements.row.run(mw, entryId, ...packed);
+    this.#insertStatements.row.run(mw, entryId, ...packed, ...values);
   }
 
   /**
@@ -482,6 +559,24 @@ export class MoleculesDBSQLite {
    */
   #mwIsMolecularWeight(): boolean {
     return this.#cfg.mwColumn === null || this.#cfg.trustMwColumn;
+  }
+
+  /**
+   * A search's bounds on carried columns, as conditions on `s`.
+   * @param ranges - The bounds, by the caller's names.
+   * @returns The conditions, or undefined when there are none.
+   * @throws {Error} When a bound names a column the index does not carry in full.
+   */
+  #columnBounds(
+    ranges: Record<string, ColumnRange> | undefined,
+  ): ColumnConditions | undefined {
+    if (ranges === undefined || Object.keys(ranges).length === 0) {
+      return undefined;
+    }
+    return columnConditions(
+      ranges,
+      boundableColumns(this.#db, this.#cfg.columns),
+    );
   }
 
   /** Clear the in-memory structure-search result cache. */
@@ -525,15 +620,25 @@ export class MoleculesDBSQLite {
       candidates,
       mwRange,
       after,
+      columnRanges,
     } = options ?? {};
 
     const { entriesTable, idCodeColumn, pkColumn } = this.#cfg;
     const { Molecule } = this.#ocl;
 
-    // Restricting the entries table to the candidates and the weight range.
-    // Every mode honours both, so a caller can never get unfiltered results by
-    // picking one. The exact modes read a handful of rows, so they test each.
-    const restriction = restrictEntries(pkColumn, true, candidates, mwRange);
+    // Restricting the entries table to the candidates, the weight range and
+    // the bounds on carried columns. Every mode honours all three, so a caller
+    // can never get unfiltered results by picking one. The exact modes read a
+    // handful of rows, so they test each.
+    const columnBounds = this.#columnBounds(columnRanges);
+    const restriction = restrictEntries(
+      pkColumn,
+      true,
+      candidates,
+      mwRange,
+      columnBounds,
+    );
+    const key = restrictionKey(candidates, mwRange, columnRanges);
 
     const fromInstance = typeof query !== 'string';
     // Parsing is deferred to each mode: only the modes that re-encode the query
@@ -597,13 +702,13 @@ export class MoleculesDBSQLite {
         const mol = withFragment(parse(false), true, fromInstance);
         const queryIdCode = mol.getIDCode();
         const scan = await this.#cachedScan(
-          `sub|${queryIdCode}|${maxResults}|${maxCandidates}|${restrictionKey(candidates, mwRange)}|${after === undefined ? '' : `${after.mw}:${after.entryId}`}`,
+          `sub|${queryIdCode}|${maxResults}|${maxCandidates}|${key}|${after === undefined ? '' : `${after.mw}:${after.entryId}`}`,
           () =>
             this.#scanSubstructureFull(
               mol,
               queryIdCode,
               { maxResults, maxCandidates, timeoutMs, onProgress },
-              { candidates, mwRange, after },
+              { candidates, mwRange, after, columnBounds },
             ),
         );
         return {
@@ -624,15 +729,20 @@ export class MoleculesDBSQLite {
         const mol = withFragment(parse(false), false, fromInstance);
         const queryIdCode = mol.getIDCode();
         const scan = await this.#cachedScan(
-          `sim|${queryIdCode}|${similarityThreshold}|${restrictionKey(candidates, mwRange)}`,
+          `sim|${queryIdCode}|${similarityThreshold}|${key}`,
           () =>
             Promise.resolve(
               this.#scanSimilarityFull(
                 mol,
                 similarityThreshold,
                 timeoutMs,
-                candidates,
-                mwRange,
+                restrictEntries(
+                  pkColumn,
+                  false,
+                  candidates,
+                  mwRange,
+                  columnBounds,
+                ),
               ),
             ),
         );
@@ -774,10 +884,11 @@ export class MoleculesDBSQLite {
       candidates?: SearchCandidates;
       mwRange?: MwRange;
       after?: ScanPosition;
+      columnBounds?: ColumnConditions;
     },
   ): Promise<CachedScan> {
     const { maxResults, maxCandidates, timeoutMs, onProgress } = bounds;
-    const { candidates, mwRange, after } = restriction;
+    const { candidates, mwRange, after, columnBounds } = restriction;
     const {
       entriesTable,
       pkColumn,
@@ -804,6 +915,7 @@ export class MoleculesDBSQLite {
       candidates,
       mwRange,
       after,
+      columnBounds,
     };
     if (poolSize <= 1) {
       const r = runSubstructureSearch(params);
@@ -947,18 +1059,11 @@ export class MoleculesDBSQLite {
     mol: OCLMolecule,
     similarityThreshold: number,
     timeoutMs: number,
-    candidates?: SearchCandidates,
-    mwRange?: MwRange,
+    restriction: EntryRestriction,
   ): CachedScan {
     const start = Date.now();
     const queryIndex = mol.getIndex();
     const deadline = Date.now() + timeoutMs;
-    const restriction = restrictEntries(
-      this.#cfg.pkColumn,
-      false,
-      candidates,
-      mwRange,
-    );
     if (!installTanimoto(this.#db)) {
       return this.#scanSimilarityInJs(
         queryIndex,

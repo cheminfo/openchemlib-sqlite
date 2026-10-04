@@ -25,13 +25,26 @@ import {
 export function buildUnfoldedSql(
   params: Pick<
     PrescreenParams,
-    'entriesTable' | 'pkColumn' | 'idCodeColumn' | 'mol' | 'queryIndex'
+    | 'entriesTable'
+    | 'pkColumn'
+    | 'idCodeColumn'
+    | 'mol'
+    | 'queryIndex'
+    | 'columnBounds'
   >,
   watermark: number,
   deadline: number | null = null,
 ): { sql: string; params: unknown[] } {
-  const { entriesTable, pkColumn, idCodeColumn, mol, queryIndex } = params;
+  const {
+    entriesTable,
+    pkColumn,
+    idCodeColumn,
+    mol,
+    queryIndex,
+    columnBounds,
+  } = params;
   const prefilter = buildSSPrefilter(queryIndex ?? mol.getIndex());
+  const bounds = columnBounds ?? { conditions: [], values: [] };
   // The guard comes first, so the rows the prefilter rejects meet the clock too.
   const guard =
     deadline === null ? '' : `${scanDeadlineGuard('s.entry_id')} AND `;
@@ -39,11 +52,12 @@ export function buildUnfoldedSql(
     sql: `SELECT s.entry_id, s.mw, e.${idCodeColumn} AS id_code
             FROM ocl_ss_index s INDEXED BY idx_ocl_ss_entry
             JOIN ${entriesTable} e ON e.${pkColumn} = s.entry_id
-           WHERE ${guard}s.entry_id > ? AND ${prefilter.sql}`,
+           WHERE ${guard}s.entry_id > ? AND ${prefilter.sql}${bounds.conditions.map((condition) => ` AND ${condition}`).join('')}`,
     params: [
       ...(deadline === null ? [] : [deadline]),
       watermark,
       ...prefilter.params,
+      ...bounds.values,
     ],
   };
 }

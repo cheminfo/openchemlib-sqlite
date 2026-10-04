@@ -181,6 +181,96 @@ export interface MoleculesDBConfig {
    * @default 100
    */
   searchCacheSize?: number;
+  /**
+   * Numeric columns carried in every row of the index, by name, so a search
+   * can bound them inside its scan — see {@link SearchOptions.columnRanges}.
+   *
+   * A filter on a property the index does not hold reaches the scan as a
+   * `candidates` subquery, tested per candidate against the caller's tables:
+   * ~2.4 µs a probe on 10 M molecules, against ~0.4 µs for a column of the row
+   * the scan is already reading. Carrying the few properties a caller filters
+   * on most turns those probes into comparisons; each costs a byte or two per
+   * entry for a small integer and nine for a real.
+   *
+   * Their values come with each `insert()`, in {@link PrecomputedEntry.columns},
+   * so every instance writing one index must declare the same columns: one
+   * that declares fewer writes NULL in the others. Declaring a column on an
+   * index that already holds entries adds it at once, empty for every one of
+   * them: `fillColumns()` fills it, and until it has, a search may not bound
+   * it. A name is a plain identifier; the index stores it as `col_<name>`.
+   * @default {}
+   */
+  columns?: Record<string, IndexColumnType>;
+}
+
+/** What a column carried in the index holds. */
+export type IndexColumnType = 'integer' | 'real';
+
+/** Inclusive bounds on a column carried in the index. */
+export interface ColumnRange {
+  /**
+   * The smallest value kept.
+   * @default undefined — no lower bound
+   */
+  min?: number;
+  /**
+   * The largest value kept.
+   * @default undefined — no upper bound
+   */
+  max?: number;
+}
+
+/** A column the index carries, and whether every entry has a value in it. */
+export interface ColumnStatus {
+  /** The caller's name for it, or `ss_bits` for the library's own. */
+  name: string;
+  type: IndexColumnType;
+  /**
+   * Whether this instance declares it. One no longer declared stays in the
+   * index but is neither written nor bounded.
+   */
+  declared: boolean;
+  /** Whether every entry carries a value, so that a search may bound it. */
+  complete: boolean;
+  /** The last entry id filled so far, while it is not complete. */
+  filledThrough?: number;
+  /** The highest entry id to fill, while it is not complete. */
+  fillTo?: number;
+}
+
+/** The values of carried columns for some entries, as a caller reads them. */
+export interface ColumnValues {
+  /** The entry. */
+  entryId: number;
+  /** Its values, by the caller's column names; a missing one is stored NULL. */
+  columns: Record<string, number | null | undefined>;
+}
+
+/** Options for `fillColumns()`. */
+export interface FillColumnsOptions {
+  /**
+   * Entries filled per transaction.
+   * @default 5000
+   */
+  chunkSize?: number;
+  /**
+   * Stop after this many entries, leaving the rest for a later call.
+   * @default Number.MAX_SAFE_INTEGER
+   */
+  limit?: number;
+  /** Called after each committed chunk with how many entries were filled so far. */
+  onProgress?: (filled: number) => void;
+  /** Stops at the next chunk boundary; everything committed stays committed. */
+  signal?: AbortSignal;
+}
+
+/** What one call of `fillColumns()` did. */
+export interface FillColumnsResult {
+  /** Entries given their values by this call. */
+  filled: number;
+  /** Whether some column is still not filled for every entry. */
+  pending: boolean;
+  elapsedMs: number;
 }
 
 export interface SearchOptions {
@@ -293,6 +383,17 @@ export interface SearchOptions {
    * @default undefined — from the first candidate
    */
   after?: ScanPosition;
+  /**
+   * Inclusive bounds on columns the index carries, by their names — see
+   * {@link MoleculesDBConfig.columns}.
+   *
+   * They are tested inside the scan, on the row it is already reading, before
+   * any candidate is verified and without reading the caller's tables. Every
+   * mode honours them. Naming a column the index does not carry for every
+   * entry throws: `columnStatus()` says which ones it does.
+   * @default {}
+   */
+  columnRanges?: Record<string, ColumnRange>;
 }
 
 /**
@@ -534,4 +635,11 @@ export interface PrecomputedEntry {
    * index's clustered order stops matching what a bulk path would have written.
    */
   mw?: number;
+  /**
+   * The values of the columns the index carries, by their names — see
+   * {@link MoleculesDBConfig.columns}. A declared column left out is stored
+   * NULL, which no bound on it ever keeps.
+   * @default {}
+   */
+  columns?: Record<string, number | null | undefined>;
 }

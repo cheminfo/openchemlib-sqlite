@@ -16,6 +16,7 @@ export type PrescreenSqlParams = Pick<
   | 'mwRange'
   | 'after'
   | 'deadline'
+  | 'columnBounds'
 > & {
   /**
    * The key under which the guard records the row it stopped at, so a scan
@@ -62,6 +63,7 @@ export function buildPrescreenSql(params: PrescreenSqlParams): {
     deadline,
     guardKey,
     plan,
+    columnBounds,
   } = params;
   const strategy = candidates ? (candidates.strategy ?? 'membership') : null;
 
@@ -112,6 +114,11 @@ export function buildPrescreenSql(params: PrescreenSqlParams): {
     values.push(...term.params);
   }
   if (guardAfter >= terms.length) addGuard();
+  // Bounds on carried columns: a comparison each, on the row already read.
+  if (columnBounds !== undefined) {
+    conditions.push(...columnBounds.conditions);
+    values.push(...columnBounds.values);
+  }
   const range = seekRange(params);
   if (range.sql !== '') {
     conditions.push(range.sql);

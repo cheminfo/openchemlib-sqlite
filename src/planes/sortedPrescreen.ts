@@ -104,7 +104,7 @@ function rangeConditions(
   params: PrescreenParams,
   position: ScanPosition,
 ): Range {
-  const { mol, queryIndex, mwRange } = params;
+  const { mol, queryIndex, mwRange, columnBounds } = params;
   const prefilter = buildSSPrefilter(queryIndex ?? mol.getIndex());
   const lower = Math.max(
     weightFloor(params) ?? Number.NEGATIVE_INFINITY,
@@ -124,6 +124,10 @@ function rangeConditions(
     sql += ' AND s.mw <= ?';
     values.push(mwRange.max);
   }
+  for (const condition of columnBounds?.conditions ?? []) {
+    sql += ` AND ${condition}`;
+  }
+  values.push(...(columnBounds?.values ?? []));
   return { sql, values };
 }
 

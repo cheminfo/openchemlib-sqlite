@@ -434,6 +434,85 @@ values are compared with the weight the index stores — the one `insert()`
 derived, or your `mwColumn` / precomputed `mw`. Every mode honours it; outside
 the substructure scan it is a test rather than a seek.
 
+#### Bounding a property the index carries: `columns` and `columnRanges`
+
+A property the index does not hold is a subquery, probed per candidate in your
+tables. Declare the few properties you filter on most and the index carries
+them in every row, so a bound on one is a comparison on the row the scan is
+already reading:
+
+```js
+const molDB = new MoleculesDBSQLite(db, OCL, {
+  entriesTable: 'molecules',
+  columns: { rotatableBondCount: 'integer', logP: 'real' },
+});
+molDB.migrate();
+
+molDB.insert(id, idCode, {
+  index,
+  mw,
+  columns: { rotatableBondCount: 3, logP: 2.41 },
+});
+
+const page = await molDB.search('c1ccccc1', {
+  mode: 'substructure',
+  mwRange: { min: 610 },
+  columnRanges: { rotatableBondCount: { max: 4 }, logP: { max: 3 } },
+  maxResults: 24,
+});
+```
+
+The bounds are inclusive and honoured by every mode, on the column path and on
+the planes alike. A column costs a byte or two per entry for a small integer
+and nine bytes for a real, and every instance writing one index must declare
+the same columns: one that declares fewer writes NULL in the others, which no
+bound keeps. Naming in `columnRanges` a column the index does not carry for
+every entry throws.
+
+On the first 10 M molecules of PubChem, every heavy benzene candidate (410 805,
+`mw ≥ 610`) tested against a bound costs 1.61 µs probed in the entries table
+(with its formulas joined, as molecules.cheminfo.org did), 1.43 µs probed
+alone, and **0.18 µs as a carried column**; a first page of 24 with 6 verifier
+threads ([benchmark/carriedColumns.mjs](benchmark/carriedColumns.mjs)):
+
+| bounds                   | candidates | probed   | carried |
+| ------------------------ | ---------- | -------- | ------- |
+| rotatable ≤ 4            | 20 623     | 11.1 ms  | 8.1 ms  |
+| rotatable ≤ 2, logP ≤ 3  | 1 155      | 42.2 ms  | 11.6 ms |
+| rotatable ≤ 1, logP ≤ −2 | 187        | 246.6 ms | 43.0 ms |
+
+The last is the one that grows with the index: a filter rarer than a page reads
+every candidate, at 0.18 µs instead of 1.6 µs each. The eight columns
+molecules.cheminfo.org carries — six small counts, logP and the polar surface
+area — added 31 bytes an entry to `ocl_ss_index` (1.01 → 1.32 GB at 10 M) and
+6% to the build (44.3 → 46.9 µs an entry).
+
+**Declaring a column on an index that already holds entries** adds it at once
+— a change to the schema alone, no row is rewritten — and empty for every one
+of them. `columnStatus()` says so (`complete: false`, with how far it has been
+filled), and a bound on it throws until `fillColumns()` has given every entry
+its value:
+
+```js
+const status = molDB.columnStatus();
+// [{ name: 'logP', type: 'real', declared: true, complete: false, filledThrough: 0, fillTo: 14878852 }, …]
+
+await molDB.fillColumns(
+  (entryIds) =>
+    readMyTable(entryIds).map((row) => ({
+      entryId: row.id,
+      columns: { rotatableBondCount: row.rot, logP: row.logP },
+    })),
+  { onProgress: (filled) => logger.info({ filled }, 'carried columns') },
+);
+```
+
+It walks the entries in id order through the entry index, a chunk of 5 000 per
+short transaction with its progress committed alongside, yields between
+chunks, and resumes where it stopped. A column is never dropped or retyped:
+one no longer declared stays in the file but is neither written nor bounded,
+and one declared with another type is refused.
+
 ## How a substructure search runs
 
 A substructure search is two steps, and they cost very different amounts:
@@ -811,7 +890,8 @@ rest.
 `migrate()` creates these tables:
 
 ```sql
-ocl_ss_index                (mw, entry_id, ss_index0 .. ss_index7)  -- WITHOUT ROWID, PK (mw, entry_id)
+ocl_ss_index                (mw, entry_id, ss_index0 .. ss_index7, col_<name> …)  -- WITHOUT ROWID, PK (mw, entry_id)
+ocl_ss_columns              (name, type, fill_to, fill_cursor)      -- the carried columns, and how far each is filled
 ocl_no_stereo_hash          (entry_id, hash)                        -- NULL = no hash for this molecule
 ocl_no_stereo_tautomer_hash (entry_id, hash)                        -- NULL = no hash for this molecule
 ocl_ss_settings             (name, value)                           -- settings the hashes were built under
@@ -871,6 +951,10 @@ Compare with ~5 minutes to re-fingerprint the same index from scratch.
 Version 3 adds the two structure hash tables. They are created **empty**, so the migration is
 instant; filling them is a separate long-running job — see
 [Structure hashes](#structure-hashes).
+
+Version 6 also records the columns `ocl_ss_index` carries in `ocl_ss_columns`. A file without any
+behaves as before; declared columns are added by `migrate()` whatever version a file is at — see
+[Bounding a property the index carries](#bounding-a-property-the-index-carries-columns-and-columnranges).
 
 Version 6 drops `ocl_ss_tail`, its index and its trigger: nothing is copied any more, and the planes
 are trusted up to a watermark instead. A database that never folded starts with no watermark and reads
