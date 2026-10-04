@@ -314,11 +314,12 @@ the last candidate it read, when its time ran out — and handing it back as
 costs what the first one does. `resume` is absent once the scan has read every
 candidate, and `timedOut` says whether the clock stopped it.
 
-`resume` is also absent when the [plane index](#folding-the-plane-index) answered
-a scan that stopped early: the planes read in slot order, so there is no position
-to give. That scan stopped on its time or on `maxCandidates`, never on
-`maxResults`, and `partial` says its answer is incomplete. A scan given `after`,
-`mwRange` or `candidates` never takes the plane path.
+A scan bounded by `maxResults` that the [plane index](#folding-the-plane-index)
+finished reads it in the same `(mw, entry_id)` order, so its `resume` is the same
+too. Only an unbounded scan the planes answer outright reads them in slot order;
+when its time runs out there is no position to give, `resume` is absent and
+`partial` says the answer is incomplete. A scan given `candidates` never takes
+the plane path.
 
 ```js
 let after;
@@ -510,9 +511,61 @@ molDB.planeStatus();
 ```
 
 `pending` counts the entries above the watermark: what every search still
-screens the slower way, and what the next fold takes. Once it passes 5% of
-`folded` (and 1 024 entries) the router stops using the plane index
-altogether, and `refoldAdvisable` turns true.
+screens the slower way, one seek each, and what the next fold takes. Once it
+passes 1% of `folded` (and 1 024 entries) the router stops using the plane
+index altogether, and `refoldAdvisable` turns true.
+
+### How a search uses the planes
+
+The router decides per query, and the answer is the same whichever way it goes.
+
+- **An unbounded scan** — a full count — reads every candidate on either path.
+  The router intersects the planes of the query's rarest bits and takes them
+  when at most 1% of the index survives (`planeCandidateRatio`). The count stops
+  as soon as it passes that, and a sample of the chunks, read spread across the
+  weights, stops it earlier still when it clearly will: a declined query pays
+  for part of an intersection, an accepted one is never intersected twice.
+- **A bounded scan** — a first page, `maxResults` set — starts on the column
+  scan, which answers a common fragment in a few hundred rows that no
+  intersection beats. If it is still running at a checkpoint — 100 ms, or twice
+  what an intersection is estimated to cost on a large index — its own progress
+  says how far it is from its page: the matches verified so far, plus the
+  candidates still being verified at the rate the others matched. Close to the
+  end, it carries on. Far from it, the survivors are collected, and the scan
+  finishes from the planes when that is the cheaper of the two — or, when it is
+  not, after the column scan has had as long again. The planes are read from
+  where the column scan stopped, in the same `(mw, entry_id)` order, merging
+  each fold's segment with the entries above the watermark, and only as far as
+  the page needs.
+
+So a page the column scan answers quickly never pays for the planes existing,
+and a page whose matches are rare stops reading the whole index. On the first
+10 M molecules of PubChem, warm, with 6 verifier threads
+([benchmark/firstPages.mjs](benchmark/firstPages.mjs)):
+
+| fragment           | page | never folded | folded, 5.2.0's rule | folded now |
+| ------------------ | ---- | ------------ | -------------------- | ---------- |
+| benzene            | 24   | 10.9 ms      | 16.0 ms              | 10.9 ms    |
+| pyridine           | 24   | 9.5 ms       | 27.7 ms              | 9.1 ms     |
+| flavone            | 24   | 84.9 ms      | 486.1 ms             | 82.1 ms    |
+| steroid            | 96   | 251.9 ms     | 523.8 ms             | 290.9 ms   |
+| quercetin          | 96   | 786.3 ms     | 1 335.0 ms           | 171.9 ms   |
+| dibenzoselenophene | 96   | 1 859.2 ms   | 1 945.7 ms           | 174.2 ms   |
+| cubane             | 96   | 835.4 ms     | 1 080.6 ms           | 665.1 ms   |
+| flavone            | all  | 1 550.5 ms   | 1 261.5 ms           | 446.4 ms   |
+| quercetin          | all  | 1 269.0 ms   | 1 443.5 ms           | 222.8 ms   |
+| dibenzoselenophene | all  | 1 888.0 ms   | 541.3 ms             | 152.3 ms   |
+
+The steroid page is the one a folded index still costs something: its column
+scan is past the checkpoint, the survivors are counted until they clearly pass
+1%, and the column scan carries on. On a larger index the checkpoint grows with
+the intersection, and a page like it is answered before it.
+
+Within a chunk the planes are read one at a time, rarest bit first, 32 bits at a
+time and only over the words that still hold a survivor once few remain, and a
+chunk stops being read once another plane would remove fewer survivors than it
+costs to read (~64): the exact 512-bit test that resolves each survivor rejects
+the rest for ~4 µs each, against ~230 µs for a 128 KB plane.
 
 ### What happens when an id does not grow
 

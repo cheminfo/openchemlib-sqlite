@@ -3,7 +3,7 @@ import type {
   PrescreenParams,
   PrescreenState,
   PrescreenedCandidate,
-} from '../utils/prescreen.ts';
+} from '../utils/prescreenTypes.ts';
 import {
   installScanDeadline,
   isScanDeadline,
@@ -25,13 +25,13 @@ import {
 export function buildUnfoldedSql(
   params: Pick<
     PrescreenParams,
-    'entriesTable' | 'pkColumn' | 'idCodeColumn' | 'mol'
+    'entriesTable' | 'pkColumn' | 'idCodeColumn' | 'mol' | 'queryIndex'
   >,
   watermark: number,
   deadline: number | null = null,
 ): { sql: string; params: unknown[] } {
-  const { entriesTable, pkColumn, idCodeColumn, mol } = params;
-  const prefilter = buildSSPrefilter(mol.getIndex());
+  const { entriesTable, pkColumn, idCodeColumn, mol, queryIndex } = params;
+  const prefilter = buildSSPrefilter(queryIndex ?? mol.getIndex());
   // The guard comes first, so the rows the prefilter rejects meet the clock too.
   const guard =
     deadline === null ? '' : `${scanDeadlineGuard('s.entry_id')} AND `;
@@ -92,11 +92,11 @@ export function* prescreenUnfolded(
       };
       if (state.screened % 500 === 0) {
         onProgress?.(state.screened, state.screened);
-        if (Date.now() > deadline) {
-          state.partial = true;
-          state.timedOut = true;
-          return;
-        }
+      }
+      if (Date.now() > deadline) {
+        state.partial = true;
+        state.timedOut = true;
+        return;
       }
     }
   } catch (error: unknown) {

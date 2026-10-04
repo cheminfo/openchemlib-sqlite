@@ -110,6 +110,43 @@ function screen(
   };
 }
 
+/**
+ * Run the prescreen, keeping the candidates in the order they came.
+ * @param db - The database to read.
+ * @param smiles - The query fragment.
+ * @param extra - Extra prescreen parameters.
+ * @returns The candidate ids in order, and which path answered.
+ */
+function screenInOrder(
+  db: DatabaseSync,
+  smiles: string,
+  extra: Record<string, unknown> = {},
+) {
+  const state: PrescreenState = { screened: 0, partial: false };
+  const found = [
+    ...prescreen(
+      {
+        db,
+        entriesTable: 'molecules',
+        pkColumn: 'id',
+        idCodeColumn: 'id_code',
+        mol: fragment(smiles),
+        timeoutMs: 10_000,
+        maxCandidates: Number.MAX_SAFE_INTEGER,
+        planeCandidateRatio: 1,
+        ...extra,
+      },
+      state,
+    ),
+  ];
+
+  return {
+    ids: found.map((c) => c.entryId),
+    usedPlaneIndex: state.usedPlaneIndex === true,
+    switched: state.switchedToPlanes === true,
+  };
+}
+
 test('an unfolded index sends every query to the column path', () => {
   const { db } = seed();
 
@@ -131,16 +168,69 @@ test('a fragment with no selective bit stays on the column path', () => {
   });
 });
 
-test('a result set that would be truncated stays on the column path', () => {
+test('a bounded scan starts on the column path and may switch at a checkpoint', () => {
   const { db } = seed({ fold: true });
-  // One result wanted, more than one candidate: the order of what survives the
-  // truncation is then observable, so the plane index must not answer.
+  // One result wanted: the column path usually answers that at once, so the
+  // planes are only considered if it is still running at the checkpoint.
   const plan = choosePrescreenPath(db, fragment('Oc1ccccc1'), 1, 1);
 
   expect(plan).toStrictEqual({
-    kind: 'column',
-    reason: 'the result set would be truncated, so the order is observable',
+    kind: 'switch',
+    bits: [161, 19, 48, 17, 28, 12, 24, 159],
+    watermark: 12,
+    unfolded: 0,
+    limit: 12,
+    checkpointMs: 100,
+    // One chunk, eight usable bits, a quarter of a millisecond each.
+    intersectMs: 2,
   });
+});
+
+test('a bounded scan whose result set cannot be truncated is answered outright', () => {
+  const { db } = seed({ fold: true });
+  const plan = choosePrescreenPath(db, fragment('Oc1ccccc1'), 1e6, 1);
+
+  expect(plan).toMatchObject({ kind: 'plane', survivors: 2, watermark: 12 });
+  expect(plan.kind === 'plane' && Array.from(plan.slots)).toStrictEqual([4, 9]);
+});
+
+test('a switched scan yields what the column path yields, in its order', () => {
+  const folded = seed({ fold: true });
+  const plain = seed();
+
+  for (const smiles of ['Oc1ccccc1', 'c1ccccc1', 'O=C(N)c1ccccc1', 'CCO']) {
+    for (const maxResults of [1, 2, 5]) {
+      const switched = screenInOrder(folded.db, smiles, {
+        maxResults,
+        planeCheckpointMs: -1,
+      });
+      const column = screenInOrder(plain.db, smiles, { maxResults });
+
+      expect(switched.ids).toStrictEqual(column.ids);
+      expect(switched.usedPlaneIndex).toBe(false);
+    }
+  }
+});
+
+test('a switched scan keeps the weight range and the resume position', () => {
+  const folded = seed({ fold: true });
+  const plain = seed();
+  const extra = {
+    maxResults: 3,
+    mwRange: { min: 100, max: 200 },
+    after: { mw: 120, entryId: 0 },
+  };
+  const switched = screenInOrder(folded.db, 'c1ccccc1', {
+    ...extra,
+    planeCheckpointMs: -1,
+  });
+  const column = screenInOrder(plain.db, 'c1ccccc1', extra);
+
+  expect(switched.ids).toStrictEqual(column.ids);
+  // Benzamide, the sulfonamide, the fluorobiphenyl and aspirin: the benzene
+  // derivatives between 120 and 200, lightest first.
+  expect(switched.ids).toStrictEqual([4, 6, 5, 12]);
+  expect(switched.switched).toBe(true);
 });
 
 test('too many candidates for the screen to pay for itself', () => {

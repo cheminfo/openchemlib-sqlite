@@ -2,6 +2,8 @@ import type * as OpenChemLib from 'openchemlib';
 
 import type { SQLiteDatabase } from '../types.ts';
 
+import type { PrescreenParams } from './prescreenTypes.ts';
+
 type OCLMolecule = InstanceType<(typeof OpenChemLib)['Molecule']>;
 
 /**
@@ -55,4 +57,26 @@ export function indexHasUnknownMw(db: SQLiteDatabase): boolean {
     .prepare('SELECT 1 AS present FROM ocl_ss_index WHERE mw = 0 LIMIT 1')
     .get();
   return row !== undefined;
+}
+
+/**
+ * The weight floor a scan may seek to: the one already worked out for it, or
+ * the fragment's own when the index's weights are molecular weights and none
+ * is unknown.
+ *
+ * Refused when any entry's weight is unknown, because 0 doubles as the
+ * sentinel for that and such an entry may still be a match.
+ * @param params - The scan.
+ * @returns The floor in daltons, or null when none applies.
+ */
+export function weightFloor(
+  params: Pick<
+    PrescreenParams,
+    'db' | 'mol' | 'mwFloor' | 'mwIsMolecularWeight'
+  >,
+): number | null {
+  if (params.mwFloor !== undefined) return params.mwFloor;
+  return params.mwIsMolecularWeight === true && !indexHasUnknownMw(params.db)
+    ? queryMwBound(params.mol)
+    : null;
 }

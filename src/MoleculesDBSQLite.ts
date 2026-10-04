@@ -845,6 +845,9 @@ export class MoleculesDBSQLite {
             const hit = current[match];
             if (hit) results.push(hit);
           }
+          // What the prescreen weighs a switch to the planes with.
+          state.verified = (state.verified ?? 0) + current.length;
+          state.matched = results.length;
         })
         .finally(() => pending.delete(settled));
       pending.add(settled);

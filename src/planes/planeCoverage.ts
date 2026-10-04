@@ -1,8 +1,8 @@
 import type { SQLiteDatabase } from '../types.ts';
 
-import { intersectPlanes } from './planeIntersect.ts';
 import { SLOTS_PER_CHUNK, bitsOfIndex } from './planeLayout.ts';
 import { BITSTAT_TABLE, SEGMENT_TABLE } from './planeSchema.ts';
+import { collectSurvivors } from './planeSurvivors.ts';
 
 /**
  * The query's bits, rarest first, or null when the planes cannot screen it.
@@ -94,18 +94,12 @@ export function planeChunks(db: SQLiteDatabase): number[] {
 }
 
 /**
- * How many slots the plane intersection leaves, without resolving any of them.
+ * How many slots the plane intersection leaves.
  *
- * This is the router's input, and it is cheap: the intersection is the fast half
- * of the plane path, while turning slots back into entries costs a batched join
- * per candidate. A query the screen barely narrows is therefore better served by
- * the clustered column scan, which streams in molecular-weight order and can
- * stop early — and this says so before any of that work is done.
- *
- * It is an upper bound: the planes of bits most molecules set are not kept, so
- * some survivors fail the exact 512-bit test afterwards, and a slot whose entry
- * was removed or left above the watermark is counted although it answers
- * nothing.
+ * It is an upper bound: the planes of bits most molecules set are not kept,
+ * the intersection of a chunk stops once reading another plane would cost more
+ * than it saves, and a slot whose entry was removed or left above the
+ * watermark is counted although it answers nothing.
  * @param db - The database to read.
  * @param bits - The query's usable bits, rarest first, from {@link planeQueryBits}.
  * @returns How many slots survived the intersection.
@@ -114,9 +108,5 @@ export function planeSurvivorCount(
   db: SQLiteDatabase,
   bits: readonly number[],
 ): number {
-  let total = 0;
-  for (const survivors of intersectPlanes(db, bits, planeChunks(db))) {
-    total += survivors.count;
-  }
-  return total;
+  return collectSurvivors(db, bits, planeChunks(db)).count;
 }

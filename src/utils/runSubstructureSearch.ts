@@ -99,6 +99,8 @@ export function runSubstructureSearch(
     const matches = emptyFragment
       ? batch
       : substructureSearch(fragment, batch).matches;
+    state.verified = (state.verified ?? 0) + batch.length;
+    state.matched = (state.matched ?? 0) + matches.length;
     for (const match of matches) {
       results.push(match);
       if (results.length >= maxResults) {

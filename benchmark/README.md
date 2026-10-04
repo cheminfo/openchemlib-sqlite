@@ -155,6 +155,10 @@ difference is the routing.
 | benzamide        | 21   | 9    | 299 ms          | 6 ms   | 311 ms   | column    | 1.0×     |
 | sulfonamide-aryl | 24   | 12   | 142 ms          | 5 ms   | 22 ms    | **plane** | **6.5×** |
 
+(The router has since changed: a bounded scan now starts on the column path and
+may switch to the planes at a checkpoint — see `firstPages.mjs` below. The
+unbounded rule is the one measured here.)
+
 Never slower, 6× where the screen pays. Deciding is free in practice — the
 intersection it has to run to decide costs 1–6 ms, and it is thrown away when the
 answer is no.
@@ -277,3 +281,47 @@ matches is verification-bound, so the router sends it to the column scan, and
 deciding costs the few milliseconds of the intersection. 1% of the library
 inserted since the fold costs ~3 ms of seeks on the entry index; at 10% the
 router has gone back to the column scan, which also reads the 10% more entries.
+
+## First pages on a folded index: `firstPages.mjs`
+
+```sh
+node benchmark/firstPages.mjs synthetic 200000
+node benchmark/firstPages.mjs new-10M.sqlite new-10M-folded.sqlite molecules-10M.sqlite
+```
+
+The same index never folded and folded, searched in one process by one build:
+first pages of 24 and 96 results with a 10 s budget, and full counts. The plane
+index must never make a page slower, and should make a full count faster when
+few entries survive its screen. Each line prints the matches and the first ids,
+so the two can be checked for the same answer. With files, the entries are
+attached as `mol.molecules (id, idCode)` — the layout of the PubChem copies —
+and six verifier threads run, as molecules.cheminfo.org's server does.
+
+The first 10 M molecules of PubChem, warm, node 26.7, a shared 20-core machine
+(load 8–23), 30+ samples each:
+
+| fragment           | page | never folded | folded, 5.2.0's router | folded, this router |
+| ------------------ | ---- | ------------ | ---------------------- | ------------------- |
+| benzene            | 24   | 10.9 ms      | 16.0 ms                | 10.9 ms             |
+| benzene            | 96   | 12.2 ms      | 17.1 ms                | 13.2 ms             |
+| pyridine           | 24   | 9.5 ms       | 27.7 ms                | 9.1 ms              |
+| pyridine           | 96   | 11.2 ms      | 30.7 ms                | 12.2 ms             |
+| flavone            | 24   | 84.9 ms      | 486.1 ms               | 82.1 ms             |
+| flavone            | 96   | 117.0 ms     | 512.7 ms               | 114.9 ms            |
+| steroid            | 24   | 308.5 ms     | 543.7 ms               | 293.6 ms            |
+| steroid            | 96   | 251.9 ms     | 523.8 ms               | 290.9 ms            |
+| quercetin          | 24   | 257.6 ms     | 840.4 ms               | 163.4 ms            |
+| quercetin          | 96   | 786.3 ms     | 1 335.0 ms             | 171.9 ms            |
+| dibenzoselenophene | 24   | 1 861.9 ms   | 1 960.3 ms             | 379.7 ms            |
+| dibenzoselenophene | 96   | 1 859.2 ms   | 1 945.7 ms             | 174.2 ms            |
+| cubane             | 24   | 76.3 ms      | 225.7 ms               | 74.6 ms             |
+| cubane             | 96   | 835.4 ms     | 1 080.6 ms             | 665.1 ms            |
+| flavone            | all  | 1 550.5 ms   | 1 261.5 ms             | 446.4 ms            |
+| quercetin          | all  | 1 269.0 ms   | 1 443.5 ms             | 222.8 ms            |
+| dibenzoselenophene | all  | 1 888.0 ms   | 541.3 ms               | 152.3 ms            |
+
+The old router intersected every plane of the query before reading a
+candidate, to decline a first page anyway; the new one starts a bounded scan on
+the column path, reads planes one at a time and only while they pay, and when
+it moves to the planes reads them in the column path's order from where it
+stopped. Every variant returned the same matches and the same first ids.
