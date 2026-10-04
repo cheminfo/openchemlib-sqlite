@@ -1,7 +1,12 @@
-import type { SQLiteDatabase, ScanPosition } from '../types.ts';
+import type { SQLiteDatabase } from '../types.ts';
 
 import { defaultOrder } from './buildSSPrefilter.ts';
 import { packSSIndex } from './packSSIndex.ts';
+import type { Passes, ScanRange } from './prefilterSample.ts';
+import { MIN_RUNS, countPasses } from './prefilterSample.ts';
+
+export type { ScanRange } from './prefilterSample.ts';
+export { ENTRY_ID_BOUNDS_SQL } from './prefilterSample.ts';
 
 /**
  * How the fingerprint prefilter of a column scan is written: which words it
@@ -20,21 +25,6 @@ export interface PrefilterPlan {
   /** Whether the order was measured on rows of the scan, or only guessed. */
   measured: boolean;
 }
-
-/**
- * The lowest and highest entry ids, each a seek on the entry index. Written as
- * two subqueries on purpose: SQLite answers a lone `MIN()` or `MAX()` from the
- * end of an index, but both in one SELECT by walking the whole of it.
- */
-export const ENTRY_ID_BOUNDS_SQL = `SELECT
-  (SELECT MIN(entry_id) FROM ocl_ss_index) AS low,
-  (SELECT MAX(entry_id) FROM ocl_ss_index) AS high`;
-
-/** Runs a sample is read in, spread over the scan. */
-const SAMPLE_RUNS = 32;
-
-/** Fewer runs than this in the scan's range, and it is read from its start. */
-const MIN_RUNS = 8;
 
 /** Rows per run when measuring which word is most selective: 2048 in all. */
 const SAMPLE_RUN = 64;
@@ -72,22 +62,6 @@ export function guessedPrefilterPlan(
   };
 }
 
-/** The part of the index a scan has still to read. */
-export interface ScanRange {
-  /** Resume after this position, exclusive. */
-  after?: ScanPosition;
-  /** The lightest weight read, inclusive. */
-  lower?: number;
-  /** The heaviest weight read, inclusive. */
-  upper?: number;
-}
-
-/** A key of the clustered order, the first one a run of the sample reads. */
-interface Key {
-  mw: number;
-  entryId: number;
-}
-
 /**
  * Plan the prefilter on the rows a scan has still to read.
  *
@@ -106,28 +80,44 @@ interface Key {
  * word to judge its rate, a larger one is read for that word alone; when even
  * that is too few, the guard stays first, where its timing does not depend on
  * the rows at all.
+ *
+ * The sample has a time budget. On a warm index it costs about a millisecond;
+ * on a cold one every run is a few random reads, and a sample that cannot be
+ * read within the budget is given up: the scan keeps the order it has, which
+ * is never wrong, only slower per row.
  * @param db - The database to read.
  * @param queryIndex - The fragment's fingerprint.
  * @param range - The part of the index the scan has still to read.
- * @returns The plan.
+ * @param budgetEnd - When to give the sample up, in ms since the epoch.
+ * @returns The plan, or null when the budget ran out before the sample said
+ *   anything.
  */
 export function measurePrefilterPlan(
   db: SQLiteDatabase,
   queryIndex: ArrayLike<number>,
   range: ScanRange,
-): PrefilterPlan {
+  budgetEnd = Number.POSITIVE_INFINITY,
+): PrefilterPlan | null {
   const packed = packSSIndex(Array.from(queryIndex));
   const { words } = guessedPrefilterPlan(queryIndex);
   if (words.length === 0) return guessedPrefilterPlan(queryIndex);
-  const passes = samplePasses(db, queryIndex, range);
+  const passes = samplePasses(db, queryIndex, range, budgetEnd);
+  if (passes.runs < MIN_RUNS) return null;
   const order = words.toSorted(
     (a, b) => (passes.get(a) ?? 0) - (passes.get(b) ?? 0),
   );
   const best = order[0] as number;
   let rate = (passes.get(best) ?? 0) / Math.max(1, passes.rows);
   if ((passes.get(best) ?? 0) < MIN_PASSES) {
-    const rare = countPasses(db, packed, [best], range, RARE_SAMPLE_RUN);
-    if ((rare.get(best) ?? 0) < MIN_PASSES) {
+    const rare = countPasses(
+      db,
+      packed,
+      [best],
+      range,
+      RARE_SAMPLE_RUN,
+      budgetEnd,
+    );
+    if (rare.runs < MIN_RUNS || (rare.get(best) ?? 0) < MIN_PASSES) {
       return { words: order, guardAfter: 0, guardMask: 1023, measured: true };
     }
     rate = (rare.get(best) ?? 0) / rare.rows;
@@ -148,128 +138,16 @@ export function measurePrefilterPlan(
  * @param db - The database to read.
  * @param queryIndex - The fragment's fingerprint.
  * @param range - The part of the index the scan has still to read.
- * @returns The passes by word, and how many rows were read.
+ * @param budgetEnd - When to stop starting runs, in ms since the epoch.
+ * @returns The passes by word, with how many rows and runs were read.
  */
 export function samplePasses(
   db: SQLiteDatabase,
   queryIndex: ArrayLike<number>,
   range: ScanRange,
-): Map<number, number> & { rows: number } {
+  budgetEnd = Number.POSITIVE_INFINITY,
+): Passes {
   const packed = packSSIndex(Array.from(queryIndex));
   const { words } = guessedPrefilterPlan(queryIndex);
-  return countPasses(db, packed, words, range, SAMPLE_RUN);
-}
-
-/**
- * How many rows of a spread sample of the scan each word lets through.
- * @param db - The database to read.
- * @param packed - The query's eight 64-bit words.
- * @param words - The words to count.
- * @param range - The part of the index the scan has still to read.
- * @param runLength - Rows read in each run.
- * @returns The passes by word, and how many rows were read.
- */
-function countPasses(
-  db: SQLiteDatabase,
-  packed: bigint[],
-  words: readonly number[],
-  range: ScanRange,
-  runLength: number,
-): Map<number, number> & { rows: number } {
-  const sums = words.map(
-    (word) => `sum((s.ss_index${word} & ?) = ?) AS w${word}`,
-  );
-  const upper = range.upper === undefined ? '' : ' AND s.mw <= ?';
-  const run = db.prepare(
-    `SELECT count(*) AS n, ${sums.join(', ')}
-       FROM (SELECT ${words.map((word) => `s.ss_index${word}`).join(', ')}
-               FROM ocl_ss_index s
-              WHERE (s.mw, s.entry_id) >= (?, ?)${upper}
-              ORDER BY s.mw, s.entry_id LIMIT ?) s`,
-  );
-  const sumParams = words.flatMap((word) => [packed[word], packed[word]]);
-  const passes = new Map<number, number>() as Map<number, number> & {
-    rows: number;
-  };
-  passes.rows = 0;
-  const starts = runStarts(db, range);
-  for (const start of starts.keys) {
-    const row = run.get(
-      ...sumParams,
-      start.mw,
-      start.entryId,
-      ...(range.upper === undefined ? [] : [range.upper]),
-      runLength * start.runs,
-    ) as Record<string, unknown>;
-    for (const word of words) {
-      passes.set(word, (passes.get(word) ?? 0) + Number(row[`w${word}`] ?? 0));
-    }
-    passes.rows += Number(row.n ?? 0);
-  }
-  return passes;
-}
-
-/**
- * Where the runs of a sample start: at entries spread by id over the index,
- * kept when they lie in what the scan has still to read. When too few do — a
- * narrow range — the missing runs are read in one from where the scan stands.
- * @param db - The database to read.
- * @param range - The part of the index the scan has still to read.
- * @returns The start keys, each with how many runs it stands for.
- */
-function runStarts(
-  db: SQLiteDatabase,
-  range: ScanRange,
-): { keys: Array<Key & { runs: number }> } {
-  const first = firstKey(range);
-  const ids = db.prepare(ENTRY_ID_BOUNDS_SQL).get() as
-    { low: number | null; high: number | null } | undefined;
-  const keyOf = db.prepare(
-    `SELECT mw, entry_id FROM ocl_ss_index INDEXED BY idx_ocl_ss_entry
-      WHERE entry_id >= ? ORDER BY entry_id LIMIT 1`,
-  );
-  const keys: Array<Key & { runs: number }> = [];
-  const low = ids?.low ?? 0;
-  const high = ids?.high ?? -1;
-  const runs = high >= low ? SAMPLE_RUNS : 0;
-  for (let run = 0; run < runs; run++) {
-    const id = low + Math.floor(((run + 0.5) * (high - low + 1)) / SAMPLE_RUNS);
-    const row = keyOf.get(id) as Record<string, unknown> | undefined;
-    if (row === undefined) continue;
-    const key = { mw: Number(row.mw), entryId: Number(row.entry_id) };
-    if (compareKeys(key, first) < 0) continue;
-    if (range.upper !== undefined && key.mw > range.upper) continue;
-    keys.push({ ...key, runs: 1 });
-  }
-  if (keys.length < MIN_RUNS) {
-    keys.push({ ...first, runs: SAMPLE_RUNS - keys.length });
-  }
-  return { keys };
-}
-
-/**
- * The first key a scan reads: past its position, and not lighter than its
- * lower bound.
- * @param range - The part of the index the scan has still to read.
- * @returns The key, inclusive.
- */
-function firstKey(range: ScanRange): Key {
-  const lower: Key = {
-    mw: range.lower ?? -Number.MAX_VALUE,
-    entryId: Number.MIN_SAFE_INTEGER,
-  };
-  if (range.after === undefined) return lower;
-  // Ids are integers: the first key after a position is the next id.
-  const next = { mw: range.after.mw, entryId: range.after.entryId + 1 };
-  return compareKeys(next, lower) > 0 ? next : lower;
-}
-
-/**
- * Order keys as the clustered index does.
- * @param a - One key.
- * @param b - The other.
- * @returns Negative when `a` comes first.
- */
-function compareKeys(a: Key, b: Key): number {
-  return a.mw - b.mw || a.entryId - b.entryId;
+  return countPasses(db, packed, words, range, SAMPLE_RUN, budgetEnd);
 }

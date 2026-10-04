@@ -22,6 +22,18 @@ import { installScanDeadline } from '../scanDeadline.ts';
 const IDCODES = generatedLibrary(3000);
 
 /**
+ * A plan measured with no time budget, which always says something.
+ * @param db - The connection.
+ * @param index - The fragment's fingerprint.
+ * @returns The plan.
+ */
+function measuredPlan(db: DatabaseSync, index: number[]): PrefilterPlan {
+  const plan = measurePrefilterPlan(db, index, {});
+  if (plan === null) throw new Error('an unbounded measure returned nothing');
+  return plan;
+}
+
+/**
  * Entries 1 … 3000 of the generated library.
  * @returns The connection.
  */
@@ -95,7 +107,7 @@ test('a scan starts with the words setting most bits first, the guard first', ()
 test('measured on its rows, the most selective word comes first, the guard after it', () => {
   const db = library();
   const { index } = fragment('FC(F)(F)c1ccccc1');
-  const plan = measurePrefilterPlan(db, index, {});
+  const plan = measuredPlan(db, index);
   const sample = samplePasses(db, index, {});
   const counts = plan.words.map((word) => sample.get(word) ?? 0);
   const first = counts[0] as number;
@@ -115,11 +127,25 @@ test('measured on its rows, the most selective word comes first, the guard after
   expect(plan.guardMask).toBe(reaching - 1);
 });
 
+test('a measure past its time budget says nothing and reads no run', () => {
+  const db = library();
+  const { index } = fragment('FC(F)(F)c1ccccc1');
+  const spent = Date.now() - 1;
+
+  expect(measurePrefilterPlan(db, index, {}, spent)).toBeNull();
+  expect(samplePasses(db, index, {}, spent)).toMatchObject({
+    rows: 0,
+    runs: 0,
+  });
+  // Given time, all 32 runs are read whatever order they are read in.
+  expect(samplePasses(db, index, {})).toMatchObject({ rows: 2015, runs: 32 });
+});
+
 test('a word no row of the sample passes keeps the guard first', () => {
   const db = library();
   // No generated molecule holds selenium.
   const { index } = fragment('c1ccc2c(c1)[se]c1ccccc12');
-  const plan = measurePrefilterPlan(db, index, {});
+  const plan = measuredPlan(db, index);
 
   expect(plan).toMatchObject({
     guardAfter: 0,
@@ -184,7 +210,7 @@ test('a scan that measures its plan yields what a guessing one yields, in order'
     const measured: PrescreenState = {
       screened: 0,
       partial: false,
-      prefilterPlan: measurePrefilterPlan(db, mol.getIndex(), {}),
+      prefilterPlan: measuredPlan(db, mol.getIndex()),
     };
 
     expect(

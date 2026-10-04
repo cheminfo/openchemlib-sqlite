@@ -25,6 +25,18 @@ export { buildPrescreenSql } from './prescreenSql.ts';
  */
 const REPLAN_MS = 30;
 
+/**
+ * The most a measure may take. On a cold index its random reads cost far more
+ * than the ~1 ms they take warm, and a short scan would pay for them in full.
+ */
+const MEASURE_BUDGET_MS = 20;
+
+/**
+ * Measures a scan tries before it keeps its guessed plan; each waits four
+ * times as long as the last, by which time more of the index is in memory.
+ */
+const MEASURE_ATTEMPTS = 3;
+
 /** Where a column scan stops to let its caller reconsider the plan. */
 export interface ColumnScanOptions {
   /**
@@ -85,6 +97,7 @@ export function* prescreenColumn(
     !restartable
       ? null
       : Date.now() + REPLAN_MS;
+  let attempts = 0;
 
   for (;;) {
     const stopAt = Math.min(
@@ -103,9 +116,23 @@ export function* prescreenColumn(
       state.checkpoint = position;
       return;
     }
-    plan = measurePrefilterPlan(db, queryIndex, scanRange(scan, position));
-    state.prefilterPlan = plan;
-    replanAt = null;
+    const measured = measurePrefilterPlan(
+      db,
+      queryIndex,
+      scanRange(scan, position),
+      Date.now() + MEASURE_BUDGET_MS,
+    );
+    attempts++;
+    if (measured === null) {
+      replanAt =
+        attempts < MEASURE_ATTEMPTS
+          ? Date.now() + REPLAN_MS * 4 ** attempts
+          : null;
+    } else {
+      plan = measured;
+      state.prefilterPlan = plan;
+      replanAt = null;
+    }
     scan.after = position;
   }
 }
