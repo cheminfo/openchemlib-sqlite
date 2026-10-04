@@ -294,3 +294,38 @@ test('the guard aborts the statement with an error it recognises', () => {
 
   expect(isScanDeadline(caught)).toBe(true);
 });
+
+test('a membership subquery stops at the deadline while it is listed', () => {
+  // No entry of the index has an id the scan's own guard reads the clock at,
+  // so only the guard on the listed rows — which include 1024 — can stop it.
+  const { db } = seed();
+  installScanDeadline(db);
+  const mol = OCL.Molecule.fromSmiles('c1ccccc1');
+  mol.setFragment(true);
+  const candidates = {
+    sql: 'SELECT 1024 AS entry_id UNION ALL SELECT id AS entry_id FROM molecules',
+  };
+  const query = (deadline: number | null) =>
+    buildPrescreenSql({
+      entriesTable: 'molecules',
+      pkColumn: 'id',
+      idCodeColumn: 'id_code',
+      mol,
+      candidates,
+      deadline,
+    });
+  let caught: unknown;
+  try {
+    const stopped = query(0);
+    db.prepare(stopped.sql).all(...(stopped.params as never[]));
+  } catch (error: unknown) {
+    caught = error;
+  }
+  const free = query(Date.now() + 60_000);
+  const rows = db.prepare(free.sql).all(...(free.params as never[])) as Array<
+    Record<string, unknown>
+  >;
+
+  expect(isScanDeadline(caught)).toBe(true);
+  expect(rows.map((row) => row.entry_id)).toStrictEqual([1, 2, 3, 4, 5]);
+});

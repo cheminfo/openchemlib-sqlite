@@ -1,5 +1,7 @@
 import type { SQLiteStatement, ScanPosition } from '../types.ts';
 
+import type { PrefilterPlan, ScanRange } from './prefilterPlan.ts';
+import { guessedPrefilterPlan, measurePrefilterPlan } from './prefilterPlan.ts';
 import { buildPrescreenSql } from './prescreenSql.ts';
 import type {
   PrescreenParams,
@@ -16,6 +18,12 @@ import {
 import { BEFORE_EVERY_ENTRY } from './searchHelpers.ts';
 
 export { buildPrescreenSql } from './prescreenSql.ts';
+
+/**
+ * How long a scan runs on its guessed prefilter before it measures its own
+ * rows: past this it is long enough for the ~1 ms a measure costs to pay.
+ */
+const REPLAN_MS = 30;
 
 /** Where a column scan stops to let its caller reconsider the plan. */
 export interface ColumnScanOptions {
@@ -58,18 +66,73 @@ export function* prescreenColumn(
   state: PrescreenState,
   options: ColumnScanOptions = {},
 ): Generator<PrescreenedCandidate> {
-  const { db, timeoutMs, maxCandidates, onProgress, after } = params;
+  const { db, timeoutMs, mol, candidates } = params;
   const { checkpoint = null } = options;
-  const mwFloor = weightFloor(params);
+  const queryIndex = params.queryIndex ?? mol.getIndex();
+  const scan = { ...params, queryIndex, mwFloor: weightFloor(params) };
   const deadline = Date.now() + timeoutMs;
-  const stopAt =
-    checkpoint === null ? deadline : Math.min(checkpoint, deadline);
+  let plan = state.prefilterPlan ?? guessedPrefilterPlan(queryIndex);
+  // A scan still running after a few milliseconds is worth measuring: the
+  // order of the words and the place of the guard then come from its rows.
+  // Not one listing a membership subquery, which a restart would list again,
+  // nor a driven one, which reads its candidates rather than the index.
+  const restartable =
+    candidates === undefined || candidates.strategy === 'probe';
+  let replanAt =
+    plan.measured ||
+    plan.words.length === 0 ||
+    mol.getAllAtoms() === 0 ||
+    !restartable
+      ? null
+      : Date.now() + REPLAN_MS;
+
+  for (;;) {
+    const stopAt = Math.min(
+      deadline,
+      checkpoint ?? Number.POSITIVE_INFINITY,
+      replanAt ?? Number.POSITIVE_INFINITY,
+    );
+    const position = yield* scanUntil(scan, state, plan, stopAt);
+    if (position === undefined) return;
+    if (Date.now() > deadline) {
+      state.partial = true;
+      state.timedOut = true;
+      return;
+    }
+    if (checkpoint !== null && Date.now() >= checkpoint) {
+      state.checkpoint = position;
+      return;
+    }
+    plan = measurePrefilterPlan(db, queryIndex, scanRange(scan, position));
+    state.prefilterPlan = plan;
+    replanAt = null;
+    scan.after = position;
+  }
+}
+
+/**
+ * Scan until the end, or until a moment, with one prefilter plan.
+ * @param params - The scan; `queryIndex` and `mwFloor` already worked out.
+ * @param state - Mutable counters updated as the stream is consumed.
+ * @param plan - The prefilter plan.
+ * @param stopAt - When to stop, in ms since the epoch.
+ * @yields {PrescreenedCandidate} Each prescreened candidate, in ascending molecular weight.
+ * @returns Where the scan stood when it stopped at that moment; undefined when
+ *   it read every candidate or stopped on `maxCandidates`.
+ */
+function* scanUntil(
+  params: PrescreenParams,
+  state: PrescreenState,
+  plan: PrefilterPlan,
+  stopAt: number,
+): Generator<PrescreenedCandidate, ScanPosition | undefined> {
+  const { db, maxCandidates, onProgress, after } = params;
   const guardKey = newGuardKey();
   const query = buildPrescreenSql({
     ...params,
-    mwFloor,
     deadline: installScanDeadline(db) ? stopAt : null,
     guardKey,
+    plan,
   });
   const stmt = db.prepare(query.sql);
 
@@ -78,7 +141,7 @@ export function* prescreenColumn(
     for (const row of streamRows(stmt, query.params)) {
       if (state.screened >= maxCandidates) {
         state.partial = true;
-        return;
+        return undefined;
       }
       state.screened++;
       const candidate = {
@@ -91,10 +154,7 @@ export function* prescreenColumn(
       if (state.screened % 500 === 0) {
         onProgress?.(state.screened, state.screened);
       }
-      if (Date.now() > stopAt) {
-        stop(state, deadline, last);
-        return;
-      }
+      if (Date.now() > stopAt) return last;
     }
   } catch (error: unknown) {
     // The guard stopped a step that was reading without yielding: what was
@@ -103,33 +163,30 @@ export function* prescreenColumn(
     const at = takeGuardPosition(guardKey);
     // The row the guard was testing has not been tested yet, so the scan
     // resumes just before it: ids are integers, so nothing lies between.
-    stop(
-      state,
-      deadline,
-      at === undefined
-        ? (last ?? after ?? BEFORE_EVERY_ENTRY)
-        : { mw: at.mw, entryId: at.entryId - 1 },
-    );
+    return at === undefined
+      ? (last ?? after ?? BEFORE_EVERY_ENTRY)
+      : { mw: at.mw, entryId: at.entryId - 1 };
   }
+  return undefined;
 }
 
 /**
- * Record why a column scan stopped before its end.
- * @param state - The prescreen's counters.
- * @param deadline - When the scan had to stop, in ms since the epoch.
- * @param position - Everything up to here has been read.
+ * What a scan has still to read, after a position.
+ * @param params - The scan, its weight floor worked out.
+ * @param after - Where it stands.
+ * @returns The range.
  */
-function stop(
-  state: PrescreenState,
-  deadline: number,
-  position: ScanPosition,
-): void {
-  if (Date.now() > deadline) {
-    state.partial = true;
-    state.timedOut = true;
-    return;
-  }
-  state.checkpoint = position;
+function scanRange(params: PrescreenParams, after: ScanPosition): ScanRange {
+  const { mwFloor, mwRange } = params;
+  const lower = Math.max(
+    mwFloor ?? Number.NEGATIVE_INFINITY,
+    mwRange?.min ?? Number.NEGATIVE_INFINITY,
+  );
+  return {
+    after,
+    ...(lower > Number.NEGATIVE_INFINITY ? { lower } : {}),
+    ...(mwRange?.max === undefined ? {} : { upper: mwRange.max }),
+  };
 }
 
 /**

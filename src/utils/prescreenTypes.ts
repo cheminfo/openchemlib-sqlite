@@ -7,6 +7,8 @@ import type {
   SearchCandidates,
 } from '../types.ts';
 
+import type { PrefilterPlan } from './prefilterPlan.ts';
+
 type OCLMolecule = InstanceType<(typeof OpenChemLib)['Molecule']>;
 
 /** One candidate that passed the fingerprint prefilter. */
@@ -140,4 +142,9 @@ export interface PrescreenState {
   verified?: number;
   /** Matches among {@link PrescreenState.verified}, reported by the caller. */
   matched?: number;
+  /**
+   * The prefilter plan a column scan measured on its own rows, kept so that
+   * the same scan resumed after a checkpoint does not measure it again.
+   */
+  prefilterPlan?: PrefilterPlan;
 }

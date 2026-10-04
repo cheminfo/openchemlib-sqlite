@@ -246,14 +246,37 @@ const { results, screened, partial } = molDB.search('c1ccccc1', {
 ```
 
 A 512-bit fingerprint prefilter (bitwise AND) discards non-candidates before running the full OCL substructure check.
+Only the 64-bit words the query sets bits in are tested, and a scan still
+running after 30 ms measures them on a sample of its next 2 048 rows and tests
+the most selective first, so most rows are rejected after one column read.
+
+On the first 10 M molecules of PubChem, a scan of the whole index costs, per
+row read ([benchmark/prefilterGuard.mjs](benchmark/prefilterGuard.mjs)):
+
+| fragment           | every word, guard first | measured order, guard after it |
+| ------------------ | ----------------------- | ------------------------------ |
+| benzene            | 331.0 ns                | 151.9 ns                       |
+| quercetin          | 133.1 ns                | 110.8 ns                       |
+| dibenzoselenophene | 184.7 ns                | 110.4 ns                       |
+| steroid            | 151.4 ns                | 109.2 ns                       |
+
+and the guard still stops a scan within 1–4 ms of its deadline.
 
 **`timeoutMs` is enforced from inside SQLite.** A scan whose rows all fail the
 prefilter or the candidates test yields nothing, so the loop that reads the clock
 between rows never runs. On a driver that can register a SQL function, the library
-registers `ocl_ss_deadline` on the connection and makes it the first condition of
-the scan, so the statement itself stops at the deadline. `timedOut: true` then says
-the clock stopped the scan; `maxResults` and `maxCandidates` set only `partial`.
-Without `function()` the clock is read between rows, as before.
+registers `ocl_ss_deadline` on the connection and puts it among the scan's
+conditions, so the statement itself stops at the deadline. It sits first until
+the scan has measured its rows, then right after the most selective word, where
+it sees only the rows that word lets through and reads the clock on a
+correspondingly larger share of them — about once per 1 024 rows read either
+way — instead of costing every row a column read. A `membership` subquery is
+guarded on the rows it lists, so listing a large one stops on time too, as long
+as it keeps producing rows; one that reads many rows to produce few cannot be
+interrupted before it ends, because `node:sqlite` offers no progress handler.
+`timedOut: true` then says the clock stopped the scan; `maxResults` and
+`maxCandidates` set only `partial`. Without `function()` the clock is read
+between rows, as before.
 
 **Empty query optimization** — passing a molecule with no atoms (e.g. `new OCL.Molecule(0, 0)`) skips the fingerprint prefilter entirely and returns every indexed entry, because an empty fragment matches everything.
 

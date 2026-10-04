@@ -99,24 +99,28 @@ export function takeGuardPosition(key: number): GuardPosition | undefined {
  * records its position under as a second one when the row's position is
  * given.
  *
- * It must come before every condition that rejects rows on its own: SQLite
- * tests the terms in the order they are written, so a guard placed after the
- * prefilter is never reached by the rows the prefilter rejects — which, for a
- * rare fragment, is every row the scan reads.
+ * It must come before every condition that rejects most rows on its own:
+ * SQLite tests the terms in the order they are written, so a guard placed
+ * after them is only reached by the rows they let through. A scan may place
+ * it after a selective one on purpose, reading the clock on a larger share of
+ * the fewer rows that reach it — see `measurePrefilterPlan()`.
  * @param entryIdColumn - The entry id of the row being read, e.g. `s.entry_id`.
  * @param mwColumn - The weight of the row being read, e.g. `s.mw`, when the
  *   guard should record where it stopped.
+ * @param mask - The clock is read for the rows whose entry id has these bits
+ *   all clear: 1023 reads it for one row in 1024, 0 for every row.
  * @returns The SQL condition.
  */
 export function scanDeadlineGuard(
   entryIdColumn: string,
   mwColumn?: string,
+  mask: number = SKIP_MASK,
 ): string {
   const call =
     mwColumn === undefined
       ? `${DEADLINE_FUNCTION}(?)`
       : `${DEADLINE_FUNCTION}(?, ?, ${mwColumn}, ${entryIdColumn})`;
-  return `((${entryIdColumn} & ${SKIP_MASK}) <> 0 OR ${call})`;
+  return mask === 0 ? call : `((${entryIdColumn} & ${mask}) <> 0 OR ${call})`;
 }
 
 /**
