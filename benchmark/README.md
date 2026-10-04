@@ -325,3 +325,50 @@ candidate, to decline a first page anyway; the new one starts a bounded scan on
 the column path, reads planes one at a time and only while they pay, and when
 it moves to the planes reads them in the column path's order from where it
 stopped. Every variant returned the same matches and the same first ids.
+
+## The prefilter order and the deadline guard: `prefilterGuard.mjs`
+
+```sh
+node benchmark/prefilterGuard.mjs new-10M.sqlite
+```
+
+A full scan of `ocl_ss_index` counting the rows the fingerprint prefilter lets
+through, in one process on the same file: every word tested in column order
+with the guard first, as a scan ran before; only the query's non-zero words,
+the most selective first as a sample spread over the index measures it, with
+the guard right after the first; and the same without any guard. Each guarded
+form is then given a deadline 200 ms away, and the overshoot printed.
+
+The first 10 M molecules of PubChem, warm, node 26.7, 30+ samples each:
+
+| query              | column order, guard first | measured order, guard second | no guard     |
+| ------------------ | ------------------------- | ---------------------------- | ------------ |
+| benzene            | 331.0 ns/row              | 151.9 ns/row                 | 131.1 ns/row |
+| quercetin          | 133.1 ns/row              | 110.8 ns/row                 | 110.2 ns/row |
+| dibenzoselenophene | 184.7 ns/row              | 110.4 ns/row                 | 109.9 ns/row |
+| steroid            | 151.4 ns/row              | 109.2 ns/row                 | 106.3 ns/row |
+
+Both guarded forms stop 1–4 ms past a 200 ms deadline.
+
+## A bound on a carried column: `carriedColumns.mjs`
+
+```sh
+node benchmark/carriedColumns.mjs molapp-10M-carried.sqlite molapp-10M/sqlite/db.sqlite
+```
+
+A bound on a property, probed in the caller's tables for every candidate as
+molecules.cheminfo.org did, against the same bound on a column the index
+carries: first counted over every heavy benzene candidate in SQL, then as a
+first page of 24 through the library.
+
+The first 10 M molecules of PubChem, benzene with mw ≥ 610 (410 805
+candidates), warm, node 26.7, 30+ samples each:
+
+| bound              | probe, with formulas | probe alone   | carried       | page, probe | page, carried |
+| ------------------ | -------------------- | ------------- | ------------- | ----------- | ------------- |
+| rot ≤ 4            | 1.61 µs/cand.        | 1.43 µs/cand. | 0.18 µs/cand. | 11.1 ms     | 8.1 ms        |
+| rot ≤ 2            | 1.61 µs/cand.        | 1.45 µs/cand. | 0.18 µs/cand. | 14.5 ms     | 8.9 ms        |
+| rot ≤ 2, logP ≤ 3  | 1.60 µs/cand.        | 1.42 µs/cand. | 0.18 µs/cand. | 42.2 ms     | 11.6 ms       |
+| rot ≤ 1, logP ≤ −2 | 1.59 µs/cand.        | 1.40 µs/cand. | 0.18 µs/cand. | 246.6 ms    | 43.0 ms       |
+
+Every variant counted and returned the same entries.
