@@ -5,6 +5,8 @@
  * few remain.
  */
 
+import { bitCount } from '../utils/fingerprintBits.ts';
+
 /**
  * Whether a 32-bit view of a plane puts its first byte in the low bits, which
  * decides which slot a bit of a word stands for.
@@ -150,15 +152,4 @@ export function countWords(words: Uint32Array, length: number): number {
     if (value !== 0) count += bitCount(value);
   }
   return count;
-}
-
-/**
- * How many bits a 32-bit word sets.
- * @param value - The word.
- * @returns Its population count.
- */
-function bitCount(value: number): number {
-  let bits = value - ((value >>> 1) & 0x55555555);
-  bits = (bits & 0x33333333) + ((bits >>> 2) & 0x33333333);
-  return (((bits + (bits >>> 4)) & 0x0f0f0f0f) * 0x01010101) >>> 24;
 }

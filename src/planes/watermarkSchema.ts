@@ -61,7 +61,7 @@ function lowerBelow(id: string): string {
  * @param b - The second row's alias.
  * @returns The condition.
  */
-function sameFingerprint(a: string, b: string): string {
+export function sameFingerprint(a: string, b: string): string {
   const words: string[] = [];
   for (let word = 0; word < 8; word++) {
     words.push(`${a}.ss_index${word} = ${b}.ss_index${word}`);

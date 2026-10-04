@@ -319,6 +319,16 @@ instead of 3 250 ms (quercetin) —
 [benchmark/similarityScan.mjs](benchmark/similarityScan.mjs). A driver that
 cannot register a function falls back to reading every row.
 
+Every row also stores how many bits its fingerprint sets, `ss_bits`. The
+coefficient is the bits both set over the bits either sets, so it never exceeds
+the ratio of the two counts, and reaching a threshold `t` needs
+`t·|q| ≤ |r| ≤ |q|/t`: a row outside that window is rejected by one comparison
+before its coefficient is computed. On the first 1 M molecules of PubChem, a scan at 0.8
+drops from 1 834 to 514 ns a row for quercetin and from 1 814 to 374 for
+flavone; at 0.6, where more rows are in the window, from 2 077 to 1 129 and from
+2 046 to 663 — [benchmark/similarityWindow.mjs](benchmark/similarityWindow.mjs).
+A row whose count is not known is computed, so the answer never depends on it.
+
 ### Pagination
 
 ```js
@@ -890,7 +900,7 @@ rest.
 `migrate()` creates these tables:
 
 ```sql
-ocl_ss_index                (mw, entry_id, ss_index0 .. ss_index7, col_<name> …)  -- WITHOUT ROWID, PK (mw, entry_id)
+ocl_ss_index                (mw, entry_id, ss_index0 .. ss_index7, ss_bits, col_<name> …)  -- WITHOUT ROWID, PK (mw, entry_id)
 ocl_ss_columns              (name, type, fill_to, fill_cursor)      -- the carried columns, and how far each is filled
 ocl_no_stereo_hash          (entry_id, hash)                        -- NULL = no hash for this molecule
 ocl_no_stereo_tautomer_hash (entry_id, hash)                        -- NULL = no hash for this molecule
@@ -909,8 +919,9 @@ integers for efficient SQL bitwise prefiltering. `mw` leads the primary key so t
 stored lightest-first — see [above](#why-the-index-is-ordered-by-molecular-weight).
 
 Four triggers on `ocl_ss_index` — `ocl_ss_watermark_insert`, `_replace`, `_update` and `_delete` —
-keep the watermark honest (see [above](#what-happens-when-an-id-does-not-grow)). `migrate()` puts them
-back if anything has dropped them.
+keep the watermark honest (see [above](#what-happens-when-an-id-does-not-grow)). A fifth,
+`ocl_ss_bits_stale`, sets `ss_bits` back to NULL when a fingerprint is changed in place without it.
+`migrate()` puts them back if anything has dropped them.
 
 Both hash tables are created empty and filled by `backfillHashes()` — see
 [Structure hashes](#structure-hashes). Each carries a partial index on `hash` (skipping the NULLs,
@@ -952,8 +963,12 @@ Version 3 adds the two structure hash tables. They are created **empty**, so the
 instant; filling them is a separate long-running job — see
 [Structure hashes](#structure-hashes).
 
-Version 6 also records the columns `ocl_ss_index` carries in `ocl_ss_columns`. A file without any
-behaves as before; declared columns are added by `migrate()` whatever version a file is at — see
+Version 6 also records the columns `ocl_ss_index` carries in `ocl_ss_columns`, and `migrate()` adds
+the library's own, `ss_bits`, to a file that lacks it. On an index that already holds entries it starts
+empty for them: a similarity search computes their coefficient as before, and `fillColumns()` — no
+reader needed for this column — fills it in the background, after which every row can be skipped by
+its count. A row written by your own SQL without `ss_bits` is found all the same, its coefficient
+computed; write `fingerprintBits(words)` there to let a search skip it too. Declared columns are added the same way whatever version a file is at — see
 [Bounding a property the index carries](#bounding-a-property-the-index-carries-columns-and-columnranges).
 
 Version 6 drops `ocl_ss_tail`, its index and its trigger: nothing is copied any more, and the planes

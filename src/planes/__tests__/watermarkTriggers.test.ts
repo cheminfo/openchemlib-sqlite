@@ -16,7 +16,7 @@ import {
   slotsOf,
 } from './fixture.ts';
 
-test('migrate creates the plane tables, the columns record and the watermark triggers, and no tail', () => {
+test('migrate creates the plane tables, the columns record and the triggers, and no tail', () => {
   const { db } = emptyLibrary();
   const names = (
     db
@@ -27,6 +27,7 @@ test('migrate creates the plane tables, the columns record and the watermark tri
   ).map((row) => row.name);
 
   expect(names).toStrictEqual([
+    'ocl_ss_bits_stale',
     'ocl_ss_bitstat',
     'ocl_ss_columns',
     'ocl_ss_fold',

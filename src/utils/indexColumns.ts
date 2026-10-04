@@ -8,6 +8,12 @@ import type {
 /** Table recording the columns `ocl_ss_index` carries and how far each is filled. */
 export const COLUMNS_TABLE = 'ocl_ss_columns';
 
+/**
+ * The column the library itself carries in every row: how many bits the
+ * entry's fingerprint sets, which bounds the Tanimoto coefficient it can reach.
+ */
+export const BITS_COLUMN = 'ss_bits';
+
 /** What a caller column is called in `ocl_ss_index`, ahead of its own name. */
 const CALLER_PREFIX = 'col_';
 
@@ -17,7 +23,8 @@ const COLUMN_NAME = /^[A-Za-z][A-Za-z0-9_]{0,59}$/;
 /**
  * SQL creating the table that records the carried columns.
  *
- * - `name`: the column of `ocl_ss_index`, `col_<caller's name>`.
+ * - `name`: the column of `ocl_ss_index`: `col_<caller's name>`, or `ss_bits`
+ *   for the library's own.
  * - `type`: `integer` or `real`.
  * - `fill_to`, `fill_cursor`: a column added to an index that already held
  *   entries is NULL for every one of them, and filling them is a job of its
@@ -121,7 +128,7 @@ export function reconcileColumns(
  * Every carried column, and how far it is filled.
  * @param db - The database to read.
  * @param declared - The columns this instance declares, by SQL name.
- * @returns The columns, by name.
+ * @returns The columns, the library's own first, then the caller's by name.
  */
 export function columnStatusOf(
   db: SQLiteDatabase,
@@ -130,7 +137,8 @@ export function columnStatusOf(
   if (!hasColumnsTable(db)) return [];
   const rows = db
     .prepare(
-      `SELECT name, type, fill_to, fill_cursor FROM ${COLUMNS_TABLE} ORDER BY name`,
+      `SELECT name, type, fill_to, fill_cursor FROM ${COLUMNS_TABLE}
+        ORDER BY name <> '${BITS_COLUMN}', name`,
     )
     .all() as Array<Record<string, unknown>>;
   return rows.map((row) => {
@@ -139,7 +147,7 @@ export function columnStatusOf(
     return {
       name: callerName(name),
       type: row.type as IndexColumnType,
-      declared: declared.has(name),
+      declared: name === BITS_COLUMN || declared.has(name),
       complete: fillTo === null,
       ...(fillTo === null
         ? {}
@@ -227,7 +235,7 @@ export function columnConditions(
  * @param db - The database to read.
  * @returns True when the table is there.
  */
-function hasColumnsTable(db: SQLiteDatabase): boolean {
+export function hasColumnsTable(db: SQLiteDatabase): boolean {
   return (
     db
       .prepare(`SELECT 1 FROM sqlite_schema WHERE type = 'table' AND name = ?`)

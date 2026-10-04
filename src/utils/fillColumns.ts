@@ -6,7 +6,8 @@ import type {
   SQLiteDatabase,
 } from '../types.ts';
 
-import { COLUMNS_TABLE, callerName } from './indexColumns.ts';
+import { fingerprintBits } from './fingerprintBits.ts';
+import { BITS_COLUMN, COLUMNS_TABLE, callerName } from './indexColumns.ts';
 
 /** Reads the values of the caller's columns for some entries. */
 export type ColumnReader = (
@@ -29,18 +30,20 @@ interface PendingColumn {
  * lowest point any column has reached to the highest id any was added over;
  * each chunk is one short transaction, and the progress of every column is
  * recorded with it, so an interrupted run resumes where it stopped. The
- * values are read through `read`, and an entry it returns nothing for is
+ * library's own column is computed from each entry's fingerprint; the
+ * caller's are read through `read`, and an entry it returns nothing for is
  * stored NULL. A column complete for every entry may be bounded from then on.
  * @param db - The database to fill.
  * @param declared - The caller's columns, by SQL name.
- * @param read - Reads the caller's values.
+ * @param read - Reads the caller's values; needed only while one of theirs is
+ *   pending.
  * @param options - Chunk size, limit, progress and abort signal.
  * @returns What this call filled, and whether anything is still pending.
  */
 export async function fillColumns(
   db: SQLiteDatabase,
   declared: ReadonlyMap<string, IndexColumnType>,
-  read: ColumnReader,
+  read: ColumnReader | undefined,
   options: FillColumnsOptions = {},
 ): Promise<FillColumnsResult> {
   const {
@@ -50,9 +53,15 @@ export async function fillColumns(
     signal,
   } = options;
   const start = Date.now();
-  let pending = pendingColumns(db).filter((column) =>
-    declared.has(column.name),
+  let pending = pendingColumns(db).filter(
+    (column) => column.name === BITS_COLUMN || declared.has(column.name),
   );
+  const theirs = pending.filter((column) => column.name !== BITS_COLUMN);
+  if (theirs.length > 0 && read === undefined) {
+    throw new Error(
+      `filling ${theirs.map((column) => callerName(column.name)).join(', ')} needs a reader of their values`,
+    );
+  }
 
   const nextIds = db.prepare(
     `SELECT entry_id FROM ocl_ss_index INDEXED BY idx_ocl_ss_entry
@@ -81,8 +90,10 @@ export async function fillColumns(
       `UPDATE ocl_ss_index SET ${names.map((name) => `${name} = ?`).join(', ')}
         WHERE entry_id = ?`,
     );
+    const bits = names.includes(BITS_COLUMN) ? readBits(db, ids) : null;
     const values = new Map<number, ColumnValues['columns']>();
-    if (ids.length > 0) {
+    const callers = names.some((name) => name !== BITS_COLUMN);
+    if (read !== undefined && callers && ids.length > 0) {
       for (const entry of read(ids)) values.set(entry.entryId, entry.columns);
     }
 
@@ -90,7 +101,14 @@ export async function fillColumns(
     try {
       for (const id of ids) {
         const own = values.get(id);
-        update.run(...names.map((name) => own?.[callerName(name)] ?? null), id);
+        update.run(
+          ...names.map((name) =>
+            name === BITS_COLUMN
+              ? (bits?.get(id) ?? null)
+              : (own?.[callerName(name)] ?? null),
+          ),
+          id,
+        );
       }
       for (const name of names) {
         progress.run(ids.length === 0 ? to : last, name);
@@ -138,4 +156,33 @@ function pendingColumns(db: SQLiteDatabase): PendingColumn[] {
     fillTo: Number(row.fill_to),
     cursor: Number(row.fill_cursor),
   }));
+}
+
+/**
+ * How many bits each of some entries' fingerprints sets.
+ * @param db - The database to read.
+ * @param ids - The entries.
+ * @returns The counts, by entry id.
+ */
+function readBits(
+  db: SQLiteDatabase,
+  ids: readonly number[],
+): Map<number, number> {
+  const read = db.prepare(
+    `SELECT entry_id, ss_index0, ss_index1, ss_index2, ss_index3, ss_index4,
+            ss_index5, ss_index6, ss_index7
+       FROM ocl_ss_index WHERE entry_id IN (SELECT value FROM json_each(?))`,
+  );
+  read.setReadBigInts?.(true);
+  const bits = new Map<number, number>();
+  for (const row of read.all(JSON.stringify(ids)) as Array<
+    Record<string, unknown>
+  >) {
+    const words: bigint[] = [];
+    for (let word = 0; word < 8; word++) {
+      words.push(row[`ss_index${word}`] as bigint);
+    }
+    bits.set(Number(row.entry_id), fingerprintBits(words));
+  }
+  return bits;
 }

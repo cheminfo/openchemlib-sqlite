@@ -158,6 +158,8 @@ test('a column declared on a filled index is added empty, and bounded once fille
   const carried = index(db, COLUMNS);
 
   expect(carried.columnStatus()).toStrictEqual([
+    // The library's own, filled on every insert since the index was made.
+    { name: 'ss_bits', type: 'integer', declared: true, complete: true },
     {
       name: 'logP',
       type: 'real',
@@ -201,7 +203,7 @@ test('a column declared on a filled index is added empty, and bounded once fille
   const first = await carried.fillColumns(reader, { chunkSize: 3, limit: 5 });
 
   expect([first.filled, first.pending]).toStrictEqual([5, true]);
-  expect(carried.columnStatus()[0]).toMatchObject({
+  expect(carried.columnStatus()[1]).toMatchObject({
     complete: false,
     filledThrough: 5,
   });
@@ -210,7 +212,7 @@ test('a column declared on a filled index is added empty, and bounded once fille
 
   expect([rest.filled, rest.pending]).toStrictEqual([3, false]);
   expect(carried.columnStatus().map((column) => column.complete)).toStrictEqual(
-    [true, true],
+    [true, true, true],
   );
   await expect(
     ids(carried, 'c1ccccc1', {
@@ -234,6 +236,7 @@ test('a column cannot be retyped, renamed oddly, or bounded undeclared', async (
   const without = index(db, { logP: 'real' });
 
   expect(without.columnStatus()).toMatchObject([
+    { name: 'ss_bits', declared: true, complete: true },
     { name: 'logP', declared: true, complete: true },
     { name: 'rings', declared: false, complete: true },
   ]);

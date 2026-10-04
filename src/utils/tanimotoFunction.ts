@@ -1,5 +1,7 @@
 import type { SQLiteDatabase } from '../types.ts';
 
+import { bitCount } from './fingerprintBits.ts';
+
 /** The SQL function a similarity scan computes each entry's coefficient with. */
 const TANIMOTO_FUNCTION = 'ocl_ss_tanimoto';
 
@@ -98,15 +100,4 @@ function tanimoto(
     either += bitCount(left | right);
   }
   return shared / either;
-}
-
-/**
- * How many bits a 32-bit word sets.
- * @param value - The word.
- * @returns Its population count.
- */
-function bitCount(value: number): number {
-  let bits = value - ((value >>> 1) & 0x55555555);
-  bits = (bits & 0x33333333) + ((bits >>> 2) & 0x33333333);
-  return (((bits + (bits >>> 4)) & 0x0f0f0f0f) * 0x01010101) >>> 24;
 }

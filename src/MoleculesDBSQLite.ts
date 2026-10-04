@@ -40,10 +40,13 @@ import type {
   SearchResult,
 } from './types.ts';
 import { backfillHashes } from './utils/backfillHashes.ts';
+import { buildStaleBitsTriggerSql } from './utils/bitsColumn.ts';
 import type { ColumnReader } from './utils/fillColumns.ts';
 import { fillColumns } from './utils/fillColumns.ts';
+import { fingerprintBits } from './utils/fingerprintBits.ts';
 import type { ColumnConditions } from './utils/indexColumns.ts';
 import {
+  BITS_COLUMN,
   boundableColumns,
   columnConditions,
   columnSqlName,
@@ -51,34 +54,22 @@ import {
   reconcileColumns,
 } from './utils/indexColumns.ts';
 import { buildInsertSql, columnValues } from './utils/insertRow.ts';
-import {
-  packGivenIndex,
-  packSSIndex,
-  unpackSSIndex,
-} from './utils/packSSIndex.ts';
+import { packGivenIndex, packSSIndex } from './utils/packSSIndex.ts';
 import type { PrescreenState } from './utils/prescreen.ts';
 import { prescreen } from './utils/prescreen.ts';
 import type { EntryRestriction } from './utils/restrictEntries.ts';
 import { restrictEntries, restrictionKey } from './utils/restrictEntries.ts';
 import { runSubstructureSearch } from './utils/runSubstructureSearch.ts';
 import {
-  installScanDeadline,
-  isScanDeadline,
-  scanDeadlineGuard,
-} from './utils/scanDeadline.ts';
-import {
   byWeight,
   parseMolecule,
   resumePosition,
   rowToResult,
 } from './utils/searchHelpers.ts';
+import type { CachedScan } from './utils/similarityScan.ts';
+import { scanSimilarity } from './utils/similarityScan.ts';
 import type { HashKind } from './utils/structureHash.ts';
 import { DEFAULT_MAX_TAUTOMERS, structureHash } from './utils/structureHash.ts';
-import {
-  installTanimoto,
-  tanimotoSql,
-  withTanimotoQuery,
-} from './utils/tanimotoFunction.ts';
 
 type OCLLibrary = typeof OpenChemLib;
 type OCLMolecule = InstanceType<OCLLibrary['Molecule']>;
@@ -132,17 +123,6 @@ interface HashLookup {
   limit: number;
 }
 
-/** A cached full (unsliced) structure-scan result, paginated on each hit. */
-interface CachedScan {
-  results: SearchResult[];
-  screened: number;
-  matched: number;
-  partial: boolean;
-  elapsedMs: number;
-  timedOut: boolean;
-  resume?: ScanPosition;
-}
-
 /**
  * Return mol with its fragment flag set to the requested value.
  * When fromInstance is true (caller passed a Molecule object), a compact copy
@@ -169,38 +149,10 @@ function withFragment(
   return mol;
 }
 
-/**
- * A similarity scan's matches, best first, as the cache keeps them.
- * @param withSim - The entries that reached the threshold, in scan order.
- * @param timedOut - Whether the deadline stopped the scan.
- * @param start - When it started, in ms since the epoch.
- * @returns The scan.
- */
-function similarityScan(
-  withSim: Array<SearchResult & { similarity: number }>,
-  timedOut: boolean,
-  start: number,
-): CachedScan {
-  // Ties are broken by entry id, so the order never depends on the plan the
-  // scan happened to take.
-  const results = withSim.toSorted(
-    (a, b) => b.similarity - a.similarity || a.entryId - b.entryId,
-  );
-  return {
-    results,
-    screened: results.length,
-    matched: results.length,
-    partial: timedOut,
-    timedOut,
-    elapsedMs: Date.now() - start,
-  };
-}
-
 export class MoleculesDBSQLite {
   #db: SQLiteDatabase;
   #ocl: OCLLibrary;
   #cfg: ResolvedConfig;
-  #ssIndexCols: string;
   #ssJoin: string;
   #selectCols: string;
   #pool: SearchWorkerPool | undefined;
@@ -223,8 +175,6 @@ export class MoleculesDBSQLite {
         : undefined;
 
     const { pkColumn, idCodeColumn } = this.#cfg;
-    this.#ssIndexCols =
-      's.ss_index0, s.ss_index1, s.ss_index2, s.ss_index3, s.ss_index4, s.ss_index5, s.ss_index6, s.ss_index7';
     this.#ssJoin = `JOIN ocl_ss_index s ON s.entry_id = e.${pkColumn}`;
     this.#selectCols = `e.${pkColumn} AS entry_id, e.${idCodeColumn} AS id_code`;
   }
@@ -255,8 +205,11 @@ export class MoleculesDBSQLite {
       mwColumn,
       onMigration: options.onMigration,
     });
-    // The columns this instance declares, added to the index if it lacks them.
-    reconcileColumns(this.#db, columns);
+    // The columns this instance declares, added to the index if it lacks them,
+    // with the library's own bit count, which an in-place change of a
+    // fingerprint must not leave stale.
+    reconcileColumns(this.#db, new Map([[BITS_COLUMN, 'integer'], ...columns]));
+    this.#db.exec(buildStaleBitsTriggerSql());
     // A migration may have rewritten the table those statements were written
     // for, so they are prepared again on the next insert.
     this.#insertStatements = {};
@@ -402,12 +355,13 @@ export class MoleculesDBSQLite {
    * it returns nothing for is stored NULL. Resumable — progress is committed
    * with each chunk — and it yields between chunks, so run it in the
    * background, as `backfillHashes()` is.
-   * @param read - Returns the values of the declared columns for some entries.
+   * @param read - Returns the values of the declared columns for some entries;
+   *   it may be left out while none of them is pending.
    * @param options - Chunk size, limit, progress and abort signal.
    * @returns What this call filled, and whether anything is still pending.
    */
   async fillColumns(
-    read: ColumnReader,
+    read?: ColumnReader,
     options: FillColumnsOptions = {},
   ): Promise<FillColumnsResult> {
     const result = await fillColumns(
@@ -494,8 +448,13 @@ export class MoleculesDBSQLite {
       packed = packSSIndex(molecule.getIndex());
     }
 
-    const columns = [...this.#cfg.columns.keys()];
-    const values = columnValues(columns, precomputed.columns);
+    // The fingerprint's bit count first, which bounds what a similarity
+    // search can find in this entry, then the caller's columns.
+    const columns = [BITS_COLUMN, ...this.#cfg.columns.keys()];
+    const values = [
+      fingerprintBits(packed),
+      ...columnValues([...this.#cfg.columns.keys()], precomputed.columns),
+    ];
     if (precomputed.mw !== undefined) {
       this.#insertIndexRow(entryId, precomputed.mw, packed, values);
     } else if (mwColumn) {
@@ -534,7 +493,8 @@ export class MoleculesDBSQLite {
    * @param entryId - Primary key of the entry.
    * @param mw - The weight the index is clustered by.
    * @param packed - The eight 64-bit fingerprint words.
-   * @param values - The carried columns' values, in declaration order.
+   * @param values - The bit count, then the carried columns' values in
+   *   declaration order.
    */
   #insertIndexRow(
     entryId: number,
@@ -543,7 +503,7 @@ export class MoleculesDBSQLite {
     values: Array<number | null>,
   ): void {
     this.#insertStatements.row ??= this.#db.prepare(
-      buildInsertSql([...this.#cfg.columns.keys()]),
+      buildInsertSql([BITS_COLUMN, ...this.#cfg.columns.keys()]),
     );
     this.#insertStatements.row.run(mw, entryId, ...packed, ...values);
   }
@@ -732,18 +692,23 @@ export class MoleculesDBSQLite {
           `sim|${queryIdCode}|${similarityThreshold}|${key}`,
           () =>
             Promise.resolve(
-              this.#scanSimilarityFull(
-                mol,
-                similarityThreshold,
+              scanSimilarity({
+                db: this.#db,
+                ocl: this.#ocl,
+                entriesTable,
+                pkColumn,
+                idCodeColumn,
+                queryIndex: mol.getIndex(),
+                threshold: similarityThreshold,
                 timeoutMs,
-                restrictEntries(
+                restriction: restrictEntries(
                   pkColumn,
                   false,
                   candidates,
                   mwRange,
                   columnBounds,
                 ),
-              ),
+              }),
             ),
         );
         return {
@@ -1047,102 +1012,6 @@ export class MoleculesDBSQLite {
       timedOut: state.timedOut === true,
       ...(resume === undefined ? {} : { resume }),
     };
-  }
-
-  // Run a full similarity scan (no pagination): Tanimoto over every indexed row.
-  //
-  // The coefficient is computed inside SQLite and the threshold tested there,
-  // so only the entries that reach it are handed to JavaScript: handing every
-  // row over — ten columns, eight of them BigInts — was most of the scan's cost.
-  // The guard stops a step that reads without yielding at the deadline.
-  #scanSimilarityFull(
-    mol: OCLMolecule,
-    similarityThreshold: number,
-    timeoutMs: number,
-    restriction: EntryRestriction,
-  ): CachedScan {
-    const start = Date.now();
-    const queryIndex = mol.getIndex();
-    const deadline = Date.now() + timeoutMs;
-    if (!installTanimoto(this.#db)) {
-      return this.#scanSimilarityInJs(
-        queryIndex,
-        similarityThreshold,
-        deadline,
-        restriction,
-      );
-    }
-    const guarded = installScanDeadline(this.#db);
-    return withTanimotoQuery(queryIndex, (key) => {
-      const stmt = this.#db.prepare(
-        `SELECT ${this.#selectCols}, ${tanimotoSql('s')} AS similarity FROM ${this.#cfg.entriesTable} e ${this.#ssJoin} ${restriction.join} WHERE ${guarded ? scanDeadlineGuard('s.entry_id') : '1'}${restriction.where} AND similarity >= ?`,
-      );
-      const params = [
-        ...restriction.named,
-        key,
-        ...(guarded ? [deadline] : []),
-        ...restriction.values,
-        similarityThreshold,
-      ];
-      const withSim: Array<SearchResult & { similarity: number }> = [];
-      let timedOut = false;
-      try {
-        const rows = (stmt.iterate?.(...params) ??
-          stmt.all(...params)) as Iterable<Record<string, unknown>>;
-        for (const row of rows) {
-          withSim.push({
-            ...rowToResult(row),
-            similarity: row.similarity as number,
-          });
-          if (withSim.length % 500 === 0 && Date.now() > deadline) {
-            timedOut = true;
-            break;
-          }
-        }
-      } catch (error: unknown) {
-        if (!isScanDeadline(error)) throw error;
-        timedOut = true;
-      }
-      return similarityScan(withSim, timedOut, start);
-    });
-  }
-
-  // The same scan for a driver that cannot register a function: every row is
-  // read and its coefficient computed here.
-  #scanSimilarityInJs(
-    queryIndex: number[],
-    similarityThreshold: number,
-    deadline: number,
-    restriction: EntryRestriction,
-  ): CachedScan {
-    const { SSSearcherWithIndex } = this.#ocl;
-    const start = Date.now();
-    const stmt = this.#db.prepare(
-      `SELECT ${this.#selectCols}, ${this.#ssIndexCols} FROM ${this.#cfg.entriesTable} e ${this.#ssJoin} ${restriction.join} WHERE 1${restriction.where}`,
-    );
-    stmt.setReadBigInts?.(true);
-    const params = [...restriction.named, ...restriction.values];
-    const rows = (stmt.iterate?.(...params) ?? stmt.all(...params)) as Iterable<
-      Record<string, unknown>
-    >;
-    const withSim: Array<SearchResult & { similarity: number }> = [];
-    let timedOut = false;
-    let screened = 0;
-    for (const row of rows) {
-      screened++;
-      const sim = SSSearcherWithIndex.getSimilarityTanimoto(
-        queryIndex,
-        unpackSSIndex(row),
-      );
-      if (sim >= similarityThreshold) {
-        withSim.push({ ...rowToResult(row), similarity: sim });
-      }
-      if (screened % 500 === 0 && Date.now() > deadline) {
-        timedOut = true;
-        break;
-      }
-    }
-    return similarityScan(withSim, timedOut, start);
   }
 
   // Lazily create the verifier pool. The pool module (and node:worker_threads) is
