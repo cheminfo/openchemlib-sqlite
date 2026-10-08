@@ -1,6 +1,6 @@
-<svg xmlns="http://www.w3.org/2000/svg" width="1272" height="950" viewBox="0 0 1272 950" font-family="ui-sans-serif, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif">
+<svg xmlns="http://www.w3.org/2000/svg" width="1272" height="978" viewBox="0 0 1272 978" font-family="ui-sans-serif, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif">
   <title>openchemlib-sqlite — the tables migrate() adds</title>
-  <desc>Schema version 6: the fingerprint index with its bit counts and carried columns, the two structure-hash tables, the plane index with its watermark, and the bookkeeping tables, alongside the entries table the caller owns.</desc>
+  <desc>Schema version 6: the fingerprint index with its bit counts and carried columns, the two structure-hash tables, the plane index with its watermark, the triggers keeping the watermark and the bit counts honest, and the bookkeeping tables, alongside the entries table the caller owns.</desc>
 
   <defs>
     <style>
@@ -26,7 +26,7 @@
     </marker>
   </defs>
 
-  <rect width="1272" height="950" fill="#ffffff"/>
+  <rect width="1272" height="978" fill="#ffffff"/>
 
   <text x="32" y="42" class="h">openchemlib-sqlite — the tables <tspan class="mono">migrate()</tspan> adds</text>
   <text x="32" y="64" class="sub">Schema version 6. Every <tspan class="mono">entry_id</tspan> refers to your entries table; the plane index stays empty until <tspan class="mono">foldPlanes()</tspan> runs.</text>
@@ -65,7 +65,7 @@
 
   <!-- ============ carried columns ============ -->
   <g>
-    <rect x="32" y="424" width="250" height="160" rx="10" fill="#ffffff" stroke="#5b6875" stroke-width="1.5"/>
+    <rect x="32" y="424" width="250" height="176" rx="10" fill="#ffffff" stroke="#5b6875" stroke-width="1.5"/>
     <rect x="32" y="424" width="250" height="34" rx="10" fill="#5b6875"/>
     <rect x="32" y="448" width="250" height="10" fill="#5b6875"/>
     <text x="48" y="446" class="tbl" style="fill:#ffffff">ocl_ss_columns</text>
@@ -82,30 +82,31 @@
     <text x="266" y="538" class="type" text-anchor="end">INT NOT NULL</text>
 
     <line x1="48" y1="550" x2="266" y2="550" stroke="#dfe3e8"/>
-    <text x="48" y="568" class="note">NULL <tspan class="mono">fill_to</tspan>: every entry has a value.</text>
+    <text x="48" y="568" class="note">Records <tspan class="mono">ss_bits</tspan> and each <tspan class="mono">col_<tspan font-style="italic">name</tspan></tspan>.</text>
+    <text x="48" y="584" class="note">NULL <tspan class="mono">fill_to</tspan>: every entry has a value.</text>
   </g>
 
   <!-- ============ the three states of a hash row ============ -->
   <g>
-    <rect x="32" y="600" width="250" height="180" rx="10" fill="#fdf8f1" stroke="#e8d5b8"/>
-    <text x="48" y="624" class="sub" font-weight="700" style="fill:#8a5a12">What a hash row means</text>
+    <rect x="32" y="616" width="250" height="180" rx="10" fill="#fdf8f1" stroke="#e8d5b8"/>
+    <text x="48" y="640" class="sub" font-weight="700" style="fill:#8a5a12">What a hash row means</text>
 
-    <circle cx="54" cy="648" r="4" fill="#b45309"/>
-    <text x="68" y="652" class="note" font-weight="700">row present, hash set</text>
-    <text x="68" y="668" class="note">the hash</text>
+    <circle cx="54" cy="664" r="4" fill="#b45309"/>
+    <text x="68" y="668" class="note" font-weight="700">row present, hash set</text>
+    <text x="68" y="684" class="note">the hash</text>
 
-    <circle cx="54" cy="692" r="4" fill="#b45309"/>
-    <text x="68" y="696" class="note" font-weight="700">row present, hash NULL</text>
-    <text x="68" y="712" class="note">gave up — past the cap, or OCL</text>
-    <text x="68" y="726" class="note">could not hash it. Never retried.</text>
+    <circle cx="54" cy="708" r="4" fill="#b45309"/>
+    <text x="68" y="712" class="note" font-weight="700">row present, hash NULL</text>
+    <text x="68" y="728" class="note">gave up — past the cap, or OCL</text>
+    <text x="68" y="742" class="note">could not hash it. Never retried.</text>
 
-    <circle cx="54" cy="750" r="4" fill="#c3cad3"/>
-    <text x="68" y="754" class="note" font-weight="700">no row at all</text>
-    <text x="68" y="770" class="note">not hashed yet — the resume point</text>
+    <circle cx="54" cy="766" r="4" fill="#c3cad3"/>
+    <text x="68" y="770" class="note" font-weight="700">no row at all</text>
+    <text x="68" y="786" class="note">not hashed yet — the resume point</text>
   </g>
-  <text x="32" y="806" class="note">Presence, not value, marks an entry done,</text>
-  <text x="32" y="822" class="note">which is what makes <tspan class="mono">backfillHashes()</tspan></text>
-  <text x="32" y="838" class="note">resumable.</text>
+  <text x="32" y="822" class="note">Presence, not value, marks an entry done,</text>
+  <text x="32" y="838" class="note">which is what makes <tspan class="mono">backfillHashes()</tspan></text>
+  <text x="32" y="854" class="note">resumable.</text>
 
   <!-- ============ ocl_ss_index ============ -->
   <g>
@@ -150,7 +151,7 @@
 
   <!-- ============ watermark triggers ============ -->
   <g>
-    <rect x="340" y="438" width="300" height="148" rx="10" fill="#fdf2f7" stroke="#9d174d" stroke-width="1.2" stroke-dasharray="5 3"/>
+    <rect x="340" y="438" width="300" height="216" rx="10" fill="#fdf2f7" stroke="#9d174d" stroke-width="1.2" stroke-dasharray="5 3"/>
     <text x="356" y="460" class="sub" font-weight="700" style="fill:#9d174d">Triggers on ocl_ss_index</text>
     <text x="356" y="482" class="lbl" style="fill:#16202c">ocl_ss_watermark_insert</text>
     <text x="624" y="482" class="lbl" text-anchor="end">AFTER INSERT</text>
@@ -162,47 +163,52 @@
     <text x="624" y="536" class="lbl" text-anchor="end">AFTER DELETE</text>
     <text x="356" y="558" class="note">A write at or below the bound lowers the watermark;</text>
     <text x="356" y="574" class="note">update and delete also drop the entry's slot.</text>
+    <line x1="356" y1="586" x2="624" y2="586" stroke="#f0c6da"/>
+    <text x="356" y="604" class="lbl" style="fill:#16202c">ocl_ss_bits_stale</text>
+    <text x="624" y="604" class="lbl" text-anchor="end">AFTER UPDATE</text>
+    <text x="356" y="624" class="note">A fingerprint changed in place without its count</text>
+    <text x="356" y="640" class="note">sets <tspan class="mono">ss_bits</tspan> back to NULL.</text>
   </g>
 
   <!-- ============ the two hash tables ============ -->
   <g>
-    <rect x="340" y="610" width="300" height="112" rx="10" fill="#ffffff" stroke="#1c6e42" stroke-width="1.5"/>
-    <rect x="340" y="610" width="300" height="34" rx="10" fill="#1c6e42"/>
-    <rect x="340" y="634" width="300" height="10" fill="#1c6e42"/>
-    <text x="356" y="632" class="tbl" style="fill:#ffffff">ocl_no_stereo_hash</text>
+    <rect x="340" y="670" width="300" height="112" rx="10" fill="#ffffff" stroke="#1c6e42" stroke-width="1.5"/>
+    <rect x="340" y="670" width="300" height="34" rx="10" fill="#1c6e42"/>
+    <rect x="340" y="694" width="300" height="10" fill="#1c6e42"/>
+    <text x="356" y="692" class="tbl" style="fill:#ffffff">ocl_no_stereo_hash</text>
 
-    <rect x="356" y="656" width="22" height="13" rx="3" fill="#1c6e42"/>
-    <text x="367" y="666" class="key" text-anchor="middle">PK</text>
-    <rect x="382" y="656" width="22" height="13" rx="3" fill="#8a96a3"/>
-    <text x="393" y="666" class="key" text-anchor="middle">FK</text>
-    <text x="412" y="666" class="col">entry_id</text>
-    <text x="624" y="666" class="type" text-anchor="end">INTEGER</text>
+    <rect x="356" y="716" width="22" height="13" rx="3" fill="#1c6e42"/>
+    <text x="367" y="726" class="key" text-anchor="middle">PK</text>
+    <rect x="382" y="716" width="22" height="13" rx="3" fill="#8a96a3"/>
+    <text x="393" y="726" class="key" text-anchor="middle">FK</text>
+    <text x="412" y="726" class="col">entry_id</text>
+    <text x="624" y="726" class="type" text-anchor="end">INTEGER</text>
 
-    <text x="386" y="690" class="col">hash</text>
-    <text x="624" y="690" class="type" text-anchor="end">INTEGER  NULL</text>
+    <text x="386" y="750" class="col">hash</text>
+    <text x="624" y="750" class="type" text-anchor="end">INTEGER  NULL</text>
 
-    <line x1="356" y1="702" x2="624" y2="702" stroke="#dfe3e8"/>
-    <text x="356" y="711" class="note" font-size="10.5"><tspan font-weight="700" fill="#1c6e42">pass 1</tspan> · ~74 µs a molecule · partial index on hash</text>
+    <line x1="356" y1="762" x2="624" y2="762" stroke="#dfe3e8"/>
+    <text x="356" y="771" class="note" font-size="10.5"><tspan font-weight="700" fill="#1c6e42">pass 1</tspan> · ~74 µs a molecule · partial index on hash</text>
   </g>
 
   <g>
-    <rect x="340" y="738" width="300" height="112" rx="10" fill="#ffffff" stroke="#b45309" stroke-width="1.5"/>
-    <rect x="340" y="738" width="300" height="34" rx="10" fill="#b45309"/>
-    <rect x="340" y="762" width="300" height="10" fill="#b45309"/>
-    <text x="356" y="760" class="tbl" style="fill:#ffffff">ocl_no_stereo_tautomer_hash</text>
+    <rect x="340" y="798" width="300" height="112" rx="10" fill="#ffffff" stroke="#b45309" stroke-width="1.5"/>
+    <rect x="340" y="798" width="300" height="34" rx="10" fill="#b45309"/>
+    <rect x="340" y="822" width="300" height="10" fill="#b45309"/>
+    <text x="356" y="820" class="tbl" style="fill:#ffffff">ocl_no_stereo_tautomer_hash</text>
 
-    <rect x="356" y="784" width="22" height="13" rx="3" fill="#b45309"/>
-    <text x="367" y="794" class="key" text-anchor="middle">PK</text>
-    <rect x="382" y="784" width="22" height="13" rx="3" fill="#8a96a3"/>
-    <text x="393" y="794" class="key" text-anchor="middle">FK</text>
-    <text x="412" y="794" class="col">entry_id</text>
-    <text x="624" y="794" class="type" text-anchor="end">INTEGER</text>
+    <rect x="356" y="844" width="22" height="13" rx="3" fill="#b45309"/>
+    <text x="367" y="854" class="key" text-anchor="middle">PK</text>
+    <rect x="382" y="844" width="22" height="13" rx="3" fill="#8a96a3"/>
+    <text x="393" y="854" class="key" text-anchor="middle">FK</text>
+    <text x="412" y="854" class="col">entry_id</text>
+    <text x="624" y="854" class="type" text-anchor="end">INTEGER</text>
 
-    <text x="386" y="818" class="col">hash</text>
-    <text x="624" y="818" class="type" text-anchor="end">INTEGER  NULL</text>
+    <text x="386" y="878" class="col">hash</text>
+    <text x="624" y="878" class="type" text-anchor="end">INTEGER  NULL</text>
 
-    <line x1="356" y1="830" x2="624" y2="830" stroke="#dfe3e8"/>
-    <text x="356" y="839" class="note" font-size="10.5"><tspan font-weight="700" fill="#b45309">pass 2</tspan> · ~22 ms a molecule · partial index on hash</text>
+    <line x1="356" y1="890" x2="624" y2="890" stroke="#dfe3e8"/>
+    <text x="356" y="899" class="note" font-size="10.5"><tspan font-weight="700" fill="#b45309">pass 2</tspan> · ~22 ms a molecule · partial index on hash</text>
   </g>
 
   <!-- ============ plane index group ============ -->
@@ -375,33 +381,35 @@
 
   <!-- ============ edges ============ -->
   <!-- FK: every entry_id references the entries table -->
-  <path d="M282 152 H 300 Q 312 152 312 164 V 782 Q 312 790 322 790 H 340" fill="none" stroke="#8a96a3" stroke-width="1.5" marker-end="url(#fk)"/>
+  <path d="M282 152 H 300 Q 312 152 312 164 V 842 Q 312 850 322 850 H 340" fill="none" stroke="#8a96a3" stroke-width="1.5" marker-end="url(#fk)"/>
   <path d="M312 176 H 340" fill="none" stroke="#8a96a3" stroke-width="1.5" marker-end="url(#fk)"/>
-  <path d="M312 662 H 340" fill="none" stroke="#8a96a3" stroke-width="1.5" marker-end="url(#fk)"/>
+  <path d="M312 722 H 340" fill="none" stroke="#8a96a3" stroke-width="1.5" marker-end="url(#fk)"/>
   <text x="296" y="144" class="lbl">FK</text>
 
   <!-- foldPlanes(): ocl_ss_index into the plane index -->
   <path d="M640 150 H 692" fill="none" stroke="#1e3a8a" stroke-width="1.5" marker-end="url(#fold)"/>
   <text x="644" y="143" class="lbl" style="fill:#1e3a8a">fold</text>
 
-  <!-- triggers move the watermark -->
+  <!-- triggers move the watermark, drop slots, and forget stale bit counts -->
   <path d="M640 482 C 668 482, 664 394, 692 394" fill="none" stroke="#9d174d" stroke-width="1.5" stroke-dasharray="5 3" marker-end="url(#trig)"/>
+  <path d="M640 466 C 670 466, 662 214, 692 214" fill="none" stroke="#9d174d" stroke-width="1.5" stroke-dasharray="5 3" marker-end="url(#trig)"/>
+  <path d="M340 600 H 330 Q 324 600 324 594 V 248 Q 324 242 330 242 H 340" fill="none" stroke="#9d174d" stroke-width="1.5" stroke-dasharray="5 3" marker-end="url(#trig)"/>
 
   <!-- ============ legend ============ -->
   <g>
-    <line x1="32" y1="906" x2="1240" y2="906" stroke="#dfe3e8"/>
-    <rect x="32" y="922" width="22" height="13" rx="3" fill="#5b6875"/>
-    <text x="43" y="932" class="key" text-anchor="middle">PK</text>
-    <text x="62" y="932" class="note">primary key</text>
+    <line x1="32" y1="934" x2="1240" y2="934" stroke="#dfe3e8"/>
+    <rect x="32" y="950" width="22" height="13" rx="3" fill="#5b6875"/>
+    <text x="43" y="960" class="key" text-anchor="middle">PK</text>
+    <text x="62" y="960" class="note">primary key</text>
 
-    <rect x="150" y="922" width="22" height="13" rx="3" fill="#8a96a3"/>
-    <text x="161" y="932" class="key" text-anchor="middle">FK</text>
-    <text x="180" y="932" class="note">references your entries table's primary key (dropped when it lives in another file)</text>
+    <rect x="150" y="950" width="22" height="13" rx="3" fill="#8a96a3"/>
+    <text x="161" y="960" class="key" text-anchor="middle">FK</text>
+    <text x="180" y="960" class="note">references your entries table's primary key (dropped when it lives in another file)</text>
 
-    <line x1="668" y1="928" x2="700" y2="928" stroke="#1e3a8a" stroke-width="1.5" marker-end="url(#fold)"/>
-    <text x="708" y="932" class="note">written by <tspan class="mono">foldPlanes()</tspan></text>
+    <line x1="668" y1="956" x2="700" y2="956" stroke="#1e3a8a" stroke-width="1.5" marker-end="url(#fold)"/>
+    <text x="708" y="960" class="note">written by <tspan class="mono">foldPlanes()</tspan></text>
 
-    <line x1="860" y1="928" x2="892" y2="928" stroke="#9d174d" stroke-width="1.5" stroke-dasharray="5 3" marker-end="url(#trig)"/>
-    <text x="900" y="932" class="note">written by the triggers</text>
+    <line x1="860" y1="956" x2="892" y2="956" stroke="#9d174d" stroke-width="1.5" stroke-dasharray="5 3" marker-end="url(#trig)"/>
+    <text x="900" y="960" class="note">written by the triggers</text>
   </g>
 </svg>
