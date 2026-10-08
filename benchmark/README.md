@@ -395,6 +395,31 @@ The first 1 M molecules of PubChem, warm, node 26.7, 30+ samples each:
 | flavone   | 0.8       | 18.1%          | 1 814 ns/row | 374 ns/row   | 359 ns/row           |
 | flavone   | 0.6       | 41.0%          | 2 046 ns/row | 663 ns/row   | 649 ns/row           |
 
+## A similarity scan reading the entries for its matches only: `similarityEntries.mjs`
+
+```sh
+node benchmark/similarityEntries.mjs index.sqlite molecules.sqlite
+```
+
+Joined to an entries table of ~400 bytes a row, a similarity scan reads every
+row of both: SQLite scans the entries and looks each one up in
+`idx_ocl_ss_entry`. The script times in one process, with the library's own
+coefficient function, guard and bit-count window: A, the scan joined to the
+entries; B, the index scanned alone in its stored order, then the entries of
+the matches read by primary key, best first. Both return the same entries with
+the same coefficients and idCodes. The entries file is attached as `mol`; the
+defaults read `mol.listed_molecules`, as molecules.cheminfo.org does.
+
+The first 1 M molecules of PubChem, its index carrying eight columns, warm,
+node 26.7, 30+ samples each, threshold 0.8:
+
+| query              | entries joined | index alone, entries of the matches | matches |
+| ------------------ | -------------- | ----------------------------------- | ------- |
+| quercetin          | 2 412 ns/row   | 521 ns/row                          | 450     |
+| flavone            | 2 284 ns/row   | 406 ns/row                          | 276     |
+| quercetin, rot ≤ 4 | 2 268 ns/row   | 386 ns/row                          | 312     |
+| flavone, rot ≤ 4   | 2 183 ns/row   | 312 ns/row                          | 252     |
+
 ## The prefilter sample on a cold index: `coldSample.mjs`
 
 ```sh
