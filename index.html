@@ -110,6 +110,10 @@ at all. Measured over real idcodes: <strong>1350 µs an entry building the finge
 88 µs writing one already in hand</strong> — at 150 million entries, 56 hours against
 under four. <code>index</code> is the 512-bit FragFp in whichever width you hold it, 16
 words of 32 bits or 8 of 64.</p>
+<p>The statement it writes with is prepared once per instance: preparing it for
+every insert was most of what writing a precomputed entry cost, 14.9 µs an
+entry against 3.7 µs once prepared
+(<a href="media/insertPrecomputed.mjs">benchmark/insertPrecomputed.mjs</a>).</p>
 <p>A <code>mw</code> must be the value <code>mwColumn</code> holds when one is configured, or the index's
 clustered order stops matching what a bulk path would have written.</p>
 <h2 id="keeping-the-index-in-its-own-database" class="tsd-anchor-link">Keeping the index in its own database<a href="#keeping-the-index-in-its-own-database" aria-label="Permalink" class="tsd-anchor-icon"><svg viewBox="0 0 24 24" aria-hidden="true"><use href="assets/icons.svg#icon-anchor"></use></svg></a></h2>
@@ -130,7 +134,8 @@ the same queries and the same migrations run against a database built either way
 What is lost is SQLite refusing to index an entry that does not exist, and
 refusing to delete an entry that is still indexed.</p>
 <h2 id="searching" class="tsd-anchor-link">Searching<a href="#searching" aria-label="Permalink" class="tsd-anchor-icon"><svg viewBox="0 0 24 24" aria-hidden="true"><use href="assets/icons.svg#icon-anchor"></use></svg></a></h2>
-<p>All search modes return a <code>SearchResponse</code> with <code>results</code>, <code>total</code>, and optional <code>partial</code> / <code>screened</code> fields.
+<p>All search modes return a <code>SearchResponse</code> with <code>results</code>, <code>total</code>, and optional <code>partial</code> / <code>screened</code> fields;
+the scans add <code>timedOut</code>, and a substructure scan stopped early adds <code>resume</code> (see <a href="#pagination">Pagination</a>).
 Each result contains <code>{ entryId, idCode }</code> — use <code>entryId</code> to look up additional data in your own table.</p>
 <p>The query can be a string (parsed with <code>options.format</code>) or a <code>Molecule</code> instance (format option is ignored).
 The library sets the fragment flag automatically: <code>false</code> for <code>exact</code> / <code>exactNoStereo</code> / <code>similarity</code>,
@@ -159,7 +164,62 @@ and is never returned by this mode. So is a query OCL cannot hash.</p>
 <pre><code class="js"><span class="hl-5">const</span><span class="hl-1"> { </span><span class="hl-6">results</span><span class="hl-1">, </span><span class="hl-6">screened</span><span class="hl-1">, </span><span class="hl-6">partial</span><span class="hl-1"> } = </span><span class="hl-4">molDB</span><span class="hl-1">.</span><span class="hl-0">search</span><span class="hl-1">(</span><span class="hl-2">&#39;c1ccccc1&#39;</span><span class="hl-1">, {</span><br/><span class="hl-1">  </span><span class="hl-4">mode:</span><span class="hl-1"> </span><span class="hl-2">&#39;substructure&#39;</span><span class="hl-1">,</span><br/><span class="hl-1">  </span><span class="hl-4">format:</span><span class="hl-1"> </span><span class="hl-2">&#39;smiles&#39;</span><span class="hl-1">,</span><br/><span class="hl-1">  </span><span class="hl-4">timeoutMs:</span><span class="hl-1"> </span><span class="hl-8">10000</span><span class="hl-1">,</span><br/><span class="hl-1">});</span>
 </code><button type="button">Copy</button></pre>
 
-<p>A 512-bit fingerprint prefilter (bitwise AND) discards non-candidates before running the full OCL substructure check.</p>
+<p>A 512-bit fingerprint prefilter (bitwise AND) discards non-candidates before running the full OCL substructure check.
+Only the 64-bit words the query sets bits in are tested, and a scan still
+running after 30 ms, with 16 384 rows read, measures them on 2 048 rows sampled
+across what it has left to read and tests the most selective first, so most
+rows are rejected after one column read. The sample has 20 ms: on a cold index
+its random reads would cost a short scan a second, so it is given up there and
+tried again later.</p>
+<p>On the first 10 M molecules of PubChem, a scan of the whole index costs, per
+row read (<a href="media/prefilterGuard.mjs">benchmark/prefilterGuard.mjs</a>):</p>
+<table>
+<thead>
+<tr>
+<th>fragment</th>
+<th>every word, guard first</th>
+<th>measured order, guard after it</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>benzene</td>
+<td>331.0 ns</td>
+<td>151.9 ns</td>
+</tr>
+<tr>
+<td>quercetin</td>
+<td>133.1 ns</td>
+<td>110.8 ns</td>
+</tr>
+<tr>
+<td>dibenzoselenophene</td>
+<td>184.7 ns</td>
+<td>110.4 ns</td>
+</tr>
+<tr>
+<td>steroid</td>
+<td>151.4 ns</td>
+<td>109.2 ns</td>
+</tr>
+</tbody>
+</table>
+<p>and the guard still stops a scan within 1–4 ms of its deadline.</p>
+<p><strong><code>timeoutMs</code> is enforced from inside SQLite.</strong> A scan whose rows all fail the
+prefilter or the candidates test yields nothing, so the loop that reads the clock
+between rows never runs. On a driver that can register a SQL function, the library
+registers <code>ocl_ss_deadline</code> on the connection and puts it among the scan's
+conditions, so the statement itself stops at the deadline. It sits first until
+the scan has measured its rows, then right after the most selective word, where
+it sees only the rows that word lets through and reads the clock on a
+correspondingly larger share of them — about once per 1 024 rows read either
+way — instead of costing every row a column read. A <code>membership</code> subquery is
+guarded on the rows it lists, so listing a large one stops on time too, as long
+as it keeps producing rows; one that reads many rows to produce few cannot be
+interrupted before it ends, because <code>node:sqlite</code> offers no progress handler.
+<code>timedOut: true</code> then says the clock stopped the scan; <code>maxResults</code> and
+<code>maxCandidates</code> set only <code>partial</code>. Without <code>function()</code> the clock is read
+between rows, as before.</p>
 <p><strong>Empty query optimization</strong> — passing a molecule with no atoms (e.g. <code>new OCL.Molecule(0, 0)</code>) skips the fingerprint prefilter entirely and returns every indexed entry, because an empty fragment matches everything.</p>
 <h3 id="substructure-search-sorted-by-mass-difference" class="tsd-anchor-link">Substructure search sorted by mass difference<a href="#substructure-search-sorted-by-mass-difference" aria-label="Permalink" class="tsd-anchor-icon"><svg viewBox="0 0 24 24" aria-hidden="true"><use href="assets/icons.svg#icon-anchor"></use></svg></a></h3>
 <p>When <code>mwColumn</code> is configured, substructure results are <strong>automatically</strong> ranked by ascending <code>|queryMw − resultMw|</code>. A molecule whose mass equals the query mass (an exact structural match) therefore appears first, with no extra option required:</p>
@@ -168,11 +228,53 @@ and is never returned by this mode. So is a query OCL cannot hash.</p>
 
 <p>The molecular weight of the query is computed with <code>fragment = false</code> on a temporary copy so the original <code>Molecule</code> instance is never mutated.</p>
 <h3 id="similarity-search-tanimoto" class="tsd-anchor-link">Similarity search (Tanimoto)<a href="#similarity-search-tanimoto" aria-label="Permalink" class="tsd-anchor-icon"><svg viewBox="0 0 24 24" aria-hidden="true"><use href="assets/icons.svg#icon-anchor"></use></svg></a></h3>
-<pre><code class="js"><span class="hl-5">const</span><span class="hl-1"> { </span><span class="hl-6">results</span><span class="hl-1"> } = </span><span class="hl-4">molDB</span><span class="hl-1">.</span><span class="hl-0">search</span><span class="hl-1">(</span><span class="hl-2">&#39;Cn1c(=O)c2c(ncn2C)n(C)c1=O&#39;</span><span class="hl-1">, {</span><br/><span class="hl-1">  </span><span class="hl-4">mode:</span><span class="hl-1"> </span><span class="hl-2">&#39;similarity&#39;</span><span class="hl-1">,</span><br/><span class="hl-1">  </span><span class="hl-4">format:</span><span class="hl-1"> </span><span class="hl-2">&#39;smiles&#39;</span><span class="hl-1">,</span><br/><span class="hl-1">  </span><span class="hl-4">similarityThreshold:</span><span class="hl-1"> </span><span class="hl-8">0.4</span><span class="hl-1">,</span><br/><span class="hl-1">});</span><br/><span class="hl-7">// results sorted by descending similarity; each entry has a .similarity field</span>
+<pre><code class="js"><span class="hl-5">const</span><span class="hl-1"> { </span><span class="hl-6">results</span><span class="hl-1"> } = </span><span class="hl-4">molDB</span><span class="hl-1">.</span><span class="hl-0">search</span><span class="hl-1">(</span><span class="hl-2">&#39;Cn1c(=O)c2c(ncn2C)n(C)c1=O&#39;</span><span class="hl-1">, {</span><br/><span class="hl-1">  </span><span class="hl-4">mode:</span><span class="hl-1"> </span><span class="hl-2">&#39;similarity&#39;</span><span class="hl-1">,</span><br/><span class="hl-1">  </span><span class="hl-4">format:</span><span class="hl-1"> </span><span class="hl-2">&#39;smiles&#39;</span><span class="hl-1">,</span><br/><span class="hl-1">  </span><span class="hl-4">similarityThreshold:</span><span class="hl-1"> </span><span class="hl-8">0.4</span><span class="hl-1">,</span><br/><span class="hl-1">});</span><br/><span class="hl-7">// results sorted by descending similarity, then by entry id; each entry has a .similarity field</span>
 </code><button type="button">Copy</button></pre>
 
+<p>A similarity search reads every entry, so the coefficient is computed inside
+SQLite, by a function the library registers on the connection, and the
+threshold is tested there: only the entries that reach it are handed to
+JavaScript. Over 891 901 natural products at a threshold of 0.8, a scan takes
+484 ms instead of 3 502 ms (543 against 3 926 ns an entry, flavone) and 401 ms
+instead of 3 250 ms (quercetin) —
+<a href="media/similarityScan.mjs">benchmark/similarityScan.mjs</a>. A driver that
+cannot register a function falls back to reading every row.</p>
+<p>Every row also stores how many bits its fingerprint sets, <code>ss_bits</code>. The
+coefficient is the bits both set over the bits either sets, so it never exceeds
+the ratio of the two counts, and reaching a threshold <code>t</code> needs
+<code>t·|q| ≤ |r| ≤ |q|/t</code>: a row outside that window is rejected by one comparison
+before its coefficient is computed. On the first 1 M molecules of PubChem, a scan at 0.8
+drops from 1 834 to 514 ns a row for quercetin and from 1 814 to 374 for
+flavone; at 0.6, where more rows are in the window, from 2 077 to 1 129 and from
+2 046 to 663 — <a href="media/similarityWindow.mjs">benchmark/similarityWindow.mjs</a>.
+A row whose count is not known is computed, so the answer never depends on it.</p>
+<p>The index is read on its own, in the order it is stored, and the entries table
+only for the rows that reach the threshold, by primary key and best first.
+Joined to the entries, SQLite read every row of both: it scanned the entries
+and looked each one up in the index. Over the first 1 M molecules of PubChem,
+read through <a href="http://molecules.cheminfo.org">molecules.cheminfo.org</a>'s <code>listed_molecules</code> view of ~400 bytes a
+row, quercetin at 0.8 drops from 2 470 to 500 ns a row and flavone from 2 323
+to 380 — <a href="media/similarityEntries.mjs">benchmark/similarityEntries.mjs</a>;
+on its first 10 M, a whole scan takes 4.4 s instead of 29 s. A scan stopped by
+its deadline keeps the most similar of the entries it reached. Candidates
+applied as <code>membership</code> or <code>drive</code> keep the join, which lets them lead.</p>
 <h3 id="pagination" class="tsd-anchor-link">Pagination<a href="#pagination" aria-label="Permalink" class="tsd-anchor-icon"><svg viewBox="0 0 24 24" aria-hidden="true"><use href="assets/icons.svg#icon-anchor"></use></svg></a></h3>
 <pre><code class="js"><span class="hl-5">const</span><span class="hl-1"> { </span><span class="hl-6">results</span><span class="hl-1">, </span><span class="hl-6">total</span><span class="hl-1"> } = </span><span class="hl-4">molDB</span><span class="hl-1">.</span><span class="hl-0">search</span><span class="hl-1">(</span><span class="hl-4">query</span><span class="hl-1">, {</span><br/><span class="hl-1">  </span><span class="hl-4">mode:</span><span class="hl-1"> </span><span class="hl-2">&#39;substructure&#39;</span><span class="hl-1">,</span><br/><span class="hl-1">  </span><span class="hl-4">format:</span><span class="hl-1"> </span><span class="hl-2">&#39;smiles&#39;</span><span class="hl-1">,</span><br/><span class="hl-1">  </span><span class="hl-4">limit:</span><span class="hl-1"> </span><span class="hl-8">50</span><span class="hl-1">,</span><br/><span class="hl-1">  </span><span class="hl-4">from:</span><span class="hl-1"> </span><span class="hl-8">0</span><span class="hl-1">,</span><br/><span class="hl-1">});</span>
+</code><button type="button">Copy</button></pre>
+
+<p>A substructure scan stopped by <code>maxResults</code> or by its time also says where it
+stopped. <code>resume</code> is the weight and entry id of the last match it kept — or of
+the last candidate it read, when its time ran out — and handing it back as
+<code>after</code> starts the next scan there, sought on the clustered key, so a deep page
+costs what the first one does. <code>resume</code> is absent once the scan has read every
+candidate, and <code>timedOut</code> says whether the clock stopped it.</p>
+<p>A scan bounded by <code>maxResults</code> that the <a href="#folding-the-plane-index">plane index</a>
+finished reads it in the same <code>(mw, entry_id)</code> order, so its <code>resume</code> is the same
+too. Only an unbounded scan the planes answer outright reads them in slot order;
+when its time runs out there is no position to give, <code>resume</code> is absent and
+<code>partial</code> says the answer is incomplete. A scan given <code>candidates</code> never takes
+the plane path.</p>
+<pre><code class="js"><span class="hl-5">let</span><span class="hl-1"> </span><span class="hl-4">after</span><span class="hl-1">;</span><br/><span class="hl-3">do</span><span class="hl-1"> {</span><br/><span class="hl-1">  </span><span class="hl-5">const</span><span class="hl-1"> </span><span class="hl-6">page</span><span class="hl-1"> = </span><span class="hl-3">await</span><span class="hl-1"> </span><span class="hl-4">molDB</span><span class="hl-1">.</span><span class="hl-0">search</span><span class="hl-1">(</span><span class="hl-2">&#39;c1ccccc1&#39;</span><span class="hl-1">, {</span><br/><span class="hl-1">    </span><span class="hl-4">mode:</span><span class="hl-1"> </span><span class="hl-2">&#39;substructure&#39;</span><span class="hl-1">,</span><br/><span class="hl-1">    </span><span class="hl-4">maxResults:</span><span class="hl-1"> </span><span class="hl-8">50</span><span class="hl-1">,</span><br/><span class="hl-1">    ...(</span><span class="hl-4">after</span><span class="hl-1"> === </span><span class="hl-5">undefined</span><span class="hl-1"> ? {} : { </span><span class="hl-4">after</span><span class="hl-1"> }),</span><br/><span class="hl-1">  });</span><br/><span class="hl-1">  </span><span class="hl-0">show</span><span class="hl-1">(</span><span class="hl-4">page</span><span class="hl-1">.</span><span class="hl-4">results</span><span class="hl-1">);</span><br/><span class="hl-1">  </span><span class="hl-4">after</span><span class="hl-1"> = </span><span class="hl-4">page</span><span class="hl-1">.</span><span class="hl-4">resume</span><span class="hl-1">;</span><br/><span class="hl-1">} </span><span class="hl-3">while</span><span class="hl-1"> (</span><span class="hl-4">after</span><span class="hl-1"> !== </span><span class="hl-5">undefined</span><span class="hl-1">);</span>
 </code><button type="button">Copy</button></pre>
 
 <h3 id="restricting-a-search-to-candidates" class="tsd-anchor-link">Restricting a search to candidates<a href="#restricting-a-search-to-candidates" aria-label="Permalink" class="tsd-anchor-icon"><svg viewBox="0 0 24 24" aria-hidden="true"><use href="assets/icons.svg#icon-anchor"></use></svg></a></h3>
@@ -190,9 +292,129 @@ is proportional and grows with the table size. Measured on 50 000 CCD ligands
 filter: <strong>199 ms → 50 ms</strong>.</p>
 <p><code>sql</code> must select exactly one column, named <code>entry_id</code>, and <code>params</code> must use
 <strong>named</strong> parameters (<code>:name</code>) since the prescreen binds its own anonymous ones.
-Every mode honours it (<code>substructure</code>, <code>similarity</code>, <code>exact</code>, <code>exactNoStereo</code>).
-Because the prescreen runs once per search, so does the subquery — however many
-verifier threads are running.</p>
+Every mode honours it (<code>substructure</code>, <code>similarity</code>, <code>exact</code>, <code>exactNoStereo</code>,
+<code>exactNoStereoTautomer</code>). It belongs to the single prescreen statement, so it is
+evaluated by one search however many verifier threads are running.</p>
+<h4 id="how-the-subquery-is-applied" class="tsd-anchor-link">How the subquery is applied: <code>strategy</code><a href="#how-the-subquery-is-applied" aria-label="Permalink" class="tsd-anchor-icon"><svg viewBox="0 0 24 24" aria-hidden="true"><use href="assets/icons.svg#icon-anchor"></use></svg></a></h4>
+<pre><code class="js"><span class="hl-9">candidates</span><span class="hl-1">: {</span><br/><span class="hl-1">  </span><span class="hl-9">sql</span><span class="hl-1">: </span><span class="hl-2">&#39;SELECT id AS entry_id FROM ligands WHERE band = :band&#39;</span><span class="hl-1">,</span><br/><span class="hl-1">  </span><span class="hl-9">params</span><span class="hl-1">: { </span><span class="hl-9">band</span><span class="hl-1">: </span><span class="hl-8">7</span><span class="hl-1"> },</span><br/><span class="hl-1">  </span><span class="hl-9">strategy</span><span class="hl-1">: </span><span class="hl-2">&#39;probe&#39;</span><span class="hl-1">, </span><span class="hl-7">// &#39;membership&#39; (default) | &#39;probe&#39; | &#39;drive&#39;</span><br/><span class="hl-1">},</span>
+</code><button type="button">Copy</button></pre>
+
+<table>
+<thead>
+<tr>
+<th><code>strategy</code></th>
+<th>what it does</th>
+<th>right when</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>membership</code> (default)</td>
+<td>runs the subquery once, holds its ids, tests each entry of the weight-ordered scan against them</td>
+<td>the subquery is modest and an index answers it</td>
+</tr>
+<tr>
+<td><code>probe</code></td>
+<td>looks each entry the prefilter keeps up in the subquery, as a correlated <code>EXISTS</code>; nothing is listed</td>
+<td>the subquery keeps a large share, or tests an unindexed column</td>
+</tr>
+<tr>
+<td><code>drive</code></td>
+<td>reads the subquery's entries first, each fingerprint through the <code>entry_id</code> index, then sorts by weight</td>
+<td>the subquery returns few rows</td>
+</tr>
+</tbody>
+</table>
+<p>A membership list costs the whole subquery before the first candidate is read; a
+probe costs the page, since the scan stops as soon as it has enough; drive costs
+the subquery's own rows, however large the index. Measured on 4 023 045 entries,
+benzene, a page of 24: <code>band = 7</code> (1%, no index) takes 107 ms as membership and
+11 ms as a probe; <code>tag = 7</code> (0.01%, indexed) takes 115 ms as membership and
+3.7 ms driven (<a href="media/README.md#filters-filteredscanmjs">benchmark/filteredScan.mjs</a>).
+A probe's subquery should be a plain SELECT — joins and WHERE — so SQLite can push
+the entry id into it.</p>
+<p>The exact modes read a handful of rows, so they always test the subquery per row,
+whatever the strategy. A similarity scan follows it: <code>probe</code> tests the entries
+that reach the threshold, the other two join the subquery.</p>
+<h4 id="bounding-the-weight" class="tsd-anchor-link">Bounding the weight: <code>mwRange</code><a href="#bounding-the-weight" aria-label="Permalink" class="tsd-anchor-icon"><svg viewBox="0 0 24 24" aria-hidden="true"><use href="assets/icons.svg#icon-anchor"></use></svg></a></h4>
+<pre><code class="js"><span class="hl-5">const</span><span class="hl-1"> { </span><span class="hl-6">results</span><span class="hl-1"> } = </span><span class="hl-3">await</span><span class="hl-1"> </span><span class="hl-4">molDB</span><span class="hl-1">.</span><span class="hl-0">search</span><span class="hl-1">(</span><span class="hl-2">&#39;c1ccccc1&#39;</span><span class="hl-1">, {</span><br/><span class="hl-1">  </span><span class="hl-4">mode:</span><span class="hl-1"> </span><span class="hl-2">&#39;substructure&#39;</span><span class="hl-1">,</span><br/><span class="hl-1">  </span><span class="hl-4">mwRange:</span><span class="hl-1"> { </span><span class="hl-4">min:</span><span class="hl-1"> </span><span class="hl-8">260</span><span class="hl-1">, </span><span class="hl-4">max:</span><span class="hl-1"> </span><span class="hl-8">500</span><span class="hl-1"> }, </span><span class="hl-7">// inclusive; either bound may be left out</span><br/><span class="hl-1">});</span>
+</code><button type="button">Copy</button></pre>
+
+<p>The index is clustered by weight, so a bound here is a <strong>seek</strong>: the scan starts
+at <code>min</code> and ends at <code>max</code> without reading what lies outside. The same bound
+written into <code>candidates</code> is tested entry by entry, or listed in full as
+membership: on the benchmark above, <code>mw &gt;= 260 AND band &lt; 80</code> takes 497 ms as a
+membership list and 3.6 ms as <code>mwRange: { min: 260 }</code> plus a <code>band &lt; 80</code> probe. The
+values are compared with the weight the index stores — the one <code>insert()</code>
+derived, or your <code>mwColumn</code> / precomputed <code>mw</code>. Every mode honours it; outside
+the substructure scan it is a test rather than a seek.</p>
+<h4 id="bounding-a-property-the-index-carries-and" class="tsd-anchor-link">Bounding a property the index carries: <code>columns</code> and <code>columnRanges</code><a href="#bounding-a-property-the-index-carries-and" aria-label="Permalink" class="tsd-anchor-icon"><svg viewBox="0 0 24 24" aria-hidden="true"><use href="assets/icons.svg#icon-anchor"></use></svg></a></h4>
+<p>A property the index does not hold is a subquery, probed per candidate in your
+tables. Declare the few properties you filter on most and the index carries
+them in every row, so a bound on one is a comparison on the row the scan is
+already reading:</p>
+<pre><code class="js"><span class="hl-5">const</span><span class="hl-1"> </span><span class="hl-6">molDB</span><span class="hl-1"> = </span><span class="hl-5">new</span><span class="hl-1"> </span><span class="hl-0">MoleculesDBSQLite</span><span class="hl-1">(</span><span class="hl-4">db</span><span class="hl-1">, </span><span class="hl-6">OCL</span><span class="hl-1">, {</span><br/><span class="hl-1">  </span><span class="hl-4">entriesTable:</span><span class="hl-1"> </span><span class="hl-2">&#39;molecules&#39;</span><span class="hl-1">,</span><br/><span class="hl-1">  </span><span class="hl-4">columns:</span><span class="hl-1"> { </span><span class="hl-4">rotatableBondCount:</span><span class="hl-1"> </span><span class="hl-2">&#39;integer&#39;</span><span class="hl-1">, </span><span class="hl-4">logP:</span><span class="hl-1"> </span><span class="hl-2">&#39;real&#39;</span><span class="hl-1"> },</span><br/><span class="hl-1">});</span><br/><span class="hl-4">molDB</span><span class="hl-1">.</span><span class="hl-0">migrate</span><span class="hl-1">();</span><br/><br/><span class="hl-4">molDB</span><span class="hl-1">.</span><span class="hl-0">insert</span><span class="hl-1">(</span><span class="hl-4">id</span><span class="hl-1">, </span><span class="hl-4">idCode</span><span class="hl-1">, {</span><br/><span class="hl-1">  </span><span class="hl-4">index</span><span class="hl-1">,</span><br/><span class="hl-1">  </span><span class="hl-4">mw</span><span class="hl-1">,</span><br/><span class="hl-1">  </span><span class="hl-4">columns:</span><span class="hl-1"> { </span><span class="hl-4">rotatableBondCount:</span><span class="hl-1"> </span><span class="hl-8">3</span><span class="hl-1">, </span><span class="hl-4">logP:</span><span class="hl-1"> </span><span class="hl-8">2.41</span><span class="hl-1"> },</span><br/><span class="hl-1">});</span><br/><br/><span class="hl-5">const</span><span class="hl-1"> </span><span class="hl-6">page</span><span class="hl-1"> = </span><span class="hl-3">await</span><span class="hl-1"> </span><span class="hl-4">molDB</span><span class="hl-1">.</span><span class="hl-0">search</span><span class="hl-1">(</span><span class="hl-2">&#39;c1ccccc1&#39;</span><span class="hl-1">, {</span><br/><span class="hl-1">  </span><span class="hl-4">mode:</span><span class="hl-1"> </span><span class="hl-2">&#39;substructure&#39;</span><span class="hl-1">,</span><br/><span class="hl-1">  </span><span class="hl-4">mwRange:</span><span class="hl-1"> { </span><span class="hl-4">min:</span><span class="hl-1"> </span><span class="hl-8">610</span><span class="hl-1"> },</span><br/><span class="hl-1">  </span><span class="hl-4">columnRanges:</span><span class="hl-1"> { </span><span class="hl-4">rotatableBondCount:</span><span class="hl-1"> { </span><span class="hl-4">max:</span><span class="hl-1"> </span><span class="hl-8">4</span><span class="hl-1"> }, </span><span class="hl-4">logP:</span><span class="hl-1"> { </span><span class="hl-4">max:</span><span class="hl-1"> </span><span class="hl-8">3</span><span class="hl-1"> } },</span><br/><span class="hl-1">  </span><span class="hl-4">maxResults:</span><span class="hl-1"> </span><span class="hl-8">24</span><span class="hl-1">,</span><br/><span class="hl-1">});</span>
+</code><button type="button">Copy</button></pre>
+
+<p>The bounds are inclusive and honoured by every mode, on the column path and on
+the planes alike. A column costs a byte or two per entry for a small integer
+and nine bytes for a real, and every instance writing one index must declare
+the same columns: one that declares fewer writes NULL in the others, which no
+bound keeps. Naming in <code>columnRanges</code> a column the index does not carry for
+every entry throws.</p>
+<p>On the first 10 M molecules of PubChem, every heavy benzene candidate (410 805,
+<code>mw ≥ 610</code>) tested against a bound costs 1.61 µs probed in the entries table
+(with its formulas joined, as <a href="http://molecules.cheminfo.org">molecules.cheminfo.org</a> did), 1.43 µs probed
+alone, and <strong>0.18 µs as a carried column</strong>; a first page of 24 with 6 verifier
+threads (<a href="media/carriedColumns.mjs">benchmark/carriedColumns.mjs</a>):</p>
+<table>
+<thead>
+<tr>
+<th>bounds</th>
+<th>candidates</th>
+<th>probed</th>
+<th>carried</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>rotatable ≤ 4</td>
+<td>20 623</td>
+<td>11.1 ms</td>
+<td>8.1 ms</td>
+</tr>
+<tr>
+<td>rotatable ≤ 2, logP ≤ 3</td>
+<td>1 155</td>
+<td>42.2 ms</td>
+<td>11.6 ms</td>
+</tr>
+<tr>
+<td>rotatable ≤ 1, logP ≤ −2</td>
+<td>187</td>
+<td>246.6 ms</td>
+<td>43.0 ms</td>
+</tr>
+</tbody>
+</table>
+<p>The last is the one that grows with the index: a filter rarer than a page reads
+every candidate, at 0.18 µs instead of 1.6 µs each. The eight columns
+<a href="http://molecules.cheminfo.org">molecules.cheminfo.org</a> carries — six small counts, logP and the polar surface
+area — added 31 bytes an entry to <code>ocl_ss_index</code> (1.01 → 1.32 GB at 10 M) and
+6% to the build (44.3 → 46.9 µs an entry).</p>
+<p><strong>Declaring a column on an index that already holds entries</strong> adds it at once
+— a change to the schema alone, no row is rewritten — and empty for every one
+of them. <code>columnStatus()</code> says so (<code>complete: false</code>, with how far it has been
+filled), and a bound on it throws until <code>fillColumns()</code> has given every entry
+its value:</p>
+<pre><code class="js"><span class="hl-5">const</span><span class="hl-1"> </span><span class="hl-6">status</span><span class="hl-1"> = </span><span class="hl-4">molDB</span><span class="hl-1">.</span><span class="hl-0">columnStatus</span><span class="hl-1">();</span><br/><span class="hl-7">// [{ name: &#39;logP&#39;, type: &#39;real&#39;, declared: true, complete: false, filledThrough: 0, fillTo: 14878852 }, …]</span><br/><br/><span class="hl-3">await</span><span class="hl-1"> </span><span class="hl-4">molDB</span><span class="hl-1">.</span><span class="hl-0">fillColumns</span><span class="hl-1">(</span><br/><span class="hl-1">  (</span><span class="hl-4">entryIds</span><span class="hl-1">) </span><span class="hl-5">=&gt;</span><br/><span class="hl-1">    </span><span class="hl-0">readMyTable</span><span class="hl-1">(</span><span class="hl-4">entryIds</span><span class="hl-1">).</span><span class="hl-0">map</span><span class="hl-1">((</span><span class="hl-4">row</span><span class="hl-1">) </span><span class="hl-5">=&gt;</span><span class="hl-1"> ({</span><br/><span class="hl-1">      </span><span class="hl-4">entryId:</span><span class="hl-1"> </span><span class="hl-4">row</span><span class="hl-1">.</span><span class="hl-4">id</span><span class="hl-1">,</span><br/><span class="hl-1">      </span><span class="hl-4">columns:</span><span class="hl-1"> { </span><span class="hl-4">rotatableBondCount:</span><span class="hl-1"> </span><span class="hl-4">row</span><span class="hl-1">.</span><span class="hl-4">rot</span><span class="hl-1">, </span><span class="hl-4">logP:</span><span class="hl-1"> </span><span class="hl-4">row</span><span class="hl-1">.</span><span class="hl-4">logP</span><span class="hl-1"> },</span><br/><span class="hl-1">    })),</span><br/><span class="hl-1">  { </span><span class="hl-0">onProgress</span><span class="hl-4">:</span><span class="hl-1"> (</span><span class="hl-4">filled</span><span class="hl-1">) </span><span class="hl-5">=&gt;</span><span class="hl-1"> </span><span class="hl-4">logger</span><span class="hl-1">.</span><span class="hl-0">info</span><span class="hl-1">({ </span><span class="hl-4">filled</span><span class="hl-1"> }, </span><span class="hl-2">&#39;carried columns&#39;</span><span class="hl-1">) },</span><br/><span class="hl-1">);</span>
+</code><button type="button">Copy</button></pre>
+
+<p>It walks the entries in id order through the entry index, a chunk of 5 000 per
+short transaction with its progress committed alongside, yields between
+chunks, and resumes where it stopped. A column is never dropped or retyped:
+one no longer declared stays in the file but is neither written nor bounded,
+and one declared with another type is refused.</p>
 <h2 id="how-a-substructure-search-runs" class="tsd-anchor-link">How a substructure search runs<a href="#how-a-substructure-search-runs" aria-label="Permalink" class="tsd-anchor-icon"><svg viewBox="0 0 24 24" aria-hidden="true"><use href="assets/icons.svg#icon-anchor"></use></svg></a></h2>
 <p>A substructure search is two steps, and they cost very different amounts:</p>
 <table>
@@ -270,12 +492,203 @@ calls it for you</strong>. Until it runs, the index is empty and every search ta
 column scan exactly as before, so a database that never folds simply never gets
 faster.</p>
 <p>It is manual for the same reason <code>backfillHashes()</code> is: at ~38 µs an entry a
-first fold of 150 M takes about 95 minutes. It is resumable, and
-<code>planeStatus().pending</code> is the number to watch — entries inserted since the last
-fold, which every search still screens the slower way.</p>
+first fold of 150 M takes about 95 minutes. It is resumable — each chunk it
+publishes records where it stopped, so the next call carries on from there — and
+<code>planeStatus().pending</code> is the number to watch: entries no fold has reached,
+which every search still screens the slower way.</p>
 <pre><code class="js"><span class="hl-5">let</span><span class="hl-1"> </span><span class="hl-4">result</span><span class="hl-1">;</span><br/><span class="hl-3">do</span><span class="hl-1"> {</span><br/><span class="hl-1">  </span><span class="hl-4">result</span><span class="hl-1"> = </span><span class="hl-4">molDB</span><span class="hl-1">.</span><span class="hl-0">foldPlanes</span><span class="hl-1">({ </span><span class="hl-4">maxChunks:</span><span class="hl-1"> </span><span class="hl-8">1</span><span class="hl-1"> });</span><br/><span class="hl-1">} </span><span class="hl-3">while</span><span class="hl-1"> (</span><span class="hl-4">result</span><span class="hl-1">.</span><span class="hl-4">pending</span><span class="hl-1">);</span>
 </code><button type="button">Copy</button></pre>
 
+<h3 id="ids-that-only-grow-the-watermark" class="tsd-anchor-link">Ids that only grow: the watermark<a href="#ids-that-only-grow-the-watermark" aria-label="Permalink" class="tsd-anchor-icon"><svg viewBox="0 0 24 24" aria-hidden="true"><use href="assets/icons.svg#icon-anchor"></use></svg></a></h3>
+<p>The planes are appended to and never rewritten, so they are trusted only up to a
+<strong>watermark</strong>: the highest entry id the last fold covered. Every entry at or
+below it is in the planes with its current fingerprint; every entry above it is
+read straight from <code>ocl_ss_index</code>, sought on its entry index. Nothing is copied
+anywhere, so <strong>an id larger than the watermark — <code>AUTOINCREMENT</code>, or ids
+assigned in insertion order — never touches the plane index</strong>: the insert writes
+its row of <code>ocl_ss_index</code> and nothing else, and the next fold picks it up.</p>
+<pre><code class="js"><span class="hl-4">molDB</span><span class="hl-1">.</span><span class="hl-0">planeStatus</span><span class="hl-1">();</span><br/><span class="hl-7">// { folded: 1048576, segments: 1, watermark: 1048576, pending: 1200, refoldAdvisable: false }</span>
+</code><button type="button">Copy</button></pre>
+
+<p><code>pending</code> counts the entries above the watermark: what every search still
+screens the slower way, one seek each, and what the next fold takes. Once it
+passes 1% of <code>folded</code> (and 1 024 entries) the router stops using the plane
+index altogether, and <code>refoldAdvisable</code> turns true.</p>
+<h3 id="how-a-search-uses-the-planes" class="tsd-anchor-link">How a search uses the planes<a href="#how-a-search-uses-the-planes" aria-label="Permalink" class="tsd-anchor-icon"><svg viewBox="0 0 24 24" aria-hidden="true"><use href="assets/icons.svg#icon-anchor"></use></svg></a></h3>
+<p>The router decides per query, and the answer is the same whichever way it goes.</p>
+<ul>
+<li><strong>An unbounded scan</strong> — a full count — reads every candidate on either path.
+The router intersects the planes of the query's rarest bits and takes them
+when at most 1% of the index survives (<code>planeCandidateRatio</code>). The count stops
+as soon as it passes that, and a sample of the chunks, read spread across the
+weights, stops it earlier still when it clearly will: a declined query pays
+for part of an intersection, an accepted one is never intersected twice.</li>
+<li><strong>A bounded scan</strong> — a first page, <code>maxResults</code> set — starts on the column
+scan, which answers a common fragment in a few hundred rows that no
+intersection beats. If it is still running at a checkpoint — 100 ms, or twice
+what an intersection is estimated to cost on a large index — its own progress
+says how far it is from its page: the matches verified so far, plus the
+candidates still being verified at the rate the others matched. Close to the
+end, it carries on. Far from it, the survivors are collected, and the scan
+finishes from the planes when that is the cheaper of the two — or, when it is
+not, after the column scan has had as long again. The planes are read from
+where the column scan stopped, in the same <code>(mw, entry_id)</code> order, merging
+each fold's segment with the entries above the watermark, and only as far as
+the page needs.</li>
+</ul>
+<p>So a page the column scan answers quickly never pays for the planes existing,
+and a page whose matches are rare stops reading the whole index. On the first
+10 M molecules of PubChem, warm, with 6 verifier threads
+(<a href="media/firstPages.mjs">benchmark/firstPages.mjs</a>):</p>
+<table>
+<thead>
+<tr>
+<th>fragment</th>
+<th>page</th>
+<th>never folded</th>
+<th>folded, 5.2.0's rule</th>
+<th>folded now</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>benzene</td>
+<td>24</td>
+<td>10.9 ms</td>
+<td>16.0 ms</td>
+<td>10.9 ms</td>
+</tr>
+<tr>
+<td>pyridine</td>
+<td>24</td>
+<td>9.5 ms</td>
+<td>27.7 ms</td>
+<td>9.1 ms</td>
+</tr>
+<tr>
+<td>flavone</td>
+<td>24</td>
+<td>84.9 ms</td>
+<td>486.1 ms</td>
+<td>82.1 ms</td>
+</tr>
+<tr>
+<td>steroid</td>
+<td>96</td>
+<td>251.9 ms</td>
+<td>523.8 ms</td>
+<td>290.9 ms</td>
+</tr>
+<tr>
+<td>quercetin</td>
+<td>96</td>
+<td>786.3 ms</td>
+<td>1 335.0 ms</td>
+<td>171.9 ms</td>
+</tr>
+<tr>
+<td>dibenzoselenophene</td>
+<td>96</td>
+<td>1 859.2 ms</td>
+<td>1 945.7 ms</td>
+<td>174.2 ms</td>
+</tr>
+<tr>
+<td>cubane</td>
+<td>96</td>
+<td>835.4 ms</td>
+<td>1 080.6 ms</td>
+<td>665.1 ms</td>
+</tr>
+<tr>
+<td>flavone</td>
+<td>all</td>
+<td>1 550.5 ms</td>
+<td>1 261.5 ms</td>
+<td>446.4 ms</td>
+</tr>
+<tr>
+<td>quercetin</td>
+<td>all</td>
+<td>1 269.0 ms</td>
+<td>1 443.5 ms</td>
+<td>222.8 ms</td>
+</tr>
+<tr>
+<td>dibenzoselenophene</td>
+<td>all</td>
+<td>1 888.0 ms</td>
+<td>541.3 ms</td>
+<td>152.3 ms</td>
+</tr>
+</tbody>
+</table>
+<p>The steroid page is the one a folded index still costs something: its column
+scan is past the checkpoint, the survivors are counted until they clearly pass
+1%, and the column scan carries on. On a larger index the checkpoint grows with
+the intersection, and a page like it is answered before it.</p>
+<p>Within a chunk the planes are read one at a time, rarest bit first, 32 bits at a
+time and only over the words that still hold a survivor once few remain, and a
+chunk stops being read once another plane would remove fewer survivors than it
+costs to read (~64): the exact 512-bit test that resolves each survivor rejects
+the rest for ~4 µs each, against ~230 µs for a 128 KB plane.</p>
+<h3 id="what-happens-when-an-id-does-not-grow" class="tsd-anchor-link">What happens when an id does not grow<a href="#what-happens-when-an-id-does-not-grow" aria-label="Permalink" class="tsd-anchor-icon"><svg viewBox="0 0 24 24" aria-hidden="true"><use href="assets/icons.svg#icon-anchor"></use></svg></a></h3>
+<p>Triggers on <code>ocl_ss_index</code> check every write at or below the watermark, and the
+answer never changes: <strong>searches stay exact.</strong> What changes is how fast they
+are:</p>
+<table>
+<thead>
+<tr>
+<th>write at or below the watermark</th>
+<th>effect</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>a new entry with a smaller id</td>
+<td>the watermark drops below it</td>
+</tr>
+<tr>
+<td>an entry inserted again with another fingerprint</td>
+<td>the watermark drops below it</td>
+</tr>
+<tr>
+<td>an id given again after its entry was removed</td>
+<td>the watermark drops below it</td>
+</tr>
+<tr>
+<td>an entry inserted again with the same fingerprint</td>
+<td>nothing</td>
+</tr>
+<tr>
+<td><code>remove()</code>, or a row deleted from <code>ocl_ss_index</code></td>
+<td>nothing — its slot goes</td>
+</tr>
+</tbody>
+</table>
+<p>Every entry above the lowered watermark is then read from <code>ocl_ss_index</code>, as if
+it had never been folded, until <code>foldPlanes()</code> folds them again and raises the
+watermark. A write far below it therefore costs a refold of almost everything,
+and leaves the old bits of what it refolds in the planes, where they answer
+nothing but are still read. <code>foldPlanes({ rebuild: true })</code> empties the planes
+and folds every entry once, which reclaims them:</p>
+<pre><code class="js"><span class="hl-5">const</span><span class="hl-1"> </span><span class="hl-6">status</span><span class="hl-1"> = </span><span class="hl-4">molDB</span><span class="hl-1">.</span><span class="hl-0">planeStatus</span><span class="hl-1">();</span><br/><span class="hl-3">if</span><span class="hl-1"> (</span><span class="hl-4">status</span><span class="hl-1">.</span><span class="hl-4">refoldAdvisable</span><span class="hl-1">) {</span><br/><span class="hl-1">  </span><span class="hl-4">molDB</span><span class="hl-1">.</span><span class="hl-0">foldPlanes</span><span class="hl-1">({ </span><span class="hl-4">rebuild:</span><span class="hl-1"> </span><span class="hl-4">status</span><span class="hl-1">.</span><span class="hl-4">folded</span><span class="hl-1"> &gt; </span><span class="hl-8">1.5</span><span class="hl-1"> * </span><span class="hl-4">molDB</span><span class="hl-1">.</span><span class="hl-0">count</span><span class="hl-1">() });</span><br/><span class="hl-1">}</span>
+</code><button type="button">Copy</button></pre>
+
+<p>A table without <code>AUTOINCREMENT</code> hands out <code>max(id) + 1</code>, so deleting its newest
+rows makes the next inserts reuse their ids, and each of those lowers the
+watermark. The triggers run in the writing statement's own transaction, so they
+cover a caller writing <code>ocl_ss_index</code> itself, and a fold running on another
+connection at the same time.</p>
+<h3 id="deleting-an-entry" class="tsd-anchor-link">Deleting an entry<a href="#deleting-an-entry" aria-label="Permalink" class="tsd-anchor-icon"><svg viewBox="0 0 24 24" aria-hidden="true"><use href="assets/icons.svg#icon-anchor"></use></svg></a></h3>
+<p>Call <code>molDB.remove(entryId)</code> before deleting the entry itself. It takes out the
+fingerprint and both structure hashes, and a trigger takes the entry's slot; in
+one database the foreign keys refuse to delete an entry that still has them.</p>
+<p>A chunk is never rewritten, so the entry's bits stay in the planes. With no slot
+they resolve to nothing, and no search returns the entry, but they still count
+as survivors when the router weighs a query, and the bit populations that order
+the screen are not decreased. Many deletions therefore slow the plane path
+without making it wrong.</p>
 <h3 id="run-it-beside-the-service-not-inside-it" class="tsd-anchor-link">Run it beside the service, not inside it<a href="#run-it-beside-the-service-not-inside-it" aria-label="Permalink" class="tsd-anchor-icon"><svg viewBox="0 0 24 24" aria-hidden="true"><use href="assets/icons.svg#icon-anchor"></use></svg></a></h3>
 <p><code>node:sqlite</code> is synchronous, so a fold blocks whichever thread owns the
 connection — there is no background for it to run in. Run it in a <strong>separate
@@ -303,9 +716,12 @@ not been extended is invisible and cannot answer. The next fold writes over it.<
 <p>This is why visibility is not read from <code>ocl_ss_plane</code> directly. It would make a
 half-written chunk look complete, and a search would return false negatives
 without any sign of it — a missing plane row legitimately means &quot;no entry in this
-chunk sets this bit&quot;. For the same reason the tail rows a chunk covers are
-cleared in that publishing transaction, never before it, so an interruption
-cannot lose an entry from both the tail and the index.</p>
+chunk sets this bit&quot;.</p>
+<p>The watermark only moves when a fold completes, in the transaction that
+publishes its last chunk. Before reading anything, a fold records the highest id
+it will cover as its bound, and the triggers check writes against that bound
+while it runs: an entry written below it — which the fold may already have read
+past — keeps the watermark the fold sets below that entry.</p>
 <h2 id="structure-hashes" class="tsd-anchor-link">Structure hashes<a href="#structure-hashes" aria-label="Permalink" class="tsd-anchor-icon"><svg viewBox="0 0 24 24" aria-hidden="true"><use href="assets/icons.svg#icon-anchor"></use></svg></a></h2>
 <p><code>exactNoStereo</code> and <code>exactNoStereoTautomer</code> match on OpenChemLib's own 64-bit
 structure hashes — <code>CanonizerUtil.getNoStereoHash</code> and
@@ -351,7 +767,7 @@ minute on a corpus where <code>exactNoStereoTautomer</code> is still hours away.
 together would leave both modes half-answered for the whole run.</p>
 <p>Per 400 000 entries on one core: the no-stereo pass takes ~30 s; the tautomer
 pass takes 2.4 h uncapped, or ~21 min at the default cap.</p>
-<h3 id="hashes-written-before-version-6" class="tsd-anchor-link">Hashes written before version 6<a href="#hashes-written-before-version-6" aria-label="Permalink" class="tsd-anchor-icon"><svg viewBox="0 0 24 24" aria-hidden="true"><use href="assets/icons.svg#icon-anchor"></use></svg></a></h3>
+<h3 id="hashes-written-before-openchemlib-search-wasm-200" class="tsd-anchor-link">Hashes written before openchemlib-search-wasm 2.0.0<a href="#hashes-written-before-openchemlib-search-wasm-200" aria-label="Permalink" class="tsd-anchor-icon"><svg viewBox="0 0 24 24" aria-hidden="true"><use href="assets/icons.svg#icon-anchor"></use></svg></a></h3>
 <p><code>openchemlib-search-wasm</code> 2.0.0 fixed a defect that gave the wrong hash to a
 molecule whose stereogenic double bond carries no configuration — around 1.5% of
 a drug-like library, and exactly the molecules a SMILES written without stereo
@@ -455,10 +871,17 @@ reads them, so this only affects querying the hash tables yourself.</p>
 </blockquote>
 <h2 id="schema" class="tsd-anchor-link">Schema<a href="#schema" aria-label="Permalink" class="tsd-anchor-icon"><svg viewBox="0 0 24 24" aria-hidden="true"><use href="assets/icons.svg#icon-anchor"></use></svg></a></h2>
 <p><img src="media/schema.svg" alt="The tables migrate() adds"></p>
-<p><code>migrate()</code> creates four tables:</p>
-<pre><code class="sql">ocl_ss_index                (mw, entry_id, ss_index0 .. ss_index7)  -- WITHOUT ROWID, PK (mw, entry_id)
+<p><code>migrate()</code> creates these tables:</p>
+<pre><code class="sql">ocl_ss_index                (mw, entry_id, ss_index0 .. ss_index7, ss_bits, col_<name> …)  -- WITHOUT ROWID, PK (mw, entry_id)
+ocl_ss_columns              (name, type, fill_to, fill_cursor)      -- the carried columns, and how far each is filled
 ocl_no_stereo_hash          (entry_id, hash)                        -- NULL = no hash for this molecule
 ocl_no_stereo_tautomer_hash (entry_id, hash)                        -- NULL = no hash for this molecule
+ocl_ss_settings             (name, value)                           -- settings the hashes were built under
+ocl_ss_plane                (chunk, bit, bits)                      -- the transposed fingerprints, filled by foldPlanes()
+ocl_ss_slot                 (slot, entry_id)                        -- which entry each plane slot stands for
+ocl_ss_bitstat              (bit, population, stored)               -- how many entries set each bit
+ocl_ss_segment              (segment, first_slot, slot_count, mw_ordered)
+ocl_ss_fold                 (watermark, bound, cursor_mw, cursor_entry_id, segment)  -- one row: how far the planes are trusted
 ocl_ss_schema               (version, applied_at)                   -- which schema version this database is at
 </code><button type="button">Copy</button></pre>
 
@@ -466,6 +889,10 @@ ocl_ss_schema               (version, applied_at)                   -- which sch
 of its own. The eight <code>ss_indexN</code> columns store the 512-bit OCL fingerprint packed as signed 64-bit
 integers for efficient SQL bitwise prefiltering. <code>mw</code> leads the primary key so the table is physically
 stored lightest-first — see <a href="#why-the-index-is-ordered-by-molecular-weight">above</a>.</p>
+<p>Four triggers on <code>ocl_ss_index</code> — <code>ocl_ss_watermark_insert</code>, <code>_replace</code>, <code>_update</code> and <code>_delete</code> —
+keep the watermark honest (see <a href="#what-happens-when-an-id-does-not-grow">above</a>). A fifth,
+<code>ocl_ss_bits_stale</code>, sets <code>ss_bits</code> back to NULL when a fingerprint is changed in place without it.
+<code>migrate()</code> puts them back if anything has dropped them.</p>
 <p>Both hash tables are created empty and filled by <code>backfillHashes()</code> — see
 <a href="#structure-hashes">Structure hashes</a>. Each carries a partial index on <code>hash</code> (skipping the NULLs,
 which no query ever matches).</p>
@@ -505,6 +932,34 @@ Measured on 49 983 CCD ligands:</p>
 <p>Version 3 adds the two structure hash tables. They are created <strong>empty</strong>, so the migration is
 instant; filling them is a separate long-running job — see
 <a href="#structure-hashes">Structure hashes</a>.</p>
+<p>Version 6 also records the columns <code>ocl_ss_index</code> carries in <code>ocl_ss_columns</code>, and <code>migrate()</code> adds
+the library's own, <code>ss_bits</code>, to a file that lacks it. On an index that already holds entries it starts
+empty for them: a similarity search computes their coefficient as before, and <code>fillColumns()</code> — no
+reader needed for this column — fills it in the background, after which every row can be skipped by
+its count. A row written by your own SQL without <code>ss_bits</code> is found all the same, its coefficient
+computed; write <code>fingerprintBits(words)</code> there to let a search skip it too. Declared columns are added the same way whatever version a file is at — see
+<a href="#bounding-a-property-the-index-carries-columns-and-columnranges">Bounding a property the index carries</a>.</p>
+<p>Version 6 drops <code>ocl_ss_tail</code>, its index and its trigger: nothing is copied any more, and the planes
+are trusted up to a watermark instead. A database that never folded starts with no watermark and reads
+everything from <code>ocl_ss_index</code>, as before; dropping its tail frees one copy of every fingerprint, which
+takes a moment on a large index (<code>VACUUM</code> gives the space back to the file system). A database already
+folded starts its watermark below the first entry its planes do not hold exactly — the lowest id its
+tail held, or the lowest id no published slot stands for, found by walking the entry index up to it. Searches
+give the same answers before and after.</p>
+<h3 id="rolling-back-from-version-6" class="tsd-anchor-link">Rolling back from version 6<a href="#rolling-back-from-version-6" aria-label="Permalink" class="tsd-anchor-icon"><svg viewBox="0 0 24 24" aria-hidden="true"><use href="assets/icons.svg#icon-anchor"></use></svg></a></h3>
+<p><strong>Do not open a version 6 file with 5.2.0 or earlier; keep a copy of the file from before the upgrade
+if you may need to go back.</strong> An older release reads the version, finds nothing to apply, and does not
+complain — but it expects a tail that is no longer there:</p>
+<ul>
+<li>a search it sends to the plane index throws <code>no such table: ocl_ss_tail</code>;</li>
+<li><code>planeStatus()</code> and <code>foldPlanes()</code> throw the same error;</li>
+<li>a search it sends to the column scan reads <code>ocl_ss_index</code>, which version 6 keeps complete, and is
+exact.</li>
+</ul>
+<p>So it fails loudly or answers in full, never with fewer matches. Its writes are still checked: the
+triggers live in the file, not in the library. One thing does stick: on a file that never folded, its
+<code>foldPlanes()</code> publishes every chunk before it fails. Back on version 6 those planes are not trusted,
+and <code>foldPlanes({ rebuild: true })</code> replaces them.</p>
 <p>Each version is applied in its own transaction, so an interrupted upgrade leaves the database at the
 last version that fully completed — never half-way through one. A migration only ever discards rows it
 cannot carry (an orphaned fingerprint whose entry no longer exists, which no search could return), and
@@ -516,13 +971,19 @@ recorded from then on.</p>
 <h2 id="using-a-different-sqlite-driver" class="tsd-anchor-link">Using a different SQLite driver<a href="#using-a-different-sqlite-driver" aria-label="Permalink" class="tsd-anchor-icon"><svg viewBox="0 0 24 24" aria-hidden="true"><use href="assets/icons.svg#icon-anchor"></use></svg></a></h2>
 <p>The constructor accepts any object satisfying the <code>SQLiteDatabase</code> duck-typed interface (compatible with
 <a href="https://nodejs.org/api/sqlite.html"><code>node:sqlite</code></a> and <a href="https://github.com/WiseLibs/better-sqlite3"><code>better-sqlite3</code></a>):</p>
-<pre><code class="ts"><span class="hl-3">import</span><span class="hl-1"> { </span><span class="hl-4">MoleculesDBSQLite</span><span class="hl-1">, </span><span class="hl-3">type</span><span class="hl-1"> </span><span class="hl-4">SQLiteDatabase</span><span class="hl-1"> } </span><span class="hl-3">from</span><span class="hl-1"> </span><span class="hl-2">&#39;openchemlib-sqlite&#39;</span><span class="hl-1">;</span><br/><br/><span class="hl-5">const</span><span class="hl-1"> </span><span class="hl-6">db</span><span class="hl-1">: </span><span class="hl-9">SQLiteDatabase</span><span class="hl-1"> = </span><span class="hl-7">/* any compatible driver */</span><span class="hl-1">;</span>
+<pre><code class="ts"><span class="hl-3">import</span><span class="hl-1"> { </span><span class="hl-4">MoleculesDBSQLite</span><span class="hl-1">, </span><span class="hl-3">type</span><span class="hl-1"> </span><span class="hl-4">SQLiteDatabase</span><span class="hl-1"> } </span><span class="hl-3">from</span><span class="hl-1"> </span><span class="hl-2">&#39;openchemlib-sqlite&#39;</span><span class="hl-1">;</span><br/><br/><span class="hl-5">const</span><span class="hl-1"> </span><span class="hl-6">db</span><span class="hl-1">: </span><span class="hl-10">SQLiteDatabase</span><span class="hl-1"> = </span><span class="hl-7">/* any compatible driver */</span><span class="hl-1">;</span>
 </code><button type="button">Copy</button></pre>
 
 <blockquote>
-<p><strong>Note</strong>: Substructure and similarity searches call <code>stmt.setReadBigInts(true)</code> when available (node:sqlite).
+<p><strong>Note</strong>: Code that reads fingerprints back — migrations, folds, the plane index, and a similarity
+scan on a driver without <code>function()</code> — calls <code>stmt.setReadBigInts(true)</code> when available (node:sqlite).
 For other drivers, configure BigInt return for INTEGER columns at the driver level.</p>
 </blockquote>
+<p>When the driver has <code>function()</code> (<code>node:sqlite</code> from Node 22.13, <code>better-sqlite3</code>), the library
+registers two SQL functions on the connection, once each: <code>ocl_ss_deadline</code>, which stops a scan at its
+<code>timeoutMs</code> from inside SQLite, and <code>ocl_ss_tanimoto</code>, which computes the similarity coefficient there.
+Without it, both fall back to JavaScript: the deadline is checked between rows and a similarity scan reads
+every row.</p>
 <h2 id="license" class="tsd-anchor-link">License<a href="#license" aria-label="Permalink" class="tsd-anchor-icon"><svg viewBox="0 0 24 24" aria-hidden="true"><use href="assets/icons.svg#icon-anchor"></use></svg></a></h2>
 <p>MIT</p>
-</div></div><div class="col-sidebar"><div class="page-menu"><div class="tsd-navigation settings"><details class="tsd-accordion"><summary class="tsd-accordion-summary"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" aria-hidden="true"><use href="assets/icons.svg#icon-chevronDown"></use></svg><h3>Settings</h3></summary><div class="tsd-accordion-details"><div class="tsd-filter-visibility"><span class="settings-label">Member Visibility</span><ul id="tsd-filter-options"><li class="tsd-filter-item"><label class="tsd-filter-input"><input type="checkbox" id="tsd-filter-protected" name="protected"/><svg width="32" height="32" viewBox="0 0 32 32" aria-hidden="true"><rect class="tsd-checkbox-background" width="30" height="30" x="1" y="1" rx="6" fill="none"></rect><path class="tsd-checkbox-checkmark" d="M8.35422 16.8214L13.2143 21.75L24.6458 10.25" stroke="none" stroke-width="3.5" stroke-linejoin="round" fill="none"></path></svg><span>Protected</span></label></li><li class="tsd-filter-item"><label class="tsd-filter-input"><input type="checkbox" id="tsd-filter-inherited" name="inherited" checked/><svg width="32" height="32" viewBox="0 0 32 32" aria-hidden="true"><rect class="tsd-checkbox-background" width="30" height="30" x="1" y="1" rx="6" fill="none"></rect><path class="tsd-checkbox-checkmark" d="M8.35422 16.8214L13.2143 21.75L24.6458 10.25" stroke="none" stroke-width="3.5" stroke-linejoin="round" fill="none"></path></svg><span>Inherited</span></label></li><li class="tsd-filter-item"><label class="tsd-filter-input"><input type="checkbox" id="tsd-filter-external" name="external"/><svg width="32" height="32" viewBox="0 0 32 32" aria-hidden="true"><rect class="tsd-checkbox-background" width="30" height="30" x="1" y="1" rx="6" fill="none"></rect><path class="tsd-checkbox-checkmark" d="M8.35422 16.8214L13.2143 21.75L24.6458 10.25" stroke="none" stroke-width="3.5" stroke-linejoin="round" fill="none"></path></svg><span>External</span></label></li></ul></div><div class="tsd-theme-toggle"><label class="settings-label" for="tsd-theme">Theme</label><select id="tsd-theme"><option value="os">OS</option><option value="light">Light</option><option value="dark">Dark</option></select></div></div></details></div><details open class="tsd-accordion tsd-page-navigation"><summary class="tsd-accordion-summary"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" aria-hidden="true"><use href="assets/icons.svg#icon-chevronDown"></use></svg><h3>On This Page</h3></summary><div class="tsd-accordion-details"><a href="#openchemlib-sqlite"><span>openchemlib-<wbr/>sqlite</span></a><ul><li><a href="#requirements"><span>Requirements</span></a></li><li><a href="#installation"><span>Installation</span></a></li><li><a href="#how-it-works"><span>How it works</span></a></li><li><a href="#setup"><span>Setup</span></a></li><li><a href="#tuning-sqlite-for-a-large-database"><span>Tuning <wbr/>SQ<wbr/>Lite for a large database</span></a></li><li><a href="#inserting-molecules"><span>Inserting molecules</span></a></li><li><ul><li><a href="#parsing-molecules-auto-detect-format"><span>Parsing molecules — auto-<wbr/>detect format</span></a></li><li><a href="#full-insert-example"><span>Full insert example</span></a></li><li><a href="#giving-what-you-already-computed"><span>Giving  what you already computed</span></a></li></ul></li><li><a href="#keeping-the-index-in-its-own-database"><span>Keeping the index in its own database</span></a></li><li><a href="#searching"><span>Searching</span></a></li><li><ul><li><a href="#exact-match"><span>Exact match</span></a></li><li><a href="#exact-match-ignoring-stereocenters"><span>Exact match ignoring stereocenters</span></a></li><li><a href="#exact-match-ignoring-stereocenters-and-tautomerism"><span>Exact match ignoring stereocenters and tautomerism</span></a></li><li><a href="#substructure-search"><span>Substructure search</span></a></li><li><a href="#substructure-search-sorted-by-mass-difference"><span>Substructure search sorted by mass difference</span></a></li><li><a href="#similarity-search-tanimoto"><span>Similarity search (<wbr/>Tanimoto)</span></a></li><li><a href="#pagination"><span>Pagination</span></a></li><li><a href="#restricting-a-search-to-candidates"><span>Restricting a search to candidates</span></a></li></ul></li><li><a href="#how-a-substructure-search-runs"><span>How a substructure search runs</span></a></li><li><ul><li><a href="#why-the-index-is-ordered-by-molecular-weight"><span>Why the index is ordered by molecular weight</span></a></li></ul></li><li><a href="#folding-the-plane-index"><span>Folding the plane index</span></a></li><li><ul><li><a href="#run-it-beside-the-service-not-inside-it"><span>Run it beside the service, not inside it</span></a></li><li><a href="#an-interrupted-fold-cannot-corrupt-an-answer"><span>An interrupted fold cannot corrupt an answer</span></a></li></ul></li><li><a href="#structure-hashes"><span>Structure hashes</span></a></li><li><ul><li><a href="#the-cheap-hash-is-computed-first-on-purpose"><span>The cheap hash is computed first, on purpose</span></a></li><li><a href="#hashes-written-before-version-6"><span>Hashes written before version 6</span></a></li><li><a href="#the-ceiling-and-what-null-means"><span>The ceiling, and what <wbr/>NULL means</span></a></li><li><a href="#changing-the-ceiling-rebuilds-the-tautomer-hashes"><span>Changing the ceiling rebuilds the tautomer hashes</span></a></li><li><a href="#it-is-resumable"><span>It is resumable</span></a></li></ul></li><li><a href="#schema"><span>Schema</span></a></li><li><a href="#upgrading"><span>Upgrading</span></a></li><li><ul><li><a href="#adding-a-schema-version"><span>Adding a schema version</span></a></li></ul></li><li><a href="#using-a-different-sqlite-driver"><span>Using a different <wbr/>SQ<wbr/>Lite driver</span></a></li><li><a href="#license"><span>License</span></a></li></ul></div></details></div><div class="site-menu"><nav class="tsd-navigation"><a href="modules.html">openchemlib-sqlite</a><ul class="tsd-small-nested-navigation" id="tsd-nav-container"><li>Loading...</li></ul></nav></div></div></div><footer></footer><div class="overlay"></div></body></html>
+</div></div><div class="col-sidebar"><div class="page-menu"><div class="tsd-navigation settings"><details class="tsd-accordion"><summary class="tsd-accordion-summary"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" aria-hidden="true"><use href="assets/icons.svg#icon-chevronDown"></use></svg><h3>Settings</h3></summary><div class="tsd-accordion-details"><div class="tsd-filter-visibility"><span class="settings-label">Member Visibility</span><ul id="tsd-filter-options"><li class="tsd-filter-item"><label class="tsd-filter-input"><input type="checkbox" id="tsd-filter-protected" name="protected"/><svg width="32" height="32" viewBox="0 0 32 32" aria-hidden="true"><rect class="tsd-checkbox-background" width="30" height="30" x="1" y="1" rx="6" fill="none"></rect><path class="tsd-checkbox-checkmark" d="M8.35422 16.8214L13.2143 21.75L24.6458 10.25" stroke="none" stroke-width="3.5" stroke-linejoin="round" fill="none"></path></svg><span>Protected</span></label></li><li class="tsd-filter-item"><label class="tsd-filter-input"><input type="checkbox" id="tsd-filter-inherited" name="inherited" checked/><svg width="32" height="32" viewBox="0 0 32 32" aria-hidden="true"><rect class="tsd-checkbox-background" width="30" height="30" x="1" y="1" rx="6" fill="none"></rect><path class="tsd-checkbox-checkmark" d="M8.35422 16.8214L13.2143 21.75L24.6458 10.25" stroke="none" stroke-width="3.5" stroke-linejoin="round" fill="none"></path></svg><span>Inherited</span></label></li><li class="tsd-filter-item"><label class="tsd-filter-input"><input type="checkbox" id="tsd-filter-external" name="external"/><svg width="32" height="32" viewBox="0 0 32 32" aria-hidden="true"><rect class="tsd-checkbox-background" width="30" height="30" x="1" y="1" rx="6" fill="none"></rect><path class="tsd-checkbox-checkmark" d="M8.35422 16.8214L13.2143 21.75L24.6458 10.25" stroke="none" stroke-width="3.5" stroke-linejoin="round" fill="none"></path></svg><span>External</span></label></li></ul></div><div class="tsd-theme-toggle"><label class="settings-label" for="tsd-theme">Theme</label><select id="tsd-theme"><option value="os">OS</option><option value="light">Light</option><option value="dark">Dark</option></select></div></div></details></div><details open class="tsd-accordion tsd-page-navigation"><summary class="tsd-accordion-summary"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" aria-hidden="true"><use href="assets/icons.svg#icon-chevronDown"></use></svg><h3>On This Page</h3></summary><div class="tsd-accordion-details"><a href="#openchemlib-sqlite"><span>openchemlib-<wbr/>sqlite</span></a><ul><li><a href="#requirements"><span>Requirements</span></a></li><li><a href="#installation"><span>Installation</span></a></li><li><a href="#how-it-works"><span>How it works</span></a></li><li><a href="#setup"><span>Setup</span></a></li><li><a href="#tuning-sqlite-for-a-large-database"><span>Tuning <wbr/>SQ<wbr/>Lite for a large database</span></a></li><li><a href="#inserting-molecules"><span>Inserting molecules</span></a></li><li><ul><li><a href="#parsing-molecules-auto-detect-format"><span>Parsing molecules — auto-<wbr/>detect format</span></a></li><li><a href="#full-insert-example"><span>Full insert example</span></a></li><li><a href="#giving-what-you-already-computed"><span>Giving  what you already computed</span></a></li></ul></li><li><a href="#keeping-the-index-in-its-own-database"><span>Keeping the index in its own database</span></a></li><li><a href="#searching"><span>Searching</span></a></li><li><ul><li><a href="#exact-match"><span>Exact match</span></a></li><li><a href="#exact-match-ignoring-stereocenters"><span>Exact match ignoring stereocenters</span></a></li><li><a href="#exact-match-ignoring-stereocenters-and-tautomerism"><span>Exact match ignoring stereocenters and tautomerism</span></a></li><li><a href="#substructure-search"><span>Substructure search</span></a></li><li><a href="#substructure-search-sorted-by-mass-difference"><span>Substructure search sorted by mass difference</span></a></li><li><a href="#similarity-search-tanimoto"><span>Similarity search (<wbr/>Tanimoto)</span></a></li><li><a href="#pagination"><span>Pagination</span></a></li><li><a href="#restricting-a-search-to-candidates"><span>Restricting a search to candidates</span></a></li><li><ul><li><a href="#how-the-subquery-is-applied"><span>How the subquery is applied: </span></a></li><li><a href="#bounding-the-weight"><span>Bounding the weight: </span></a></li><li><a href="#bounding-a-property-the-index-carries-and"><span>Bounding a property the index carries:  and </span></a></li></ul></li></ul></li><li><a href="#how-a-substructure-search-runs"><span>How a substructure search runs</span></a></li><li><ul><li><a href="#why-the-index-is-ordered-by-molecular-weight"><span>Why the index is ordered by molecular weight</span></a></li></ul></li><li><a href="#folding-the-plane-index"><span>Folding the plane index</span></a></li><li><ul><li><a href="#ids-that-only-grow-the-watermark"><span>Ids that only grow: the watermark</span></a></li><li><a href="#how-a-search-uses-the-planes"><span>How a search uses the planes</span></a></li><li><a href="#what-happens-when-an-id-does-not-grow"><span>What happens when an id does not grow</span></a></li><li><a href="#deleting-an-entry"><span>Deleting an entry</span></a></li><li><a href="#run-it-beside-the-service-not-inside-it"><span>Run it beside the service, not inside it</span></a></li><li><a href="#an-interrupted-fold-cannot-corrupt-an-answer"><span>An interrupted fold cannot corrupt an answer</span></a></li></ul></li><li><a href="#structure-hashes"><span>Structure hashes</span></a></li><li><ul><li><a href="#the-cheap-hash-is-computed-first-on-purpose"><span>The cheap hash is computed first, on purpose</span></a></li><li><a href="#hashes-written-before-openchemlib-search-wasm-200"><span>Hashes written before openchemlib-<wbr/>search-<wbr/>wasm 2.0.0</span></a></li><li><a href="#the-ceiling-and-what-null-means"><span>The ceiling, and what <wbr/>NULL means</span></a></li><li><a href="#changing-the-ceiling-rebuilds-the-tautomer-hashes"><span>Changing the ceiling rebuilds the tautomer hashes</span></a></li><li><a href="#it-is-resumable"><span>It is resumable</span></a></li></ul></li><li><a href="#schema"><span>Schema</span></a></li><li><a href="#upgrading"><span>Upgrading</span></a></li><li><ul><li><a href="#rolling-back-from-version-6"><span>Rolling back from version 6</span></a></li><li><a href="#adding-a-schema-version"><span>Adding a schema version</span></a></li></ul></li><li><a href="#using-a-different-sqlite-driver"><span>Using a different <wbr/>SQ<wbr/>Lite driver</span></a></li><li><a href="#license"><span>License</span></a></li></ul></div></details></div><div class="site-menu"><nav class="tsd-navigation"><a href="modules.html">openchemlib-sqlite</a><ul class="tsd-small-nested-navigation" id="tsd-nav-container"><li>Loading...</li></ul></nav></div></div></div><footer></footer><div class="overlay"></div></body></html>
