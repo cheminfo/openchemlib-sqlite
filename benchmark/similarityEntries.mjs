@@ -9,10 +9,10 @@
 // `idx_ocl_ss_entry`; with the index forced first it walks `idx_ocl_ss_entry` and seeks every row
 // of the clustered table from it. Both read every row of the two tables. Read on its own, the
 // index is scanned in its stored order, and the entries are read for the few rows that reach the
-// threshold. A is the scan as the library ran it; B scans the index alone, then reads the entries
-// of the matches, best first, as the library runs it now. Both use the library's coefficient
-// function, deadline guard and bit-count window, and must return the same entries with the same
-// coefficients. B is written out here so the script runs on a checkout from before it.
+// threshold. A is the scan as the library ran it, written out here; B is the library's own
+// `scanSimilarity()`, which scans the index alone, then reads the entries of the matches, best
+// first. Both use the library's coefficient function, deadline guard and bit-count window, and
+// must return the same entries with the same coefficients.
 import { DatabaseSync } from 'node:sqlite';
 
 import Benchmark from 'benchmark';
@@ -23,7 +23,8 @@ import {
   installScanDeadline,
   scanDeadlineGuard,
 } from '../src/utils/scanDeadline.ts';
-import { bitWindow } from '../src/utils/similarityScan.ts';
+import { restrictEntries } from '../src/utils/restrictEntries.ts';
+import { bitWindow, scanSimilarity } from '../src/utils/similarityScan.ts';
 import {
   installTanimoto,
   tanimotoSql,
@@ -47,9 +48,8 @@ const QUERIES = {
   flavone: 'O=c1cc(-c2ccccc2)oc2ccccc12',
 };
 /** The carried bound of the second round, when the index carries the column. */
-const BOUND = ' AND s.col_rotatableBondCount <= 4';
+const BOUND = ' AND s.col_rotatableBondCount <= ?';
 const THRESHOLD = 0.8;
-const LOOKUP_CHUNK = 500;
 
 const db = new DatabaseSync(INDEX, { readOnly: true });
 db.exec('PRAGMA cache_size = -131072');
@@ -71,13 +71,14 @@ for (const bound of carriesRotatable ? ['', BOUND] : ['']) {
        FROM ${TABLE} e JOIN ocl_ss_index s ON s.entry_id = e.${PK}
       WHERE ${guard}${window}${bound} AND similarity >= ?`,
   );
-  const alone = db.prepare(
-    `SELECT s.entry_id AS entry_id, ${tanimotoSql('s')} AS similarity FROM ocl_ss_index s
-      WHERE ${guard}${window}${bound} AND similarity >= ?`,
-  );
-  const lookup = db.prepare(
-    `SELECT e.${PK} AS entry_id, e.${ID_CODE} AS id_code
-       FROM json_each(?) j CROSS JOIN ${TABLE} e ON e.${PK} = j.value`,
+  const restriction = restrictEntries(
+    PK,
+    false,
+    undefined,
+    undefined,
+    bound
+      ? { conditions: ['s.col_rotatableBondCount <= ?'], values: [4] }
+      : undefined,
   );
   for (const [name, smiles] of Object.entries(QUERIES)) {
     const query = OCL.Molecule.fromSmiles(smiles).getIndex();
@@ -86,30 +87,31 @@ for (const bound of carriesRotatable ? ['', BOUND] : ['']) {
     const variants = {
       'A entries joined to every row': () =>
         withTanimotoQuery(query, (key) =>
-          joined.all(key, Date.now() + 3_600_000, low, high, THRESHOLD),
-        ),
-      'B index alone, entries of the matches': () => {
-        const matches = withTanimotoQuery(query, (key) =>
-          alone.all(key, Date.now() + 3_600_000, low, high, THRESHOLD),
-        ).toSorted(
-          (a, b) => b.similarity - a.similarity || a.entry_id - b.entry_id,
-        );
-        const idCodes = new Map();
-        for (let start = 0; start < matches.length; start += LOOKUP_CHUNK) {
-          const ids = [];
-          const end = Math.min(start + LOOKUP_CHUNK, matches.length);
-          for (let i = start; i < end; i++) ids.push(matches[i].entry_id);
-          for (const row of lookup.all(JSON.stringify(ids))) {
-            idCodes.set(row.entry_id, row.id_code);
-          }
-        }
-        const found = [];
-        for (const match of matches) {
-          const idCode = idCodes.get(match.entry_id);
-          if (idCode !== undefined) found.push({ ...match, id_code: idCode });
-        }
-        return found;
-      },
+          joined.all(
+            key,
+            Date.now() + 3_600_000,
+            low,
+            high,
+            ...(bound ? [4] : []),
+            THRESHOLD,
+          ),
+        ).map((row) => ({
+          entryId: row.entry_id,
+          idCode: row.id_code,
+          similarity: row.similarity,
+        })),
+      'B index alone, entries of the matches': () =>
+        scanSimilarity({
+          db,
+          ocl: OCL,
+          entriesTable: TABLE,
+          pkColumn: PK,
+          idCodeColumn: ID_CODE,
+          queryIndex: query,
+          threshold: THRESHOLD,
+          timeoutMs: 3_600_000,
+          restriction,
+        }).results,
     };
     const suite = new Benchmark.Suite();
     for (const [label, scan] of Object.entries(variants)) {
@@ -118,10 +120,10 @@ for (const bound of carriesRotatable ? ['', BOUND] : ['']) {
         fn() {
           const hits = scan();
           let sum = 0;
-          for (const hit of hits) sum += hit.entry_id * hit.similarity;
+          for (const hit of hits) sum += hit.entryId * hit.similarity;
           answers.set(
             label,
-            `${hits.length} hits, checksum ${sum.toFixed(6)}, idCodes ${hits.reduce((n, hit) => n + hit.id_code.length, 0)} chars`,
+            `${hits.length} hits, checksum ${sum.toFixed(6)}, idCodes ${hits.reduce((n, hit) => n + hit.idCode.length, 0)} chars`,
           );
         },
       });

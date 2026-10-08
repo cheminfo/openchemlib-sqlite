@@ -8,6 +8,17 @@ export interface EntryRestriction {
   join: string;
   /** Conditions to AND into the WHERE clause, each prefixed with ` AND `, or ''. */
   where: string;
+  /**
+   * The conditions of `where` that read the fingerprint row `s` alone — the
+   * weight range and the column bounds — so a scan can test them without
+   * reading the entry. `values` are all theirs.
+   */
+  rowWhere: string;
+  /**
+   * The condition of `where` that reads the entry `e`: the candidates tested
+   * per row, prefixed with ` AND `, or ''.
+   */
+  entryWhere: string;
   /** The candidates' named parameters, which bind before every anonymous one. */
   named: Array<Record<string, unknown>>;
   /** The values of the anonymous parameters `where` holds, in order. */
@@ -45,11 +56,10 @@ export function restrictEntries(
     candidates !== undefined && (perRow || candidates.strategy === 'probe');
   const where: string[] = [];
   const values: number[] = [];
-  if (candidates && correlated) {
-    where.push(
-      `EXISTS (SELECT 1 FROM (${candidates.sql}) c WHERE c.entry_id = e.${pkColumn})`,
-    );
-  }
+  const entryWhere =
+    candidates && correlated
+      ? ` AND EXISTS (SELECT 1 FROM (${candidates.sql}) c WHERE c.entry_id = e.${pkColumn})`
+      : '';
   if (mwRange?.min !== undefined) {
     where.push('s.mw >= ?');
     values.push(mwRange.min);
@@ -62,12 +72,15 @@ export function restrictEntries(
     where.push(...columns.conditions);
     values.push(...columns.values);
   }
+  const rowWhere = where.map((condition) => ` AND ${condition}`).join('');
   return {
     join:
       candidates && !correlated
         ? `JOIN (${candidates.sql}) c ON c.entry_id = e.${pkColumn}`
         : '',
-    where: where.map((condition) => ` AND ${condition}`).join(''),
+    where: `${entryWhere}${rowWhere}`,
+    rowWhere,
+    entryWhere,
     named: candidates?.params ? [candidates.params] : [],
     values,
   };

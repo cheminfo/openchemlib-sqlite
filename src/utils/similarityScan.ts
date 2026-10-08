@@ -7,12 +7,10 @@ import { indexBits } from './fingerprintBits.ts';
 import { BITS_COLUMN } from './indexColumns.ts';
 import { unpackSSIndex } from './packSSIndex.ts';
 import type { EntryRestriction } from './restrictEntries.ts';
-import {
-  installScanDeadline,
-  isScanDeadline,
-  scanDeadlineGuard,
-} from './scanDeadline.ts';
+import { installScanDeadline, scanDeadlineGuard } from './scanDeadline.ts';
 import { rowToResult } from './searchHelpers.ts';
+import type { IndexMatch } from './similarityEntries.ts';
+import { matchedEntries, readMatches } from './similarityEntries.ts';
 import {
   installTanimoto,
   tanimotoSql,
@@ -86,6 +84,15 @@ export function bitWindow(bits: number, threshold: number): BitWindow | null {
  * than a call computing its coefficient. A row whose count is not known —
  * indexed before the count was stored and not filled since, or written by the
  * caller's own SQL — is always computed.
+ *
+ * The index is read on its own, in the order it is stored, and the entries
+ * table only for the rows that reach the threshold — see
+ * {@link matchedEntries}. Joined to the entries, SQLite reads every row of
+ * both: it scans the entries and looks each one up in the index, or walks the
+ * index's `entry_id` order and seeks every row of the clustered table from it.
+ * Candidates joined to the scan (`membership`, `drive`) keep the join, which
+ * lets them lead.
+ *
  * The guard stops a step that reads without yielding at the deadline.
  * @param params - The query, its threshold and its restriction.
  * @returns The scan.
@@ -106,42 +113,50 @@ export function scanSimilarity(params: SimilarityScanParams): CachedScan {
       ? ''
       : ` AND (s.${BITS_COLUMN} IS NULL OR s.${BITS_COLUMN} BETWEEN ? AND ?)`;
   return withTanimotoQuery(queryIndex, (key) => {
-    const stmt = db.prepare(
+    const where = `${guarded ? scanDeadlineGuard('s.entry_id') : '1'}${windowSql}`;
+    const values = [
+      key,
+      ...(guarded ? [deadline] : []),
+      ...(window === null ? [] : [window.low, window.high]),
+    ];
+    if (restriction.join === '') {
+      const scan = readMatches(
+        db,
+        `SELECT s.entry_id AS entry_id, ${tanimotoSql('s')} AS similarity
+           FROM ocl_ss_index s
+          WHERE ${where}${restriction.rowWhere} AND similarity >= ?`,
+        [...values, ...restriction.values, threshold],
+        deadline,
+      );
+      const matches: IndexMatch[] = scan.rows.map((row) => ({
+        entryId: Number(row.entry_id),
+        similarity: row.similarity as number,
+      }));
+      const entries = matchedEntries(params, matches, deadline);
+      return similarityScan(
+        entries.results,
+        scan.timedOut || entries.timedOut,
+        start,
+      );
+    }
+    const scan = readMatches(
+      db,
       `SELECT e.${pkColumn} AS entry_id, e.${idCodeColumn} AS id_code,
               ${tanimotoSql('s')} AS similarity
          FROM ${entriesTable} e
          JOIN ocl_ss_index s ON s.entry_id = e.${pkColumn} ${restriction.join}
-        WHERE ${guarded ? scanDeadlineGuard('s.entry_id') : '1'}${windowSql}${restriction.where}
-          AND similarity >= ?`,
+        WHERE ${where}${restriction.where} AND similarity >= ?`,
+      [...restriction.named, ...values, ...restriction.values, threshold],
+      deadline,
     );
-    const values = [
-      ...restriction.named,
-      key,
-      ...(guarded ? [deadline] : []),
-      ...(window === null ? [] : [window.low, window.high]),
-      ...restriction.values,
-      threshold,
-    ];
-    const withSim: Array<SearchResult & { similarity: number }> = [];
-    let timedOut = false;
-    try {
-      const rows = (stmt.iterate?.(...values) ??
-        stmt.all(...values)) as Iterable<Record<string, unknown>>;
-      for (const row of rows) {
-        withSim.push({
-          ...rowToResult(row),
-          similarity: row.similarity as number,
-        });
-        if (withSim.length % 500 === 0 && Date.now() > deadline) {
-          timedOut = true;
-          break;
-        }
-      }
-    } catch (error: unknown) {
-      if (!isScanDeadline(error)) throw error;
-      timedOut = true;
-    }
-    return similarityScan(withSim, timedOut, start);
+    return similarityScan(
+      scan.rows.map((row) => ({
+        ...rowToResult(row),
+        similarity: row.similarity as number,
+      })),
+      scan.timedOut,
+      start,
+    );
   });
 }
 

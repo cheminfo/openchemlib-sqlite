@@ -332,6 +332,17 @@ flavone; at 0.6, where more rows are in the window, from 2 077 to 1 129 and from
 2 046 to 663 — [benchmark/similarityWindow.mjs](benchmark/similarityWindow.mjs).
 A row whose count is not known is computed, so the answer never depends on it.
 
+The index is read on its own, in the order it is stored, and the entries table
+only for the rows that reach the threshold, by primary key and best first.
+Joined to the entries, SQLite read every row of both: it scanned the entries
+and looked each one up in the index. Over the first 1 M molecules of PubChem,
+read through molecules.cheminfo.org's `listed_molecules` view of ~400 bytes a
+row, quercetin at 0.8 drops from 2 470 to 500 ns a row and flavone from 2 323
+to 380 — [benchmark/similarityEntries.mjs](benchmark/similarityEntries.mjs);
+on its first 10 M, a whole scan takes 4.4 s instead of 29 s. A scan stopped by
+its deadline keeps the most similar of the entries it reached. Candidates
+applied as `membership` or `drive` keep the join, which lets them lead.
+
 ### Pagination
 
 ```js
@@ -426,8 +437,8 @@ A probe's subquery should be a plain SELECT — joins and WHERE — so SQLite ca
 the entry id into it.
 
 The exact modes read a handful of rows, so they always test the subquery per row,
-whatever the strategy. A similarity scan follows it: `probe` tests per row, the
-other two join the subquery.
+whatever the strategy. A similarity scan follows it: `probe` tests the entries
+that reach the threshold, the other two join the subquery.
 
 #### Bounding the weight: `mwRange`
 
