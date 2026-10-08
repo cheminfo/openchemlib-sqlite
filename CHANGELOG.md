@@ -1,5 +1,25 @@
 # Changelog
 
+## [5.3.0](https://github.com/cheminfo/openchemlib-sqlite/compare/v5.2.0...v5.3.0) (2026-10-08)
+
+
+### Features
+
+* bound, resume and time out structure scans ([e32a4ab](https://github.com/cheminfo/openchemlib-sqlite/commit/e32a4ab74756392c99983fe1239e89bd0747a33f))
+* carry caller columns in the index and bound them inside the scan ([cc354ef](https://github.com/cheminfo/openchemlib-sqlite/commit/cc354ef181e813b83fad6c14f02d2f01583f41fb))
+* drop the tail and lower a watermark when entry ids do not grow ([9cd9ca9](https://github.com/cheminfo/openchemlib-sqlite/commit/9cd9ca96290b0943b7f2259bc2f29616177cc33e))
+* fold up to an entry-id watermark ([01f220a](https://github.com/cheminfo/openchemlib-sqlite/commit/01f220a71356a40e3dc1cc7dd705b2d22d87f601))
+* start a bounded scan on the column path and finish it from the planes ([211647c](https://github.com/cheminfo/openchemlib-sqlite/commit/211647cbe7cb87ce57a29a13c8938a7263f11008))
+
+
+### Performance Improvements
+
+* give the prefilter sample a time budget ([889d0f0](https://github.com/cheminfo/openchemlib-sqlite/commit/889d0f0734f0465cbca1cf08caa9b118b704f27a))
+* measure the prefilter only once a scan has read enough rows ([ac53f60](https://github.com/cheminfo/openchemlib-sqlite/commit/ac53f60579627d0e1df81aa32606193431e9f277))
+* scan the similarity index alone and read the entries of its matches ([2d492e2](https://github.com/cheminfo/openchemlib-sqlite/commit/2d492e206f47f4881966c135927b29df43fc6e56))
+* skip similarity rows outside the bit-count window ([1cb955e](https://github.com/cheminfo/openchemlib-sqlite/commit/1cb955efa0303f4bc8e7f692713049ab29985add))
+* test the most selective fingerprint word first, the guard after it ([6a042dd](https://github.com/cheminfo/openchemlib-sqlite/commit/6a042ddf28b59625fc32ec10b9dace7f2f1d289e))
+
 ## [5.2.0](https://github.com/cheminfo/openchemlib-sqlite/compare/v5.1.0...v5.2.0) (2026-10-01)
 
 
