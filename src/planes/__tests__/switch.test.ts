@@ -1,7 +1,7 @@
 import { DatabaseSync } from 'node:sqlite';
 
 import * as OCL from 'openchemlib';
-import { expect, test } from 'vitest';
+import { beforeAll, expect, test } from 'vitest';
 
 import { MoleculesDBSQLite } from '../../MoleculesDBSQLite.ts';
 import type { ScanPosition } from '../../types.ts';
@@ -18,6 +18,17 @@ import { prescreenPlanesSorted } from '../sortedPrescreen.ts';
 import { generatedLibrary } from './fixture.ts';
 
 const IDCODES = generatedLibrary(3000);
+
+// Built once: the tests that use them only read them.
+let folded: ReturnType<typeof library>;
+let plain: ReturnType<typeof library>;
+let large: ReturnType<typeof library>;
+
+beforeAll(() => {
+  folded = library(1500, true);
+  plain = library(1500, false);
+  large = library(3000, false);
+}, 60_000);
 
 /**
  * A library of generated molecules, entries 1 … count.
@@ -112,9 +123,6 @@ const FRAGMENTS = [
 ];
 
 test('a switched scan yields every candidate of the column scan, in its order', () => {
-  const folded = library(1500, true);
-  const plain = library(1500, false);
-
   for (const smiles of FRAGMENTS) {
     for (const maxResults of [5, 50]) {
       const switched = candidates(
@@ -130,13 +138,12 @@ test('a switched scan yields every candidate of the column scan, in its order', 
 });
 
 test('the planes of two folds and the entries above the watermark merge in order', () => {
-  const folded = library(1000, true);
-  append(folded.db, folded.molDB, 1000, 1400);
-  folded.molDB.foldPlanes({ maxPopulationRatio: 1 });
-  append(folded.db, folded.molDB, 1400, 1500);
-  const plain = library(1500, false);
+  const twice = library(1000, true);
+  append(twice.db, twice.molDB, 1000, 1400);
+  twice.molDB.foldPlanes({ maxPopulationRatio: 1 });
+  append(twice.db, twice.molDB, 1400, 1500);
 
-  expect(folded.molDB.planeStatus()).toStrictEqual({
+  expect(twice.molDB.planeStatus()).toStrictEqual({
     folded: 1400,
     segments: 2,
     watermark: 1400,
@@ -146,7 +153,7 @@ test('the planes of two folds and the entries above the watermark merge in order
 
   for (const smiles of FRAGMENTS) {
     const switched = candidates(
-      scanOf(folded.db, smiles, { maxResults: 10, planeCheckpointMs: -1 }),
+      scanOf(twice.db, smiles, { maxResults: 10, planeCheckpointMs: -1 }),
     );
 
     expect(switched.ids).toStrictEqual(
@@ -154,10 +161,10 @@ test('the planes of two folds and the entries above the watermark merge in order
     );
     expect(switched.state.switchedToPlanes).toBe(true);
   }
-});
+}, 30_000);
 
 test('a column scan stopped at its checkpoint resumes without a gap or a repeat', () => {
-  const { db } = library(3000, false);
+  const { db } = large;
   for (const smiles of ['c1ccncc1', 'FC(F)(F)c1ccccc1', 'C1CCNCC1']) {
     const whole = candidates(scanOf(db, smiles, { planeIndex: false })).ids;
     const stopped: PrescreenState = { screened: 0, partial: false };
@@ -179,7 +186,7 @@ test('a column scan stopped at its checkpoint resumes without a gap or a repeat'
 });
 
 test('the guard records the row it stopped a scan at', () => {
-  const { db } = library(3000, false);
+  const { db } = large;
   // Dibenzoselenophene: no generated molecule holds selenium, so the scan
   // yields nothing and only the guard, at ids 1024, 2048, 3072, sees the clock.
   const state: PrescreenState = { screened: 0, partial: false };
@@ -229,7 +236,7 @@ test('the plane side of a switch out of time says so and yields nothing', () => 
 });
 
 test('collecting survivors stops once they pass the limit', () => {
-  const { db } = library(1500, true);
+  const { db } = folded;
   const mol = OCL.Molecule.fromSmiles('c1ccncc1');
   mol.setFragment(true);
   const bits = planeQueryBits(db, mol.getIndex()) as number[];

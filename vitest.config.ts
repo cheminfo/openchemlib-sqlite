@@ -9,5 +9,8 @@ export default defineConfig({
     snapshotFormat: {
       maxOutputLength: Number.MAX_SAFE_INTEGER,
     },
+    // The first test of each file pays for loading OpenChemLib and its wasm
+    // fingerprinter, already 3 s on a CI runner.
+    testTimeout: 30_000,
   },
 });

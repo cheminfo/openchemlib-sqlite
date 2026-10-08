@@ -1,7 +1,7 @@
 import { DatabaseSync } from 'node:sqlite';
 
 import * as OCL from 'openchemlib';
-import { expect, test } from 'vitest';
+import { beforeAll, expect, test } from 'vitest';
 
 import { MoleculesDBSQLite } from '../../MoleculesDBSQLite.ts';
 import { generatedLibrary } from '../../planes/__tests__/fixture.ts';
@@ -20,6 +20,13 @@ import type { PrescreenState } from '../prescreenTypes.ts';
 import { installScanDeadline } from '../scanDeadline.ts';
 
 const IDCODES = generatedLibrary(3000);
+
+// Every test only reads it, so it is built once.
+let db: DatabaseSync;
+
+beforeAll(() => {
+  db = library();
+}, 60_000);
 
 /**
  * A plan measured with no time budget, which always says something.
@@ -105,7 +112,6 @@ test('a scan starts with the words setting most bits first, the guard first', ()
 });
 
 test('measured on its rows, the most selective word comes first, the guard after it', () => {
-  const db = library();
   const { index } = fragment('FC(F)(F)c1ccccc1');
   const plan = measuredPlan(db, index);
   const sample = samplePasses(db, index, {});
@@ -128,7 +134,6 @@ test('measured on its rows, the most selective word comes first, the guard after
 });
 
 test('a measure past its time budget says nothing and reads no run', () => {
-  const db = library();
   const { index } = fragment('FC(F)(F)c1ccccc1');
   const spent = Date.now() - 1;
 
@@ -142,7 +147,6 @@ test('a measure past its time budget says nothing and reads no run', () => {
 });
 
 test('a word no row of the sample passes keeps the guard first', () => {
-  const db = library();
   // No generated molecule holds selenium.
   const { index } = fragment('c1ccc2c(c1)[se]c1ccccc12');
   const plan = measuredPlan(db, index);
@@ -155,7 +159,6 @@ test('a word no row of the sample passes keeps the guard first', () => {
 });
 
 test('a planned scan writes its words in order, the guard after the first, and still seeks', () => {
-  const db = library();
   const { mol, index } = fragment('FC(F)(F)c1ccccc1');
   const plan: PrefilterPlan = {
     words: guessedPrefilterPlan(index).words.toReversed(),
@@ -194,7 +197,6 @@ test('a planned scan writes its words in order, the guard after the first, and s
 });
 
 test('a scan that measures its plan yields what a guessing one yields, in order', () => {
-  const db = library();
   for (const smiles of ['c1ccncc1', 'FC(F)(F)c1ccccc1', 'C1CCNCC1']) {
     const { mol } = fragment(smiles);
     const params = {
@@ -222,7 +224,6 @@ test('a scan that measures its plan yields what a guessing one yields, in order'
 });
 
 test('a slow scan measures its prefilter only once it has read enough rows', () => {
-  const db = library();
   const { mol } = fragment('c1ccccc1');
   const params = {
     db,
@@ -266,7 +267,6 @@ test('a slow scan measures its prefilter only once it has read enough rows', () 
 });
 
 test('a guard after the first word still stops a scan on time', () => {
-  const db = library();
   const { mol } = fragment('FC(F)(F)c1ccccc1');
   const state: PrescreenState = {
     screened: 0,
@@ -298,7 +298,6 @@ test('a guard after the first word still stops a scan on time', () => {
 });
 
 test('the entry id bounds a sample is spread over are two seeks, not a walk', () => {
-  const db = library();
   const plan = (
     db.prepare(`EXPLAIN QUERY PLAN ${ENTRY_ID_BOUNDS_SQL}`).all() as Array<{
       detail: string;
