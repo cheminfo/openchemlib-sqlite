@@ -1,3 +1,4 @@
+import { countRows } from './countRows.ts';
 import type { MoleculeIndexOptions } from './indexOptions.ts';
 import type { Layout } from './layout.ts';
 import type { IndexParts } from './openIndex.ts';
@@ -126,6 +127,17 @@ export class MoleculeIndex {
     options: SearchOptions & { after?: KeyCursor } = {},
   ): Promise<KeyPage> {
     return keyPage(this.#context(), '', options, options.after);
+  }
+
+  /**
+   * How many molecules a browse with no filter and no key bound answers: the alive rows of the sets
+   * named, counted on their bitmaps without reading a row. A filter or a key bound is checked row by
+   * row, so it is not counted here.
+   * @param sets - The sets, as a search names them; the index's default ones when left out.
+   * @returns The count, in the version searched now.
+   */
+  count(sets?: readonly string[]): number {
+    return countRows(this.#current, sets ?? this.#spec.defaultSets);
   }
 
   /**
