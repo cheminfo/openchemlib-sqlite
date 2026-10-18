@@ -1,30 +1,37 @@
-export { MoleculesDBSQLite } from './MoleculesDBSQLite.ts';
-export { MIGRATIONS, SCHEMA_VERSION } from './migrations.ts';
-export type { FoldOptions, FoldResult } from './planes/foldPlanes.ts';
-export type { PlaneStatus } from './planes/planeStatus.ts';
-export { fingerprintBits } from './utils/fingerprintBits.ts';
+export { MoleculeStore } from './store/MoleculeStore.ts';
 export type {
-  BackfillOptions,
-  BackfillPassResult,
-  BackfillProgress,
-  BackfillResult,
-  CandidateStrategy,
-  ColumnRange,
-  ColumnStatus,
-  ColumnValues,
-  FillColumnsOptions,
-  FillColumnsResult,
-  HashKind,
-  IndexColumnType,
-  MigrateOptions,
-  MigrationEvent,
-  MoleculesDBConfig,
-  MwRange,
-  PrecomputedEntry,
-  SQLiteDatabase,
-  ScanPosition,
-  SearchCandidates,
-  SearchOptions,
-  SearchResponse,
-  SearchResult,
-} from './types.ts';
+  GroupOptions,
+  MoleculeStoreOptions,
+} from './store/storeOptions.ts';
+export type { PreparedBatch, PreparedMolecule } from './store/prepared.ts';
+export type { CommitResult } from './store/commit.ts';
+export type { BitCounts, CountedFingerprint } from './store/bitCounts.ts';
+export type {
+  RebuildOptions,
+  RebuildProgress,
+  RebuildResult,
+  StoreUpdates,
+} from './store/rebuildTypes.ts';
+export type { HashKind, MoleculeKeys } from './store/identity.ts';
+export type { PrefetchRead } from './store/prefetch.ts';
+export { migrateFromV5 } from './store/migrateV5.ts';
+export type {
+  MigrateFromV5Options,
+  MigrateFromV5Result,
+} from './store/migrateV5.ts';
+export type { V5Counts } from './store/migrateV5Convert.ts';
+export type { V5Entries } from './store/v5Schema.ts';
+export { compactDatabase, dropV5Tables } from './store/dropV5.ts';
+export type { CompactResult, DropV5Result } from './store/dropV5.ts';
+export { LIBRARY_SQL } from './store/schema.ts';
+export type { DistinctHashes, StoreMeta } from './store/schema.ts';
+export { FORMAT, computeSignatures, computeStamp } from './chemistry/stamp.ts';
+export type { Signatures } from './chemistry/stamp.ts';
+export { MAX_TAUTOMERS } from './chemistry/records.ts';
+export {
+  MAX_ATOMS,
+  SEQ_SPAN,
+  atomCountOf,
+  makeId,
+  seqOf,
+} from './chemistry/key.ts';

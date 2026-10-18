@@ -1,18 +1,18 @@
 {
   "name": "openchemlib-sqlite",
   "version": "5.3.0",
-  "description": "SQLite-backed molecular database with substructure, exact, and similarity search using OpenChemLib",
+  "description": "The storage and in-memory substructure and similarity search engine of a molecule database, in one SQLite file, computed from the idCode alone with openchemlib-search-wasm",
   "type": "module",
   "exports": {
     ".": "./lib/index.js",
-    "./worker": "./lib/searchWorker.js"
+    "./index": "./lib/moleculeIndex.js"
   },
   "files": [
     "lib",
     "src"
   ],
   "engines": {
-    "node": ">=22.5.0"
+    "node": ">=22.16.0"
   },
   "keywords": [
     "chemistry",
@@ -34,34 +34,31 @@
   "scripts": {
     "check-types": "tsc --noEmit",
     "clean": "rimraf coverage lib",
-    "eslint": "eslint src",
-    "eslint-fix": "eslint src --fix",
+    "eslint": "eslint .",
+    "eslint-fix": "eslint . --fix",
     "prepack": "npm run tsc",
-    "prettier": "prettier --check src",
-    "prettier-write": "prettier --write src",
+    "prettier": "prettier --check .",
+    "prettier-write": "prettier --write .",
+    "schema-svg": "node scripts/drawSchema.ts",
     "test": "npm run test-only && npm run check-types && npm run eslint && npm run prettier",
     "test-only": "vitest run --coverage",
     "tsc": "npm run clean && npm run tsc-build",
     "tsc-build": "tsc --project tsconfig.build.json"
   },
   "dependencies": {
-    "lru-cache": "^11.2.2",
-    "openchemlib-search-wasm": "^2.0.0",
-    "workerpool": "^9.3.4"
-  },
-  "peerDependencies": {
-    "openchemlib": ">=9.20.1"
+    "ml-spectra-processing": "^14.35.1",
+    "ml-xsadd": "^3.0.1",
+    "openchemlib-search-wasm": "^2.1.0"
   },
   "devDependencies": {
+    "@types/benchmark": "^2.1.5",
     "@types/node": "^25.7.0",
     "@vitest/coverage-v8": "^4.1.6",
     "@zakodium/tsconfig": "^1.0.5",
     "benchmark": "^2.1.4",
-    "cif-to-json": "^2.0.0",
     "eslint": "^9.39.2",
     "eslint-config-cheminfo-typescript": "^22.0.0",
-    "ml-xsadd": "^3.0.1",
-    "openchemlib": "^9.22.1",
+    "openchemlib": "^9.25.0",
     "prettier": "^3.8.3",
     "rimraf": "^6.1.3",
     "typescript": "^5.9.3",

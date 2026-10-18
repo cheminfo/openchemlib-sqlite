@@ -6,3 +6,7 @@ lib/
 .eslintcache
 *.tsbuildinfo
 .claude
+.deploy
+
+# Local reports and analyses, never published
+out
