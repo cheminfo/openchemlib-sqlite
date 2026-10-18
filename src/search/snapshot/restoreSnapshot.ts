@@ -2,6 +2,7 @@
 import type { FileHandle } from 'node:fs/promises';
 import { open } from 'node:fs/promises';
 
+import { histogramOfBands } from '../bandHistogram.ts';
 import type { Block } from '../blocks.ts';
 import { Layout } from '../layout.ts';
 import type { Segment } from '../layoutTypes.ts';
@@ -146,7 +147,9 @@ async function readImage(
       tail: null,
     });
   }
-  const counts = await shared();
+  // The histogram saved is read past and rebuilt from the bands: one saved when the index started
+  // empty covers none of the keys the tail added since.
+  await shared();
   const alive = await shared();
   const sets = new Map<string, SharedArrayBuffer>();
   for (const name of header.sets) sets.set(name, await shared());
@@ -160,11 +163,7 @@ async function readImage(
     segments,
     rowSpace: header.rowSpace,
     rowSpaceCapacity: header.rowSpaceCapacity,
-    histogram: {
-      counts,
-      lo: header.histogram.lo,
-      scale: header.histogram.scale,
-    },
+    histogram: histogramOfBands(segments),
     sets,
     alive,
     frequencies,

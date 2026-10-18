@@ -1,6 +1,7 @@
 import { SEQ_SPAN } from '../chemistry/key.ts';
 import { SLOTS } from '../chemistry/tile.ts';
 
+import { histogramOfBands, isEdgeHeavy } from './bandHistogram.ts';
 import type { Block, BlockViews, ColumnLayout } from './blocks.ts';
 import { blockViews } from './blocks.ts';
 import type { KeyHistogram } from './histogram.ts';
@@ -29,6 +30,8 @@ export class Layout implements LayoutState {
   readonly #starts: Float64Array;
   readonly #segmentOf: Map<number, number>;
   readonly #counts: Uint32Array;
+  /** The histogram rebuilt from the bands, once the version's own no longer sizes slices. */
+  #rebuilt: { histogram: KeyHistogram; counts: Uint32Array } | undefined;
 
   /**
    * A version.
@@ -158,7 +161,18 @@ export class Layout implements LayoutState {
    * @returns Its exclusive end and the rows the histogram counts in it.
    */
   sliceEnd(start: number, target: number): { end: number; rows: number } {
-    return sliceEnd(this.histogram, this.#counts, start, target);
+    if (
+      this.#rebuilt === undefined &&
+      isEdgeHeavy(this.#counts, this.rowCount)
+    ) {
+      const histogram = histogramOfBands(this.segments);
+      this.#rebuilt = { histogram, counts: new Uint32Array(histogram.counts) };
+    }
+    const { histogram, counts } = this.#rebuilt ?? {
+      histogram: this.histogram,
+      counts: this.#counts,
+    };
+    return sliceEnd(histogram, counts, start, target);
   }
 
   /**
