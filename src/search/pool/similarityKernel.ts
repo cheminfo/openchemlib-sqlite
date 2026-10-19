@@ -1,10 +1,13 @@
 import { atLeast, laneCount } from './bitSlices.ts';
+import { restrictionWord } from './setWords.ts';
 import type { SimilarityContext, SimilarityTally } from './similarityLane.ts';
 import { scoreLane } from './similarityLane.ts';
 
 /**
  * Ranked similarity over the words of entries [e0, e1) of one block: a word is skipped when its
- * bit-count range misses the window; otherwise the bits its live lanes share with the query are
+ * bit-count range misses the window; its live lanes are the rows of the set expression that hold
+ * or lack the key planes as their flips say and hold one plane of the OR group (keys never enter
+ * the score); otherwise the bits its live lanes share with the query are
  * counted plane by plane, 16 at a time (Harley-Seal into 11 bit-sliced counters, so up to 1,024
  * scored bits), and the word dropped once no live lane can still reach `mMin`. A lane that reaches
  * it is scored exactly, filtered, counted, and kept when it ranks after the cursor (score desc, id
@@ -22,9 +25,11 @@ export function similarityWords(
   e1: number,
   res: SimilarityTally,
 ): void {
-  const { planes: p, poff: o, restr, base, zoneMin, zoneMax } = c;
-  const { low, high, qBits, mMin, D } = c;
+  const { planes: p, poff: o, sets, single, base, zoneMin, zoneMax } = c;
+  const { koff, keyFlip, aoff, low, high, qBits, mMin, D } = c;
   const q = o.length;
+  const keyCount = koff.length;
+  const anyCount = aoff.length;
   if (mMin > qBits) return;
   for (let e = e0; e < e1; e++) {
     const w0 = entries[4 * e + 1] as number;
@@ -34,8 +39,22 @@ export function similarityWords(
       if ((zoneMax[w] as number) < low || (zoneMin[w] as number) > high) {
         continue;
       }
-      let alive = restr[base + w] as number;
+      let alive =
+        single !== null
+          ? (single[base + w] as number)
+          : restrictionWord(sets, base + w);
       if (w === w1 - 1) alive &= lastMask;
+      for (let j = 0; j < keyCount && alive !== 0; j++) {
+        alive &=
+          (p[(koff[j] as number) + w] as number) ^ (keyFlip[j] as number);
+      }
+      if (alive !== 0 && anyCount > 0) {
+        let some = 0;
+        for (let k = 0; k < anyCount; k++) {
+          some |= p[(aoff[k] as number) + w] as number;
+        }
+        alive &= some;
+      }
       if (alive === 0) continue;
       let s0 = 0;
       let s1 = 0;

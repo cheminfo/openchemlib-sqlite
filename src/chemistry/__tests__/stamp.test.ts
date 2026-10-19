@@ -2,18 +2,16 @@ import { expect, test } from 'vitest';
 
 import {
   FORMAT,
-  computeLegacyStamp,
   computeSignatures,
   computeStamp,
-  computeUpgradeStamp,
   fingerprintSignature,
   stampOf,
 } from '../stamp.ts';
 
 test('the stamp and the signatures of this build are the ones the stores were written under', async () => {
   // A new value means openchemlib-search-wasm now computes something else: a new identity means
-  // committing every molecule again, a new FragFp or screen signature rebuilding the tiles, a new
-  // function signature counting the bits again.
+  // committing every molecule again, a new FragFp, screen or function signature rebuilding the
+  // tiles.
   await expect(computeSignatures()).resolves.toStrictEqual({
     identity: 'b359e6bce51a2ca1',
     fragFp: '04e89d8cf33f1e07',
@@ -21,25 +19,19 @@ test('the stamp and the signatures of this build are the ones the stores were wr
     functions: '86de42bd0dd905bb',
     idCodeHash: '203ddab20d46c617',
   });
-  await expect(computeStamp()).resolves.toBe(`${FORMAT}:5de0796c76c474e0`);
+  await expect(computeStamp()).resolves.toBe(`${FORMAT}:5bef70280db479e3`);
 });
 
-test('the stamp is made of what a file stores: a file without idCode hashes has its own', async () => {
+test('the stamp is made of what a file stores: the function keys and the idCode hashes too', async () => {
   const signatures = await computeSignatures();
 
   await expect(stampOf(signatures)).resolves.toBe(await computeStamp());
   await expect(stampOf({ ...signatures, idCodeHash: '' })).resolves.toBe(
-    `${FORMAT}:e8f33d2f491c9e59`,
+    `${FORMAT}:95ffb238b4764b88`,
   );
-  await expect(computeUpgradeStamp()).resolves.toBe(
-    `${FORMAT}:e8f33d2f491c9e59`,
-  );
-});
-
-test('a file written before signatures carries the stamp of the same outputs without the key lists', async () => {
-  await expect(computeLegacyStamp()).resolves.toBe(
-    `${FORMAT}:8b4c4cacda2f6d61`,
-  );
+  await expect(
+    stampOf({ ...signatures, functions: '0000000000000000' }),
+  ).resolves.toBe(`${FORMAT}:67f6f88b1a7acfb1`);
 });
 
 test('a key no molecule holds still changes the signature of its fingerprint', async () => {

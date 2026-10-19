@@ -2,13 +2,17 @@ import {
   BAND_SPAN,
   BITS_AT,
   FRAGFP_PLANES,
+  FUNCTION_PLANES_AT,
   N_AT,
-  PLANES,
   SEQ_AT,
   SLOTS,
   TILE_SPAN,
   tileKey,
 } from '../../chemistry/tile.ts';
+import {
+  recordWords,
+  scatterFunctionPlanes,
+} from '../../chemistry/tileRecord.ts';
 import { widenZones } from '../zones.ts';
 
 import { RUN } from './layoutBlocks.ts';
@@ -68,9 +72,10 @@ export interface TilesTask {
 
 /**
  * Copies tiles into the planes, a chunk of consecutive cells of one block read as one key range:
- * each tile goes to one word (plane p of the tile to plane p), its seqs and its slots' FragFp and
- * screen bit counts to the row columns, their ranges to the zone maps. Slots above the watermark
- * are masked, left to the tail; a tile written after the plan is skipped (its slots are above the
+ * each tile goes to one word (plane p of the tile to plane p; the function planes it stores are
+ * scattered, the others stay zero in the fresh block), its seqs and its slots' FragFp and screen
+ * bit counts to the row columns, their ranges to the zone maps. Slots above the watermark are
+ * masked, left to the tail; a tile written after the plan is skipped (its slots are above the
  * watermark too).
  * @param context - The reader.
  * @param task - The phase.
@@ -121,21 +126,16 @@ export function runTiles(
           `cell (${atoms}, ${band}): tile ${expected} is missing`,
         );
       }
-      const data = blob.byteOffset % 4 === 0 ? blob : blob.slice();
-      const words = new Int32Array(data.buffer, data.byteOffset, PLANES);
+      const words = recordWords(blob);
       const seqs = new Uint32Array(
-        data.buffer,
-        data.byteOffset + SEQ_AT,
+        words.buffer,
+        words.byteOffset + SEQ_AT,
         SLOTS,
       );
       fragFpCounts.set(
-        new Uint16Array(data.buffer, data.byteOffset + BITS_AT, SLOTS),
+        new Uint16Array(words.buffer, words.byteOffset + BITS_AT, SLOTS),
       );
-      const used = new Uint32Array(
-        data.buffer,
-        data.byteOffset + N_AT,
-        1,
-      )[0] as number;
+      const used = words[N_AT / 4] as number;
       screenCounts(words, screen, slices);
       let take = 0;
       let mask = 0;
@@ -169,9 +169,10 @@ export function runTiles(
           }
         }
       }
-      for (let p = 0; p < PLANES; p++) {
+      for (let p = 0; p < FUNCTION_PLANES_AT; p++) {
         view.planes[p * view.W + w] = (words[p] as number) & mask;
       }
+      scatterFunctionPlanes(words, view.planes, view.W, w, mask);
       totals.rows += popcount(mask);
       totals.tiles++;
       runRows += popcount(mask);
@@ -204,7 +205,7 @@ export function runTiles(
 
 /**
  * Each slot's screen bit count (planes 512-1023), with 10 bit-sliced counters.
- * @param words - The tile's 1,024 plane words.
+ * @param words - The tile record's words, its 1,024 FragFp and screen planes first.
  * @param counts - Its slots' screen bit counts, written.
  * @param s - The counters, 10 words, reused from tile to tile.
  */
@@ -214,7 +215,7 @@ function screenCounts(
   s: Int32Array,
 ): void {
   s.fill(0);
-  for (let p = FRAGFP_PLANES; p < PLANES; p++) {
+  for (let p = FRAGFP_PLANES; p < FUNCTION_PLANES_AT; p++) {
     let carry = words[p] as number;
     for (let b = 0; b < 10 && carry !== 0; b++) {
       const v = s[b] as number;

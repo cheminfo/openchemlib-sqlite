@@ -1,6 +1,10 @@
 import type { StatementSync } from 'node:sqlite';
 
-import { FINGERPRINT_WORDS, countBits } from '../chemistry/bits.ts';
+import {
+  FINGERPRINT_WORDS,
+  FUNCTION_WORDS_AT,
+  countBits,
+} from '../chemistry/bits.ts';
 import { makeId } from '../chemistry/key.ts';
 import type {
   FingerprintColumns,
@@ -12,17 +16,17 @@ import {
   copyTile,
   slotWords,
   splitTileKey,
-  tileViews,
   writeSlot,
 } from '../chemistry/tile.ts';
+import { tileBytes, tileViews } from '../chemistry/tileRecord.ts';
 import { countTileKeys } from '../chemistry/tileWords.ts';
 
 import type { Counting } from './bitCounts.ts';
 import { COUNTED_BITS, addCounts } from './bitCounts.ts';
 import type { TileUpdate } from './rebuildPass.ts';
-import { addFunctions, emptyTile, replaceWords } from './rebuildPass.ts';
+import { emptyTile, replaceWords } from './rebuildPass.ts';
 import type { RebuildStatements } from './rebuildStatements.ts';
-import { idCodeOf, removedIdCode } from './rebuildStatements.ts';
+import { idCodeOf } from './rebuildStatements.ts';
 
 /** A tile changed since its new tile was built. */
 export interface ChangedTile {
@@ -100,16 +104,15 @@ export function planRound(reads: RoundReads, limit: number): Round | null {
 
 /**
  * The new tiles of a round: each built again from its previous version, the molecules that
- * arrived written in their slots, those that left cleared; and what that changes in the counts.
+ * arrived written in their slots, those that left cleared; and what that changes in the counts,
+ * read from the planes.
  * @param round - The round.
  * @param added - The fingerprints of the molecules that arrived, in round order.
- * @param removedFunctions - The function bits of those that left, null when not counted.
  * @returns The update.
  */
 export function roundTiles(
   round: Round,
   added: FingerprintColumns | null,
-  removedFunctions: Int32Array | null,
 ): TileUpdate {
   const counts = new Float64Array(COUNTED_BITS);
   const fresh = round.tiles.map(({ source, old }) => {
@@ -122,6 +125,7 @@ export function roundTiles(
     const words = slotWords(source, slot);
     replaceWords(words, 0, added?.fragFp ?? null, m);
     replaceWords(words, FINGERPRINT_WORDS, added?.screen ?? null, m);
+    replaceWords(words, FUNCTION_WORDS_AT, added?.functions ?? null, m);
     const bits = countBits(words, 0, FINGERPRINT_WORDS);
     const seq = source.seqs[slot] as number;
     writeSlot(fresh[t] as TileViews, slot, words, 0, seq, bits);
@@ -133,12 +137,10 @@ export function roundTiles(
     if (old !== null) countTileKeys(counts, old, -1);
     countTileKeys(counts, fresh[t] as TileViews);
   }
-  addFunctions(counts, added?.functions ?? null, round.added.length, 1);
-  addFunctions(counts, removedFunctions, round.removed.length, -1);
   return {
     tiles: fresh.map((tile, t) => [
       (round.tiles[t] as ChangedTile).key,
-      tile.data,
+      tileBytes(tile),
     ]),
     counts,
     molecules: round.added.length,
@@ -150,8 +152,6 @@ export interface PlannedRound {
   round: Round;
   /** The molecules that arrived, when fingerprints are computed. */
   added: string[];
-  /** The molecules that left, when function bits are counted. */
-  removed: string[];
 }
 
 /**
@@ -173,9 +173,6 @@ export function planWithIdCodes(
     round,
     added: chemistry
       ? round.added.map(({ id }) => idCodeOf(statements, id))
-      : [],
-    removed: need.functions
-      ? round.removed.map(({ id }) => removedIdCode(statements, id))
       : [],
   };
 }
@@ -201,6 +198,5 @@ export function applyRound(
   }
   addCounts(statements.addCount, update.counts, counting);
   statements.deleteChanges.run(round.logSeq);
-  for (const { id } of round.removed) statements.deleteRemoved.run(id);
   statements.setMeta.run('rebuild.done', done);
 }

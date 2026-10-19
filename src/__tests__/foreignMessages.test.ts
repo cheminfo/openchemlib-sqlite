@@ -13,6 +13,7 @@ import type { SimilarityFingerprint } from '../search/fingerprint.ts';
 import type { ScoreCursor } from '../search/walk/similarityPage.ts';
 import { MoleculeStore } from '../store/MoleculeStore.ts';
 
+import { similarityTruth } from './similarityTruth.ts';
 import {
   APP_SQL,
   SPEC,
@@ -20,12 +21,7 @@ import {
   readIdCodes,
   testThreads,
 } from './testDatabase.ts';
-import {
-  readAll,
-  readTruth,
-  similarityTruth,
-  substructureTruth,
-} from './truth.ts';
+import { readAll, readTruth, substructureTruth } from './truth.ts';
 
 // Every message a library worker posts reaches its parent after a message that is not the
 // library's, as `node --watch` posts `{ 'watch:import': [...] }` from every worker thread; one

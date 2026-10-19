@@ -2,7 +2,7 @@ import type { DatabaseSync } from 'node:sqlite';
 
 import type { RecordColumns } from '../chemistry/records.ts';
 import type { Signatures } from '../chemistry/stamp.ts';
-import { computeLegacyStamp, computeSignatures } from '../chemistry/stamp.ts';
+import { computeSignatures } from '../chemistry/stamp.ts';
 
 import type { BitCounts } from './bitCounts.ts';
 import { readBitCounts } from './bitCounts.ts';
@@ -80,11 +80,7 @@ export class MoleculeStore extends StoreReads {
    * must be committed again.
    */
   static async updates(db: DatabaseSync): Promise<StoreUpdates> {
-    return updatesOf(
-      readMeta(db),
-      await computeSignatures(),
-      await computeLegacyStamp(),
-    );
+    return updatesOf(readMeta(db), await computeSignatures());
   }
 
   /**

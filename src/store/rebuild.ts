@@ -1,22 +1,18 @@
 import { availableParallelism } from 'node:os';
 import type { DatabaseSync } from 'node:sqlite';
 
-import {
-  computeLegacyStamp,
-  computeSignatures,
-  computeStamp,
-  computeUpgradeStamp,
-} from '../chemistry/stamp.ts';
+import { computeSignatures, computeStamp } from '../chemistry/stamp.ts';
 
 import type { CountedFingerprint, Counting } from './bitCounts.ts';
 import { ChemistryPool } from './chemistryPool.ts';
 import { dropInSteps } from './dropInSteps.ts';
+import { PRE_RELEASE_FILE, isPreRelease } from './metaChecks.ts';
 import { RebuildRun } from './rebuildRun.ts';
 import type { RebuildPlan } from './rebuildState.ts';
 import { beginRebuild } from './rebuildState.ts';
 import type { RebuildOptions, RebuildResult } from './rebuildTypes.ts';
 import { updatesOf } from './rebuildTypes.ts';
-import { ensureSignatures, hasStore, readMeta } from './schema.ts';
+import { hasStore, readMeta } from './schema.ts';
 import { refuseV5 } from './v5Schema.ts';
 
 /**
@@ -47,15 +43,10 @@ export async function rebuildStore(
   }
   const signatures = await computeSignatures();
   const stamp = await computeStamp();
-  const legacy = await computeLegacyStamp();
-  ensureSignatures(
-    db,
-    { stamp: await computeUpgradeStamp(), legacy },
-    signatures,
-  );
   await dropInSteps(db, 'ocl_tile_old');
   const meta = readMeta(db);
-  const updates = updatesOf(meta, signatures, legacy);
+  if (isPreRelease(meta)) throw new Error(PRE_RELEASE_FILE);
+  const updates = updatesOf(meta, signatures);
   if (updates.identity) {
     throw new Error(
       'the file holds molecules canonized or hashed differently from this build: commit its idCodes into a new file',
@@ -86,7 +77,7 @@ export async function rebuildStore(
       need: {
         fragFp: plan.tiles.includes('fragFp'),
         screen: plan.tiles.includes('screen'),
-        functions: counting.functions,
+        functions: plan.tiles.includes('functions'),
       },
       tiles,
       hashes: plan.idCodeHash,

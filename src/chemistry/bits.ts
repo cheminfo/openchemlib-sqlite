@@ -1,6 +1,9 @@
 /** 32-bit words of one fingerprint: FragFp, the screen and the function bits have 16 each. */
 export const FINGERPRINT_WORDS = 16;
 
+/** Where the function words start in a molecule's 48: after FragFp and the screen. */
+export const FUNCTION_WORDS_AT = 2 * FINGERPRINT_WORDS;
+
 /**
  * The set bits of a 32-bit word.
  * @param value - The word.

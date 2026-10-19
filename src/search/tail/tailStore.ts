@@ -1,4 +1,9 @@
-import { FRAGFP_PLANES, PLANES, SLOTS } from '../../chemistry/tile.ts';
+import {
+  FRAGFP_PLANES,
+  FUNCTION_PLANES_AT,
+  PLANES,
+  SLOTS,
+} from '../../chemistry/tile.ts';
 import type { Block, BlockViews, ColumnLayout } from '../blocks.ts';
 import { blockViews, writeColumns } from '../blocks.ts';
 import type { KeyHistogram } from '../histogram.ts';
@@ -120,7 +125,7 @@ export class TailStore {
    * poll has placed every row of the segment: an area may still move before.
    * @param segment - Its atom count.
    * @param band - Its band.
-   * @param planes - Its tile's 1,024 plane words; `slot` its slot there.
+   * @param planes - Its tile's 1,536 plane words; `slot` its slot there.
    * @param slot - Its slot.
    * @param seq - Its seq.
    * @param fragFpBits - Its FragFp bit count.
@@ -147,7 +152,7 @@ export class TailStore {
     for (let p = 0; p < PLANES; p++) {
       if ((((planes[p] as number) >>> slot) & 1) !== 0) {
         Atomics.or(view.planes, p * view.W + w, 1 << lane);
-        if (p >= FRAGFP_PLANES) screen++;
+        if (p >= FRAGFP_PLANES && p < FUNCTION_PLANES_AT) screen++;
       }
     }
     view.seq[r] = seq;

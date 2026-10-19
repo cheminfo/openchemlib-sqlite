@@ -1,18 +1,22 @@
 import type { DatabaseSync, StatementSync } from 'node:sqlite';
 
-import { FINGERPRINT_WORDS, countKeys } from '../chemistry/bits.ts';
+import {
+  FINGERPRINT_WORDS,
+  FUNCTION_WORDS_AT,
+  countKeys,
+} from '../chemistry/bits.ts';
 import { MAX_SEQ, makeId } from '../chemistry/key.ts';
 import type { RecordColumns } from '../chemistry/records.ts';
 import type { TileViews } from '../chemistry/tile.ts';
 import {
   MOLECULE_WORDS,
   SLOTS,
-  TILE_BYTES,
   TILE_SPAN,
   addSlot,
+  newTile,
   tileKey,
-  tileViews,
 } from '../chemistry/tile.ts';
+import { tileBytes, tileViews } from '../chemistry/tileRecord.ts';
 
 import {
   COUNTED_BITS,
@@ -193,8 +197,8 @@ function countMolecule(
   countKeys(
     counts,
     COUNTS_AT.functions,
-    records.functions,
-    i * FINGERPRINT_WORDS,
+    records.words,
+    words + FUNCTION_WORDS_AT,
     1,
   );
 }
@@ -271,12 +275,7 @@ function openTile(
   if (next - base >= TILE_SPAN) {
     throw new Error(`cell (${atoms}, ${band}) holds 2^21 tiles already`);
   }
-  open = {
-    key: next,
-    tile: tileViews(new Uint8Array(TILE_BYTES)),
-    isNew: true,
-    dirty: true,
-  };
+  open = { key: next, tile: newTile(), isNew: true, dirty: true };
   tiles.set(base, open);
   return open;
 }
@@ -287,8 +286,9 @@ function flush(
   log: StatementSync | null,
 ): void {
   if (!open.dirty) return;
-  if (open.isNew) statements.insertTile.run(open.key, open.tile.data);
-  else statements.updateTile.run(open.tile.data, open.key);
+  const data = tileBytes(open.tile);
+  if (open.isNew) statements.insertTile.run(open.key, data);
+  else statements.updateTile.run(data, open.key);
   log?.run(open.key);
   open.isNew = false;
   open.dirty = false;

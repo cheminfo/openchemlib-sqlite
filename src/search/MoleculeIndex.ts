@@ -1,4 +1,6 @@
-import { countRows } from './countRows.ts';
+import type { CountContext } from './countChunk.ts';
+import type { CountOptions, Counts } from './countPage.ts';
+import { countPage } from './countPage.ts';
 import type { MoleculeIndexOptions } from './indexOptions.ts';
 import type { Layout } from './layout.ts';
 import type { IndexParts } from './openIndex.ts';
@@ -130,14 +132,23 @@ export class MoleculeIndex {
   }
 
   /**
-   * How many molecules a browse with no filter and no key bound answers: the alive rows of the sets
-   * named, counted on their bitmaps without reading a row. A filter or a key bound is checked row by
-   * row, so it is not counted here.
-   * @param sets - The sets, as a search names them; the index's default ones when left out.
-   * @returns The count, in the version searched now.
+   * Counts the molecules a browse with these options answers, in the search workers: the sets, the
+   * keys, the filter columns and the key bounds are all held in memory, so no row is read from SQL
+   * (but the rare tied value of a filter, as in a search). The tallies come from the same pass. It
+   * runs in chunks, each a turn of its lane, so an interactive search waits for one chunk at most.
+   * @param options - The restriction and the tallies; `lane` defaults to 'bulk'. `budgetMs` counts
+   * from the first chunk's start, and `signal` stops it.
+   * @returns The counts; `complete` is false when the budget or the signal stopped it.
    */
-  count(sets?: readonly string[]): number {
-    return countRows(this.#current, sets ?? this.#spec.defaultSets);
+  async count(options: CountOptions = {}): Promise<Counts> {
+    const context: CountContext = {
+      pool: this.#pool,
+      current: () => this.#current,
+      defaultSets: this.#spec.defaultSets,
+      budgetMs: this.#options.budgetMs,
+      chunkRows: this.#options.countChunkRows,
+    };
+    return countPage(context, options);
   }
 
   /**

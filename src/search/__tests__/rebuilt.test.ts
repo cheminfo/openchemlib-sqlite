@@ -48,7 +48,7 @@ afterAll(async () => {
 
 test('counting the bits again keeps the stamp: the index follows the file through the rebuild', async () => {
   db.prepare(
-    "UPDATE ocl_meta SET value = '' WHERE name = 'counted.functions'",
+    "UPDATE ocl_meta SET value = 'x' WHERE name = 'counted.fragFp'",
   ).run();
   await MoleculeStore.rebuild(db, { threads: testThreads(2) });
   const [id] = await addMolecules(db, store, [idCodes[120] as string], {

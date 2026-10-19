@@ -5,7 +5,7 @@ import { MOLECULE_WORDS, PLANES, SLOTS } from './tile.ts';
 /**
  * The words of every slot of a tile, read back from its planes in one pass.
  * @param tile - The tile.
- * @returns 32 words per slot, slot after slot: FragFp then the screen.
+ * @returns 48 words per slot, slot after slot: FragFp, the screen, the function keys.
  */
 export function tileWords(tile: TileViews): Int32Array {
   const words = new Int32Array(SLOTS * MOLECULE_WORDS);
@@ -26,9 +26,9 @@ export function tileWords(tile: TileViews): Int32Array {
 
 /**
  * Adds how many slots of a tile set each plane to per-key counts, or takes them away: FragFp to the
- * first 512, the screen to the next 512, in the key order of `countKeys()`. Plane p is bit `p & 31`
- * of word `p >> 5`, so it is key `p ^ 31`.
- * @param counts - At least 1,024 counts, changed in place.
+ * first 512, the screen to the next 512, the function keys to the last 512, in the key order of
+ * `countKeys()`. Plane p is bit `p & 31` of word `p >> 5`, so it is key `p ^ 31`.
+ * @param counts - At least 1,536 counts, changed in place.
  * @param tile - The tile.
  * @param sign - 1 adds the tile's molecules, -1 takes them away.
  */

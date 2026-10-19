@@ -77,12 +77,7 @@ test('the store, a rebuild and a migration are drawn in a frame each, every tabl
     },
     {
       transient: true,
-      tables: [
-        'ocl_rebuild_tiles',
-        'ocl_rebuild_removed',
-        'ocl_tile_next',
-        'ocl_bits_next',
-      ],
+      tables: ['ocl_rebuild_tiles', 'ocl_tile_next', 'ocl_bits_next'],
     },
     { transient: true, tables: ['ocl_v5_ids', 'ocl_v5_changes'] },
   ]);

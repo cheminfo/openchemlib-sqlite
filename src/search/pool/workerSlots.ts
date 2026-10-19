@@ -25,6 +25,7 @@ const SEARCH_REPLIES: ReadonlySet<unknown> = new Set([
   'screened',
   'verified',
   'sim',
+  'counted',
 ]);
 const watchNow = () => performance.timeOrigin + performance.now();
 

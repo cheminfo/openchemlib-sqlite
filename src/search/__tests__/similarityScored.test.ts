@@ -7,6 +7,10 @@ import { DatabaseSync } from 'node:sqlite';
 import { afterAll, beforeAll, expect, test } from 'vitest';
 
 import {
+  fingerprintOf,
+  similarityTruth,
+} from '../../__tests__/similarityTruth.ts';
+import {
   APP_SQL,
   SPEC,
   addMolecules,
@@ -14,12 +18,7 @@ import {
   testThreads,
 } from '../../__tests__/testDatabase.ts';
 import type { TruthRow } from '../../__tests__/truth.ts';
-import {
-  fingerprintOf,
-  passes,
-  readTruth,
-  similarityTruth,
-} from '../../__tests__/truth.ts';
+import { passes, readTruth } from '../../__tests__/truth.ts';
 import { countBits } from '../../chemistry/bits.ts';
 import { MoleculeStore } from '../../store/MoleculeStore.ts';
 import { MoleculeIndex } from '../MoleculeIndex.ts';

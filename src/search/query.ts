@@ -7,14 +7,17 @@ import {
   getScreen,
 } from 'openchemlib-search-wasm';
 
-import { countBits, popcount32 } from '../chemistry/bits.ts';
+import { countBits } from '../chemistry/bits.ts';
 import { clampAtoms } from '../chemistry/key.ts';
 
 import type { ColumnLayout } from './blocks.ts';
 import type { SimilarityFingerprint } from './fingerprint.ts';
 import { fingerprintWords } from './fingerprint.ts';
+import type { KeyPlanes } from './keyBits.ts';
 import type { Layout } from './layout.ts';
 import type { ColumnBound } from './pool/rowFilter.ts';
+import type { SetExpression } from './setExpression.ts';
+import { restrictionDensity } from './setExpression.ts';
 import type { SimilarityPlan } from './walk/similarityPage.ts';
 import type { SubstructurePlan } from './walk/walkPage.ts';
 
@@ -28,32 +31,71 @@ export interface FilterRange {
 
 /**
  * Plans a substructure query: its FragFp and screen bits (built on the fragment the verifier
- * matches) as planes rarest first, and its atom floor. An empty query is a browse.
+ * matches) and the key planes a row must hold, flip 0, or lack, flip -1, merged and ordered by
+ * survival, rarest first; the OR group of keys apart; and its atom floor. An empty query is a
+ * browse, keys or not: it is never verified.
  * @param queryIdCode - The query, read as a fragment whatever its own flag; '' to browse.
  * @param frequencies - How often each plane's bit is set.
+ * @param keys - The key planes of the search.
  * @returns The plan.
  */
 export function substructurePlan(
   queryIdCode: string,
   frequencies: Float64Array,
+  keys: KeyPlanes,
 ): SubstructurePlan {
-  if (queryIdCode === '') {
-    return {
-      browse: true,
-      queryIdCode: '',
-      planes: new Int32Array(0),
-      floor: 0,
-    };
+  const browse = queryIdCode === '';
+  const held = new Set<number>(keys.all);
+  if (!browse) {
+    const words = new Int32Array(32);
+    words.set(getQueryIndex(queryIdCode), 0);
+    words.set(getQueryScreen(queryIdCode), 16);
+    for (const plane of setPlanes(words, 0, 32)) held.add(plane);
   }
-  const words = new Int32Array(32);
-  words.set(getQueryIndex(queryIdCode), 0);
-  words.set(getQueryScreen(queryIdCode), 16);
+  const { planes, flips } = orderPlanes(held, keys.none, frequencies);
   return {
-    browse: false,
+    browse,
     queryIdCode,
-    planes: rarestPlanes(words, 0, 32, frequencies),
-    floor: clampAtoms(getQueryAtomFloor(queryIdCode)),
+    planes,
+    flips,
+    anyPlanes: keys.any,
+    floor: browse ? 0 : clampAtoms(getQueryAtomFloor(queryIdCode)),
   };
+}
+
+/**
+ * Planes a row must hold (flip 0) and planes it must lack (flip -1), ordered by survival
+ * ascending: the plane's frequency for flip 0, one minus it for flip -1, ties by plane.
+ * @param held - The planes a row must hold.
+ * @param lacked - The planes it must lack.
+ * @param frequencies - How often each plane's bit is set.
+ * @returns The planes and their flips, in that order.
+ */
+export function orderPlanes(
+  held: Iterable<number>,
+  lacked: Int32Array,
+  frequencies: Float64Array,
+): { planes: Int32Array; flips: Int32Array } {
+  const list: Array<{ plane: number; flip: number; survival: number }> = [];
+  for (const plane of held) {
+    list.push({ plane, flip: 0, survival: frequencies[plane] as number });
+  }
+  for (const plane of lacked) {
+    list.push({
+      plane,
+      flip: -1,
+      survival: 1 - (frequencies[plane] as number),
+    });
+  }
+  list.sort((a, b) => a.survival - b.survival || a.plane - b.plane);
+  const planes = new Int32Array(list.length);
+  const flips = new Int32Array(list.length);
+  for (let i = 0; i < list.length; i++) {
+    const entry = list[i] as { plane: number; flip: number };
+    planes[i] = entry.plane;
+    flips[i] = entry.flip;
+  }
+  return { planes, flips };
 }
 
 /**
@@ -96,7 +138,11 @@ export function similarityPlan(
   const atoms = getMoleculeSizes([idCode]).atomCounts[0] as number;
   return {
     fingerprint,
-    planes: rarestPlanes(words, from, to, frequencies),
+    planes: orderPlanes(
+      setPlanes(words, from, to),
+      new Int32Array(0),
+      frequencies,
+    ).planes,
     qBits,
     low,
     high,
@@ -130,72 +176,33 @@ export function readFilters(
 }
 
 /**
- * The rows a search may answer: the union of the named sets, or every alive row without any.
+ * Where the restriction word goes among the planes of a walk: its density, sampled over the row
+ * space against the alive rows, ranks it with the planes' survival (a plane's frequency, or one
+ * minus it for a plane the row must lack).
  * @param layout - The version searched.
- * @param sets - The set names; unknown names add nothing.
- * @returns The bitmap over the row space.
- */
-export function restrictionOf(
-  layout: Layout,
-  sets: readonly string[] | null,
-): SharedArrayBuffer {
-  if (sets === null) return layout.alive;
-  const maps = sets.flatMap((name) => {
-    const map = layout.sets.get(name);
-    return map === undefined ? [] : [map];
-  });
-  if (maps.length === 1) return maps[0] as SharedArrayBuffer;
-  const buffer = new SharedArrayBuffer(layout.rowSpaceCapacity / 8);
-  const out = new Int32Array(buffer);
-  for (const map of maps) {
-    const words = new Int32Array(map, 0, out.length);
-    for (let i = 0; i < out.length; i++) {
-      out[i] = (out[i] as number) | (words[i] as number);
-    }
-  }
-  return buffer;
-}
-
-/**
- * Where the restriction word goes among the query planes: its density, sampled over the row space
- * against the alive rows, ranks it with the planes' frequencies.
- * @param layout - The version searched.
- * @param restriction - The restriction bitmap.
- * @param plan - The query.
- * @returns How many query planes are tested before it.
+ * @param sets - The set expression.
+ * @param plan - The planes and their flips.
+ * @param plan.planes - The planes, by survival ascending.
+ * @param plan.flips - 0 for a plane a row must hold, -1 for one it must lack.
+ * @returns How many planes are tested before it.
  */
 export function restrictionRank(
   layout: Layout,
-  restriction: SharedArrayBuffer,
-  plan: SubstructurePlan,
+  sets: SetExpression,
+  plan: { planes: Int32Array; flips: Int32Array },
 ): number {
-  const words = Math.floor(layout.rowSpace / 32);
-  const restr = new Int32Array(restriction);
-  const alive = new Int32Array(layout.alive);
-  const step = Math.max(1, Math.floor(words / 2048));
-  let kept = 0;
-  let rows = 0;
-  for (let w = 0; w < words; w += step) {
-    kept += popcount32(restr[w] as number);
-    rows += popcount32(alive[w] as number);
-  }
-  const density = rows === 0 ? 0 : kept / rows;
+  const density = restrictionDensity(layout, sets);
+  const { planes, flips } = plan;
   let at = 0;
-  while (
-    at < plan.planes.length &&
-    (layout.frequencies[plan.planes[at] as number] as number) < density
-  ) {
-    at++;
+  for (; at < planes.length; at++) {
+    const frequency = layout.frequencies[planes[at] as number] as number;
+    const survival = flips[at] === 0 ? frequency : 1 - frequency;
+    if (!(survival < density)) break;
   }
   return at;
 }
 
-function rarestPlanes(
-  words: Int32Array,
-  from: number,
-  to: number,
-  frequencies: Float64Array,
-): Int32Array {
+function setPlanes(words: Int32Array, from: number, to: number): number[] {
   const planes: number[] = [];
   for (let w = from; w < to; w++) {
     const value = words[w] as number;
@@ -203,8 +210,5 @@ function rarestPlanes(
       if ((value & (1 << bit)) !== 0) planes.push(w * 32 + bit);
     }
   }
-  planes.sort(
-    (a, b) => (frequencies[a] as number) - (frequencies[b] as number) || a - b,
-  );
-  return Int32Array.from(planes);
+  return planes;
 }

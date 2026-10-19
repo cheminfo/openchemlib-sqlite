@@ -2,16 +2,19 @@ import type { DatabaseSync } from 'node:sqlite';
 
 import { getMoleculeSizes } from 'openchemlib-search-wasm';
 
-import { FINGERPRINT_WORDS, countKeys } from '../chemistry/bits.ts';
+import {
+  FINGERPRINT_WORDS,
+  FUNCTION_WORDS_AT,
+  countKeys,
+} from '../chemistry/bits.ts';
 import { atomCountOf, seqOf } from '../chemistry/key.ts';
-import { computeFingerprints } from '../chemistry/records.ts';
 import {
   bandOfWeight,
   clearSlot,
   slotWords,
   tileKey,
-  tileViews,
 } from '../chemistry/tile.ts';
+import { tileBytes, tileViews } from '../chemistry/tileRecord.ts';
 
 import {
   COUNTED_BITS,
@@ -25,11 +28,10 @@ import type { WriteCheck } from './writeState.ts';
 /**
  * Removes molecules from the store, inside the caller's transaction: their `ocl_molecule` rows go
  * and their tile slots are emptied (the slot stays used, so its seq is never reused). A hash no
- * remaining molecule carries leaves its distinct count, and their bits leave the bit counts: the
- * FragFp and screen bits read from the slot, the function bits computed again from the idCode.
- * Meant for molecules the application has already removed from its own tables: the in-memory index
- * learns of a removal from the application's change log. While a rebuild is under way, each tile
- * changed and each molecule removed, with its idCode, is logged for it.
+ * remaining molecule carries leaves its distinct count, and their FragFp, screen and function bits,
+ * read from the slot, leave the bit counts. Meant for molecules the application has already removed
+ * from its own tables: the in-memory index learns of a removal from the application's change log.
+ * While a rebuild is under way, each tile changed is logged for it.
  * @param db - The connection, inside a transaction.
  * @param ids - The ids to remove; ids the store does not hold are ignored.
  * @param writable - Refuses the write when the file cannot take it, else says what it keeps.
@@ -87,12 +89,13 @@ export function removeMolecules(
           const words = slotWords(tile, slot);
           countKeys(counts, COUNTS_AT.fragFp, words, 0, -1);
           countKeys(counts, COUNTS_AT.screen, words, FINGERPRINT_WORDS, -1);
+          countKeys(counts, COUNTS_AT.functions, words, FUNCTION_WORDS_AT, -1);
           clearSlot(tile, slot);
           changed = true;
         }
       }
       if (changed) {
-        update.run(tile.data, row.id);
+        update.run(tileBytes(tile), row.id);
         log?.run(row.id);
       }
       if (wanted.size === 0) break;
@@ -103,28 +106,7 @@ export function removeMolecules(
       );
     }
   }
-  if (counting.functions) {
-    const { functions } = computeFingerprints(
-      found.map((row) => row.idCode),
-      { fragFp: false, screen: false, functions: true },
-    );
-    for (let i = 0; i < found.length; i++) {
-      countKeys(
-        counts,
-        COUNTS_AT.functions,
-        functions as Int32Array,
-        i * FINGERPRINT_WORDS,
-        -1,
-      );
-    }
-  }
   addCounts(prepareAddCount(db), counts, counting);
-  if (logging) {
-    const logRemoved = db.prepare(
-      'INSERT OR REPLACE INTO ocl_rebuild_removed (id, idCode) VALUES (?, ?)',
-    );
-    for (const { id, idCode } of found) logRemoved.run(id, idCode);
-  }
   const remove = db.prepare('DELETE FROM ocl_molecule WHERE id = ?');
   for (const { id } of found) remove.run(id);
   const subtract = db.prepare(

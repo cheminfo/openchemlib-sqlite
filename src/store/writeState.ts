@@ -4,7 +4,8 @@ import type { Signatures } from '../chemistry/stamp.ts';
 
 import type { Counting } from './bitCounts.ts';
 import { countingOf } from './bitCounts.ts';
-import { readMeta, staleTiles } from './schema.ts';
+import { staleTiles } from './metaChecks.ts';
+import { readMeta } from './schema.ts';
 
 /** What a store knows of its file between writes. */
 export interface WriteState {
@@ -19,8 +20,8 @@ export interface WriteCheck {
   /** The fingerprints whose bit counts it keeps. */
   counting: Counting;
   /**
-   * Whether a rebuild is under way: the write logs each tile it changes and each molecule it
-   * removes, for the rebuild to bring its own tiles up to date before it switches.
+   * Whether a rebuild is under way: the write logs each tile it changes, for the rebuild to bring
+   * its own tiles up to date before it switches.
    */
   logging: boolean;
 }

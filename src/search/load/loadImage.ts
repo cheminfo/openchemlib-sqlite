@@ -1,5 +1,6 @@
 import { Worker } from 'node:worker_threads';
 
+import { PLANES } from '../../chemistry/tile.ts';
 import { alignRows, columnLayout } from '../blocks.ts';
 import { newHistogram } from '../histogram.ts';
 import { Layout } from '../layout.ts';
@@ -204,7 +205,7 @@ export async function loadImage(
       histogram,
       sets,
       alive,
-      frequencies: new Float64Array(1024),
+      frequencies: new Float64Array(PLANES),
     });
     image.frequencies = await runStep(listener, 'frequencies', () =>
       planeFrequencies(image, 65_536),

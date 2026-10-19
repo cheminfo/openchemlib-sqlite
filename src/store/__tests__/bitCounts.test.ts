@@ -54,7 +54,7 @@ test('a commit rolled back leaves the counts as they were', async () => {
   expect(store.bitCounts()).toStrictEqual(before);
 });
 
-test('a removed molecule takes its bits away, the function bits computed again', async () => {
+test('a removed molecule takes its bits away, the function bits read from its slot', async () => {
   const ids = await commitIds(store, db, idCodes.slice(300, 400));
   removeIds(
     store,

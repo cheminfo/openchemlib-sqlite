@@ -31,7 +31,7 @@ export interface ColumnLayout {
  * of new molecules), as bit planes and row columns in two SharedArrayBuffers.
  */
 export interface Block {
-  /** 1,024 Int32 planes of `capacity / 32` words each, plane-major. */
+  /** 1,536 Int32 planes of `capacity / 32` words each, plane-major. */
   planes: SharedArrayBuffer;
   /** The row columns (key, filters, seq, bit counts), then the zone maps. */
   columns: SharedArrayBuffer;

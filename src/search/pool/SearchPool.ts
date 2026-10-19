@@ -1,3 +1,5 @@
+import type { SearchLane } from '../pages.ts';
+
 import type {
   IndexedBlock,
   PhaseInput,
@@ -11,6 +13,8 @@ import type {
   RunningPhase,
   SearchPoolOptions,
 } from './poolTypes.ts';
+import type { QueuedAbort } from './searchLanes.ts';
+import { SearchLanes } from './searchLanes.ts';
 import type { Kill } from './workerSlots.ts';
 import { WorkerSlots } from './workerSlots.ts';
 
@@ -29,12 +33,16 @@ interface KillHandler {
 }
 
 /**
- * The search workers. A search runs alone (searches are queued) as a sequence of phases (screen a
- * slice, verify its candidates, score similarity units); each phase has its own generation in a
+ * The search workers. A search runs alone as a sequence of phases (screen a slice, verify its
+ * candidates, score similarity units, count a key range); each phase has its own generation in a
  * shared control word, so a worker leaves a phase within a unit or a chunk once the coordinator
  * moved on. A phase ends when its handler says so, at the deadline, or on abort; nothing waits for
  * a call still running: its worker finishes it and takes the next phase. A call the watchdog kills
  * is reported to its phase, with the candidates it held.
+ *
+ * Searches wait in two lanes, so the site's own searches come first: when the workers free up,
+ * the oldest interactive search runs before any bulk one, which agents, counts and exports use,
+ * in short turns between them. A running search is never interrupted.
  */
 export class SearchPool {
   readonly #options: SearchPoolOptions;
@@ -42,7 +50,7 @@ export class SearchPool {
   readonly #killHandlers = new Map<number, KillHandler>();
   #generation = 0;
   #current: Current | null = null;
-  #queue: Promise<unknown> = Promise.resolve();
+  readonly #lanes = new SearchLanes(() => this.#failure);
   #failure: Error | null = null;
   /** Resolves once every worker is ready. */
   readonly ready: Promise<void>;
@@ -75,17 +83,19 @@ export class SearchPool {
   }
 
   /**
-   * Runs one search alone: searches are queued.
-   * @param run - The search, given this pool.
+   * Runs one search alone, once the searches queued before it in its lane, and every interactive
+   * one waiting when it is bulk, have run.
+   * @param run - The search.
+   * @param lane - The queue it waits in.
+   * @param abort - Its signal, and what it answers when the signal aborts while it waits.
    * @returns What it answers.
    */
-  search<T>(run: () => Promise<T>): Promise<T> {
-    const result = this.#queue.then(() => {
-      if (this.#failure !== null) throw this.#failure;
-      return run();
-    });
-    this.#queue = result.catch(() => undefined);
-    return result;
+  search<T>(
+    run: () => Promise<T>,
+    lane: SearchLane = 'interactive',
+    abort?: QueuedAbort<T>,
+  ): Promise<T> {
+    return this.#lanes.run(run, lane, abort);
   }
 
   /**
@@ -161,9 +171,16 @@ export class SearchPool {
         finish('abort');
         return;
       }
+      // A timer longer than 2^31 - 1 ms would fire at once.
       pending.timer = setTimeout(
         () => finish('deadline'),
-        Math.max(0, deadline - this.#options.stopMarginMs - performance.now()),
+        Math.min(
+          2 ** 31 - 1,
+          Math.max(
+            0,
+            deadline - this.#options.stopMarginMs - performance.now(),
+          ),
+        ),
       );
       signal?.addEventListener('abort', onAbort, { once: true });
       this.#slots.postAll(current.message);

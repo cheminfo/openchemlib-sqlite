@@ -1,42 +1,52 @@
 /**
- * The `ocl_tile` record: up to 32 molecules of one cell (an atom count and a 1 Da band of the
- * library's own weight), stored as bit planes. Fixed size, little endian:
- * - `[0, 4096)`: 1,024 Int32 plane words, bit-major, bit i of plane p being slot i. Plane p is bit
- * `p & 31` of word `p >> 5` of a molecule's 32 words: FragFp (planes 0-511), then the screen
- * (planes 512-1023);
- * - `[4096, 4224)`: 32 Uint32 seqs, 0 for an empty or removed slot;
- * - `[4224, 4288)`: 32 Uint16 FragFp bit counts;
- * - `[4288, 4292)`: Uint32 n, the slots used, in arrival order.
+ * A tile: up to 32 molecules of one cell (an atom count and a 1 Da band of the library's own
+ * weight), held as bit planes. Bit i of plane p is slot i; plane p is bit `p & 31` of word `p >> 5`
+ * of a molecule's 48 words: FragFp (planes 0-511), the screen (512-1023), the function keys
+ * (1024-1535). In memory a tile holds its 1,536 planes dense; `tileRecord.ts` stores it as the
+ * `ocl_tile` record, its function planes sparse.
  */
 
 /** Molecules per tile, and rows per plane word. */
 export const SLOTS = 32;
 
-/** Bit planes per molecule: FragFp then the screen. */
-export const PLANES = 1024;
+/** Bit planes per molecule: FragFp (0-511), the screen (512-1023), the function keys (1024-1535). */
+export const PLANES = 1536;
 
 /** The FragFp planes, the first ones. */
 export const FRAGFP_PLANES = 512;
 
-/** 32-bit words per molecule: 16 FragFp words then 16 screen words. */
-export const MOLECULE_WORDS = 32;
+/** The first function-key plane: the screen's planes end there. */
+export const FUNCTION_PLANES_AT = 1024;
 
-/** Bytes of a tile record, and where its parts start. */
-export const TILE_BYTES = 4292;
+/** The function-key planes. */
+export const FUNCTION_PLANES = 512;
+
+/** 32-bit words per molecule: 16 FragFp, 16 screen, 16 function words, as getMoleculeRecords writes them. */
+export const MOLECULE_WORDS = 48;
+
+/** Where the parts of a tile record start; the record ends with the non-zero function plane words. */
 export const SEQ_AT = 4096;
 export const BITS_AT = 4224;
 export const N_AT = 4288;
+export const FUNCTION_MASK_AT = 4292;
+
+/** Bytes of a tile record holding no function word: 4,356; each non-zero function plane word adds 4. */
+export const TILE_FIXED_BYTES = 4356;
 
 /** Bits of the tile key: atom count 16, band 16, tile seq 21 (53 in all). */
 export const BAND_SPAN = 2 ** 16;
 export const TILE_SPAN = 2 ** 21;
 export const MAX_BAND = BAND_SPAN - 1;
 
-/** Typed views over one tile record. */
+/** Where the parts of a tile start in memory: the planes dense, then the seqs, counts and n. */
+const DENSE_SEQ_AT = 4 * PLANES;
+const DENSE_BITS_AT = DENSE_SEQ_AT + 4 * SLOTS;
+const DENSE_N_AT = DENSE_BITS_AT + 2 * SLOTS;
+const DENSE_BYTES = DENSE_N_AT + 4;
+
+/** Typed views over one tile in memory, its planes dense. */
 export interface TileViews {
-  /** The record itself, 4-byte aligned. */
-  data: Uint8Array;
-  /** 1,024 plane words. */
+  /** 1,536 plane words: FragFp, the screen, the function keys. */
   planes: Int32Array;
   /** 32 seqs. */
   seqs: Uint32Array;
@@ -87,30 +97,38 @@ export function bandOfWeight(weight: number): number {
 }
 
 /**
- * Typed views over a tile record, copying it when SQLite handed it unaligned.
- * @param blob - The record, as read from `ocl_tile.data`, or a fresh one.
- * @returns The views.
+ * An empty tile in memory: no slot used.
+ * @returns Its views.
  */
-export function tileViews(blob: Uint8Array): TileViews {
-  if (blob.byteLength !== TILE_BYTES) {
-    throw new Error(`a tile holds ${TILE_BYTES} bytes, not ${blob.byteLength}`);
-  }
-  const data = blob.byteOffset % 4 === 0 ? blob : blob.slice();
-  const { buffer, byteOffset } = data;
+export function newTile(): TileViews {
+  const buffer = new ArrayBuffer(DENSE_BYTES);
   return {
-    data,
-    planes: new Int32Array(buffer, byteOffset, PLANES),
-    seqs: new Uint32Array(buffer, byteOffset + SEQ_AT, SLOTS),
-    bits: new Uint16Array(buffer, byteOffset + BITS_AT, SLOTS),
-    used: new Uint32Array(buffer, byteOffset + N_AT, 1),
+    planes: new Int32Array(buffer, 0, PLANES),
+    seqs: new Uint32Array(buffer, DENSE_SEQ_AT, SLOTS),
+    bits: new Uint16Array(buffer, DENSE_BITS_AT, SLOTS),
+    used: new Uint32Array(buffer, DENSE_N_AT, 1),
   };
+}
+
+/**
+ * A copy of a tile, its own memory.
+ * @param tile - The tile.
+ * @returns The copy's views.
+ */
+export function copyTile(tile: TileViews): TileViews {
+  const copy = newTile();
+  copy.planes.set(tile.planes);
+  copy.seqs.set(tile.seqs);
+  copy.bits.set(tile.bits);
+  copy.used[0] = tile.used[0] as number;
+  return copy;
 }
 
 /**
  * Writes one molecule into the next slot of a tile.
  * @param tile - The tile, with a free slot.
- * @param words - The molecule's words: FragFp then the screen.
- * @param offset - Where its 32 words start in `words`.
+ * @param words - The molecule's words: FragFp, the screen, the function keys.
+ * @param offset - Where its 48 words start in `words`.
  * @param seq - Its seq.
  * @param bits - Its FragFp bit count.
  * @returns The slot it took.
@@ -134,8 +152,8 @@ export function addSlot(
  * tile uses is left as it is.
  * @param tile - The tile.
  * @param slot - The slot.
- * @param words - The molecule's words: FragFp then the screen.
- * @param offset - Where its 32 words start in `words`.
+ * @param words - The molecule's words: FragFp, the screen, the function keys.
+ * @param offset - Where its 48 words start in `words`.
  * @param seq - Its seq.
  * @param bits - Its FragFp bit count.
  */
@@ -179,19 +197,10 @@ export function clearSlot(tile: TileViews, slot: number): void {
 }
 
 /**
- * A copy of a tile, its own memory.
- * @param tile - The tile.
- * @returns The copy's views.
- */
-export function copyTile(tile: TileViews): TileViews {
-  return tileViews(tile.data.slice());
-}
-
-/**
- * The 32 words of one slot, read back from the planes.
+ * The 48 words of one slot, read back from the planes.
  * @param tile - The tile.
  * @param slot - The slot.
- * @returns Its words: FragFp then the screen.
+ * @returns Its words: FragFp, the screen, the function keys.
  */
 export function slotWords(tile: TileViews, slot: number): Int32Array {
   const words = new Int32Array(MOLECULE_WORDS);

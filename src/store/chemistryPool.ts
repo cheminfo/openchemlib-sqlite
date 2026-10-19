@@ -213,10 +213,6 @@ export function concatRecords(parts: RecordColumns[]): RecordColumns {
       Int32Array,
       parts.map((part) => part.words),
     ),
-    functions: concatTyped(
-      Int32Array,
-      parts.map((part) => part.functions),
-    ),
     idCodeHashes: concatBig(parts.map((part) => part.idCodeHashes)),
     noStereoHashes: concatBig(parts.map((part) => part.noStereoHashes)),
     tautomerHashes: concatBig(parts.map((part) => part.tautomerHashes)),

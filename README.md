@@ -18,8 +18,8 @@ Two exports:
 
 - Node.js ≥ 22.16 (`node:sqlite`). Use a glibc image (`node:24-slim`), not Alpine: musl's
   allocator serializes multi-threaded reads.
-- RAM for the index: about 183 B per molecule (the prototype's RSS was 24.9 GB at 123.7 M
-  molecules at 181 B; its container is sized 48 GB).
+- RAM for the index: about 265 B per molecule, 192 B of them its 1,536 bit planes: about 32 GB for
+  120 M molecules.
 
 ```sh
 npm install openchemlib-sqlite
@@ -49,27 +49,30 @@ CREATE TABLE ocl_bits (bit INTEGER PRIMARY KEY, population INTEGER NOT NULL); --
 ```
 
 - **`ocl_tile`** holds the fingerprints once, as bit planes: up to 32 molecules of one cell (an atom
-  count and a 1 Da band of OpenChemLib's own weight) per record of 4,292 bytes: 1,024 plane words
-  (FragFp 512, then the 512-key screen), 32 seqs, 32 FragFp bit counts, the slots used. Its key is
-  `(atomCount·2^16 + band)·2^21 + tileSeq`. A commit rewrites only the open tile of each cell it
-  touches.
+  count and a 1 Da band of OpenChemLib's own weight) per record: 1,024 plane words (FragFp 512,
+  then the 512-key screen), 32 seqs, 32 FragFp bit counts, the slots used, then the 512 function-key
+  planes sparsely: a 512-bit mask of those holding a bit, then their words. A record is 4,356 bytes
+  without any function word and 6,404 with all of them; a full tile of the test sample's molecules
+  holds about 125 of the 512, 4,860 bytes. Its key is `(atomCount·2^16 + band)·2^21 + tileSeq`. A
+  commit rewrites only the open tile of each cell it touches.
 - **`ocl_bits`** counts, for each FragFp, screen and function key (rows 0–511, 512–1023 and
   1024–1535, in the order of `getFragFpKeys()`, `getScreenKeys()` and `getFunctionKeyFragments()`),
   how many stored molecules hold it. Every commit adds its new molecules and every removal takes
   them away, in the same transaction: about 2 µs a molecule (commits of 500), against 5.5 ms to
-  prepare one. The function bits are computed for the counts and stored nowhere else.
+  prepare one. The function words are stored in the tiles, planes 1024–1535.
 - **`ocl_meta`** holds `format`, `stamp`, `seq` (the last issued), `count`, `generation`, the
   signatures, and `distinctNoStereo` and `distinctTautomer`: how many distinct identity hashes the
   molecules carry, kept exact by every commit and removal. A file written before they were kept
   gets them counted, once, when a store opens it.
 - **The signatures** say what each part was computed under: `signature.identity` (canonical
-  idCode, atom count, band, both hashes), `signature.fragFp` and `signature.screen` (the tiles),
-  `signature.idCodeHash` (the hash of the idCode), and `counted.fragFp`, `counted.screen`,
+  idCode, atom count, band, both hashes), `signature.fragFp`, `signature.screen` and
+  `signature.functions` (the tiles), `signature.idCodeHash` (the hash of the idCode), and
+  `counted.fragFp`, `counted.screen`,
   `counted.functions` (the bit counts). A fingerprint's
   signature digests its key list and its bits for built-in molecules: the keys catch a changed key
   no built-in molecule holds, the bits catch OpenChemLib reading the same keys differently.
-- **The stamp** digests the identity, FragFp, screen and idCode hash signatures: everything a
-  file stores. A file written under another stamp is refused, and opening a store recomputes 32
+- **The stamp** digests the identity, FragFp, screen, function-key and idCode-hash signatures:
+  everything a file stores. A file written under another stamp is refused, and opening a store recomputes 32
   sampled molecules. What a query is read into is left out: it is never stored, so a release that
   only reads queries better keeps every file.
 
@@ -127,14 +130,14 @@ where the batch's molecules go, so that the commit finds them in the operating s
 A new openchemlib-search-wasm may change keys. Its signatures then differ from the file's, and the
 library knows which part to compute again:
 
-| Changed                                    | This build                             | What `MoleculeStore.rebuild()` does                                  |
-| ------------------------------------------ | -------------------------------------- | -------------------------------------------------------------------- |
-| function keys                              | opens the file; their counts read null | counts them again: 2.0 ms a molecule (its function bits)             |
-| screen keys                                | refuses the file, naming the screen    | computes the screen of every molecule (0.75 ms) and counts it again  |
-| FragFp (OpenChemLib)                       | refuses the file, naming FragFp        | computes FragFp, and the screen if it changed too (2.4 ms with both) |
-| idCode hashes, or a file without them      | refuses the file                       | adds the column and its index, and hashes every stored idCode        |
-| canonization or identity hashes            | refuses the file                       | nothing: commit the idCodes into a new file                          |
-| nothing (a file written before signatures) | gives the file its signatures          | counts the bits of every molecule, and adds its idCode hashes        |
+| Changed                                   | This build                                 | What `MoleculeStore.rebuild()` does                                            |
+| ----------------------------------------- | ------------------------------------------ | ------------------------------------------------------------------------------ |
+| function keys                             | refuses the file, naming the function keys | computes the function words of every molecule (2.0 ms) and counts them         |
+| screen keys                               | refuses the file, naming the screen        | computes the screen of every molecule (0.75 ms) and counts it again            |
+| FragFp (OpenChemLib)                      | refuses the file, naming FragFp            | computes FragFp, and the screen if it changed too (2.4 ms with both)           |
+| idCode hashes, or a file without them     | refuses the file                           | adds the column and its index, and hashes every stored idCode                  |
+| canonization or identity hashes           | refuses the file                           | nothing: commit the idCodes into a new file                                    |
+| a pre-release 6.0 file (4,292-byte tiles) | refuses it                                 | nothing: commit its idCodes into a new file, or migrate its 5.x original again |
 
 The rebuild runs with the new build, in a process of its own with a connection of its own, while
 the build that wrote the file keeps serving it, searches and writes alike:
@@ -146,10 +149,10 @@ the build that wrote the file keeps serving it, searches and writes alike:
 2. A first pass writes, beside the tiles in use, new ones into `ocl_tile_next` (the same keys,
    slots and seqs; only the recomputed bits differ, so ids and the application's rows stay valid)
    and the new counts into `ocl_bits_next`, 256 tiles per short write transaction.
-3. Meanwhile every `commit()` and `remove()` logs the tiles it changes (`ocl_rebuild_tiles`) and the
-   molecules it removes, with their idCodes (`ocl_rebuild_removed`). Catch-up rounds then bring the
-   new tiles up to date from that log: slots are taken in order and never reused, so a slot holds
-   the same molecule in both tiles, or it arrived, or it left.
+3. Meanwhile every `commit()` and `remove()` logs the tiles it changes (`ocl_rebuild_tiles`).
+   Catch-up rounds then bring the new tiles up to date from that log: slots are taken in order and
+   never reused, so a slot holds the same molecule in both tiles, or it arrived (computed from its
+   idCode), or it left (cleared).
 4. Once 512 changes or fewer are left, one transaction takes them, under the write lock, hashes
    the molecules committed since the hash pass began, and puts the new tiles in place: the tiles
    in use are renamed `ocl_tile_old`, the new ones take their name, the new counts replace those of
@@ -220,20 +223,47 @@ const next = await index.substructure(queryIdCode, {
 });
 ```
 
-| Method                                                | Answers                                                                                           |
-| ----------------------------------------------------- | ------------------------------------------------------------------------------------------------- |
-| `MoleculeIndex.open(file, spec, options)`             | loads the image with `readers` threads, or reads back its `snapshot`, then follows the file       |
-| `substructure(queryIdCode, options)`                  | `{ hits: [{ id, key }], next, partial, unverified, info }`, by key then id                        |
-| `browse(options)`                                     | the same walk without a structure                                                                 |
-| `similarity(idCode, { threshold, fingerprint, ... })` | `{ hits: [{ id, score }], next, total, partial, fingerprint, reason, info }`, by Tanimoto then id |
-| `poll()`, `waitForSeq(seq)`                           | catch up now; wait until a seq is searchable                                                      |
-| `version`, `watermark`, `rowCount`, `sets`            | the version searched                                                                              |
-| `saveSnapshot()`                                      | saves the index to its `snapshot` now: null, or why it was not                                    |
-| `tailStats()`, `errors`, `close()`                    |                                                                                                   |
+| Method                                                | Answers                                                                                                                                       |
+| ----------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------- |
+| `MoleculeIndex.open(file, spec, options)`             | loads the image with `readers` threads, or reads back its `snapshot`, then follows the file                                                   |
+| `substructure(queryIdCode, options)`                  | `{ hits: [{ id, key }], next, partial, unverified, info }`, by key then id                                                                    |
+| `browse(options)`                                     | the same walk without a structure                                                                                                             |
+| `count(options)`                                      | `{ total, bySet, byKey, membership, combinations, histogram, complete }`: what a browse with the same options answers, counted in the workers |
+| `similarity(idCode, { threshold, fingerprint, ... })` | `{ hits: [{ id, score }], next, total, partial, fingerprint, reason, info }`, by Tanimoto then id                                             |
+| `poll()`, `waitForSeq(seq)`                           | catch up now; wait until a seq is searchable                                                                                                  |
+| `version`, `watermark`, `rowCount`, `sets`            | the version searched                                                                                                                          |
+| `saveSnapshot()`                                      | saves the index to its `snapshot` now: null, or why it was not                                                                                |
+| `tailStats()`, `errors`, `close()`                    |                                                                                                                                               |
 
-Search options: `limit` (24), `sets` (a union; default `defaultSets`), `filters` (inclusive bounds
-by column), `keyMin` / `keyMax`, `budgetMs` (4,500), `signal`, and `after` (the previous page's
-`next`).
+Search options: `limit` (24), `sets` (rows of at least one of them; default `defaultSets`, every
+alive row without any), `allSets` (rows of every one), `noneSets` (rows of none), `bits` (keys a row
+holds or lacks: `{ all, any, none }`), `filters` (inclusive bounds by column), `keyMin` / `keyMax`,
+`lane` (`'interactive'`), `budgetMs` (4,500), `signal`, and `after` (the previous page's `next`).
+An unknown name in `sets` adds nothing, in `allSets` answers nothing, in `noneSets` removes
+nothing. Esters of source 3 that are not lactones:
+
+```js
+const page = await index.browse({
+  sets: ['source:3'],
+  bits: { all: [1300], none: [1304] }, // 1300 is ester, 1304 lactone
+});
+```
+
+**Key bits.** A key is bit b of the 48-word record `getMoleculeRecords` writes, numbered from the
+highest bit of word 0: word `b >> 5`, mask `1 << (31 - (b & 31))`. FragFp keys are 0–511, the screen
+512–1023, the function keys 1024–1535 (`getFunctionKeyFragments()` order, the dictionary's
+`plane` + 1024). For a function key of the dictionary, openchemlib-search-wasm's
+`getRecordBit(key)` gives `{ word, mask }`, so b is `32 * word + Math.clz32(mask)`; it gives
+undefined for a key computed on demand, which no tile stores. The tiles store every key, so a
+condition on them is exact: a browse with `bits` is never verified, and a substructure search
+verifies its query alone. `all`, `any` and `none` take 256 bits each at most; `any` puts no
+condition when empty.
+
+**Lanes.** A search waits in one of two queues when the workers are busy: when they free up, the
+oldest `'interactive'` search runs before any `'bulk'` one, and a running search is never
+interrupted, so the site's own pages come first and agents, counts and exports run in short turns
+between them. An interactive page's budget counts from the call, as before; a bulk one's from when
+it starts running, so waiting never eats it.
 
 - **Order.** Results come by the order key, then id, exactly. `next` is `{ key, id }`. A partial
   page (the deadline came first) is the exact prefix of the full order, and `next` continues it
@@ -263,7 +293,7 @@ by column), `keyMin` / `keyMax`, `budgetMs` (4,500), `signal`, and `after` (the 
   the index applied is reported in `errors`: open the index again.
 - **Snapshot.** A large store scatters each table's pages over its file, so a load reads millions
   of pages out of order: 32.9 M molecules take 14 minutes from a USB disk. With `snapshot` set to a
-  path, the image is saved there (about 200 B per molecule), and the next open reads that file in
+  path, the image is saved there (about 265 B per molecule), and the next open reads that file in
   order, 14 s for those molecules, then catches up from its watermark and change id: the molecules
   committed since are placed, the changes read again. An open that loads saves it before its tail
   starts. Once the tail has taken in `snapshotRefreshShare` (0.05) of its rows and caught up, it
@@ -281,10 +311,62 @@ by column), `keyMin` / `keyMax`, `budgetMs` (4,500), `signal`, and `after` (the 
   not saved.
 
 Options: `threads`, `readers`, `blockRows` (2^22), `firstSliceRows` (65,536), `similarityUnitWords`,
-`budgetMs`, `follow` (true), `pollMs`, `pollRows`, `appendBlockRows`,
+`countChunkRows` (2^25), `budgetMs`, `follow` (true), `pollMs`, `pollRows`, `appendBlockRows`,
 `headroomRows`, `headroomShare`, `changeBatch`, `watchdogGraceMs` (1,000), `verifyChunkMinMs`
 (1,500), `verifyChunkFactor` (16), `verifySingleMs` (1,000), `snapshot` (none),
 `snapshotRefreshShare` (0.05), `snapshotStaleShare` (1), `onProgress`.
+
+### Counting
+
+`count(options)` takes a browse's options (`limit` aside) and answers how many molecules that
+browse pages through, exactly, in the search workers: the sets, the keys, the filter columns and
+the key bounds are all held in memory, so no row is read from SQL but the rare tied value of a
+filter, as in a search. The same pass tallies, beside the `total`:
+
+- `bySets`: for each set, the rows answering that belong to it (`bySet`; an unknown name counts 0);
+- `byKeys`: for each key bit, the rows answering that hold it (`byKey`), up to all 1,536 at once;
+- `membershipOf`: up to 32 sets. `membership[k]` counts the rows answering that belong to exactly
+  k of them; for 16 sets or fewer, `combinations[m]` counts those that belong to exactly the sets
+  whose bits m sets (bit i for set i): overlaps, "only in this one", "exactly k of n" and UpSet
+  sizes in one call;
+- `histogram`: `{ of, min, width, bins }`, the order key (`of: 'key'`) or one filter column in 1
+  to 100 bins of `width` from `min`: `histogram[0]` counts the rows below `min`, then one entry per
+  bin, then the rows at or above the last bin's end, then the rows without a value. A `float32`
+  column is binned on its float32 value, so a value within 10⁻⁷ (relative) of a bin's edge may fall
+  in the neighbouring bin.
+
+```js
+const { total, bySet, membership } = await index.count({
+  sets: ['listed'],
+  bySets: ['source:1', 'source:2'],
+  membershipOf: ['source:1', 'source:2', 'source:3'],
+});
+```
+
+The key axis is cut into ranges of about `countChunkRows` rows, read from the key histogram, each
+counted as one phase, its own turn of the count's lane (`'bulk'` unless given), so an interactive
+search waits for one range at most. A range counts the version current when it starts: a molecule
+present for the whole count is counted once, one added or removed meanwhile may be counted or not.
+A band whose keys all lie inside the range is counted without reading a key. `budgetMs` counts from
+the first range's start; when it or `signal` ends the count first, `complete` is false and the
+numbers are what was counted.
+
+What a tally costs on one thread, measured by `benchmark/countSinks.ts` on synthetic planes (the
+534 keys over 64 distinct planes), node 24 on an Apple M2 Pro. 2^26 rows lie far beyond the caches;
+the last column multiplies their cost by 60 M rows, which the search workers then share:
+
+| Tally                                 | ns per row, 2^20 rows | ns per row, 2^26 rows | 60 M rows, one thread |
+| ------------------------------------- | --------------------: | --------------------: | --------------------: |
+| `total`: sets and keys                |                  0.22 |                  0.35 |                 21 ms |
+| `byKeys`, 534 keys, every row         |                  29.0 |                  31.5 |                 1.9 s |
+| `byKeys`, 534 keys, 0.1 % of the rows |                  1.54 |                  2.26 |                136 ms |
+| `byKeys`, 534 keys, 0.01 %            |                  0.24 |                  0.44 |                 27 ms |
+| `membershipOf`, 16 sets               |                  10.9 |                  11.9 |                0.71 s |
+| `membershipOf`, 32 sets               |                  22.1 |                  25.3 |                 1.5 s |
+| `histogram`, an int16 column          |                   8.5 |                   8.7 |                0.52 s |
+| `histogram`, a float32 column         |                   8.0 |                   8.0 |                0.48 s |
+
+A filter column adds its test to every row the sets and keys keep, as in a search.
 
 ## Migrating from 5.x
 

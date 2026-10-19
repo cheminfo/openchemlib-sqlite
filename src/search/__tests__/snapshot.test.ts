@@ -21,6 +21,11 @@ import {
   testThreads,
 } from '../../__tests__/testDatabase.ts';
 import { SEQ_SPAN } from '../../chemistry/key.ts';
+import {
+  computeSignatures,
+  computeStamp,
+  stampOf,
+} from '../../chemistry/stamp.ts';
 import { MoleculeStore } from '../../store/MoleculeStore.ts';
 import type { MoleculeIndex } from '../MoleculeIndex.ts';
 import type { IndexSpec } from '../spec.ts';
@@ -208,4 +213,27 @@ test('a snapshot whose newest molecule was removed since is still read back', as
   const steps = await openIndex({}, exact);
 
   expect(steps).toStrictEqual(RESTORED);
+}, 120_000);
+
+test('a snapshot of a build whose function keys differ, as one written before they were stored, is refused', async () => {
+  const stamp = await computeStamp();
+  const other = await stampOf({
+    ...(await computeSignatures()),
+    functions: '0000000000000000',
+  });
+  const bytes = readFileSync(snapshot);
+  const at = bytes.indexOf(stamp, 0, 'latin1');
+
+  expect(at).toBeGreaterThan(0);
+  expect(other).toHaveLength(stamp.length);
+
+  bytes.write(other, at, 'latin1');
+  writeFileSync(snapshot, bytes);
+  const steps = await openIndex({}, exact);
+
+  expect(steps[0]).toBe(
+    'snapshot: saved by another build of openchemlib-sqlite',
+  );
+  expect(steps).toContain('save');
+  await expect(openIndex()).resolves.toStrictEqual(RESTORED);
 }, 120_000);

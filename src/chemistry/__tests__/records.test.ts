@@ -6,6 +6,7 @@ import {
   NO_HASH,
   getFunctions,
   getIndexes,
+  getMoleculeRecords,
   getMoleculeSizes,
   getNoStereoHashes,
   getNoStereoTautomerHashes,
@@ -56,6 +57,7 @@ test('the records agree with the separate wasm calls they replace', () => {
   const records = computeRecords(idCodes);
   const fragFps = getIndexes(idCodes);
   const screens = getScreens(idCodes);
+  const functions = getFunctions(idCodes);
   const sizes = getMoleculeSizes(idCodes);
   const noStereo = getNoStereoHashes(idCodes);
   const counts = new Int32Array(n);
@@ -70,6 +72,7 @@ test('the records agree with the separate wasm calls they replace', () => {
   for (let i = 0; i < n; i++) {
     words.set(fragFps[i] as Int32Array, MOLECULE_WORDS * i);
     words.set(screens[i] as Int32Array, MOLECULE_WORDS * i + 16);
+    words.set(functions[i] as Int32Array, MOLECULE_WORDS * i + 32);
     truncated[i] = (counts[i] as number) >= MAX_TAUTOMERS ? 1 : 0;
     tautomerHashes[i] =
       truncated[i] === 1 || tautomers[i] === NO_HASH
@@ -97,7 +100,7 @@ function joined(fingerprints: Int32Array[]): Int32Array {
   return out;
 }
 
-test('the records carry the function bits and the hash of the canonical idCode, and each way of computing a fingerprint gives the same words', () => {
+test('the records carry the wasm record as it is and the hash of the canonical idCode, and each way of computing a fingerprint gives the same words', () => {
   const sample = idCodes.slice(0, 120);
   const fragFp = joined(getIndexes(sample));
   const screen = joined(getScreens(sample));
@@ -105,7 +108,11 @@ test('the records carry the function bits and the hash of the canonical idCode, 
 
   const records = computeRecords(sample);
 
-  expect(records.functions).toStrictEqual(functions);
+  expect(records.words).toStrictEqual(
+    getMoleculeRecords(sample, { maxTautomers: MAX_TAUTOMERS }).words,
+  );
+  expect(records.words).toHaveLength(48 * sample.length);
+  expect(Object.keys(records)).not.toContain('functions');
   expect(records.idCodeHashes).toStrictEqual(
     BigInt64Array.from(records.idCodes, (idCode) => strongHash(idCode)),
   );

@@ -16,12 +16,6 @@ import { read } from './rebuildStatements.ts';
 /** Log rows a catch-up round reads at most. */
 const ROUND_CHANGES = 4096;
 
-const FUNCTIONS_ONLY: FingerprintNeed = {
-  fragFp: false,
-  screen: false,
-  functions: true,
-};
-
 /** What a round computes, where it writes, and who hears of it. */
 export interface RoundContext {
   tiles: RebuildStatements;
@@ -56,11 +50,7 @@ export async function catchUpRound(
     chemistry && planned.added.length > 0
       ? await pool.fingerprints(planned.added, need)
       : null;
-  const gone =
-    planned.removed.length > 0
-      ? await pool.fingerprints(planned.removed, FUNCTIONS_ONLY)
-      : null;
-  const update = roundTiles(planned.round, added, gone?.functions ?? null);
+  const update = roundTiles(planned.round, added);
   const done = context.done() + update.molecules;
   write(() => applyRound(tiles, planned.round, update, counting, done));
   context.report(update.molecules);
@@ -86,11 +76,7 @@ export function finalRounds(context: RoundContext): void {
       chemistry && planned.added.length > 0
         ? computeFingerprints(planned.added, need)
         : null;
-    const gone =
-      planned.removed.length > 0
-        ? computeFingerprints(planned.removed, FUNCTIONS_ONLY).functions
-        : null;
-    const update = roundTiles(planned.round, added, gone);
+    const update = roundTiles(planned.round, added);
     applyRound(
       tiles,
       planned.round,

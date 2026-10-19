@@ -34,7 +34,6 @@ test('every table a store, a rebuild and a migration create is read, with its in
     'ocl_tile_next',
     'ocl_bits_next',
     'ocl_rebuild_tiles',
-    'ocl_rebuild_removed',
   ]);
   expect(migration.tables.map((table) => table.name)).toStrictEqual([
     'ocl_v5_ids',

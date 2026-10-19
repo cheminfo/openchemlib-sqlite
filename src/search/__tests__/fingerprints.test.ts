@@ -7,6 +7,7 @@ import { DatabaseSync } from 'node:sqlite';
 import * as OCL from 'openchemlib';
 import { afterAll, beforeAll, expect, test } from 'vitest';
 
+import { similarityTruth } from '../../__tests__/similarityTruth.ts';
 import {
   APP_SQL,
   SPEC,
@@ -15,7 +16,7 @@ import {
   testThreads,
 } from '../../__tests__/testDatabase.ts';
 import type { TruthRow } from '../../__tests__/truth.ts';
-import { readTruth, similarityTruth } from '../../__tests__/truth.ts';
+import { readTruth } from '../../__tests__/truth.ts';
 import { MoleculeStore } from '../../store/MoleculeStore.ts';
 import { MoleculeIndex } from '../MoleculeIndex.ts';
 import type { SimilarityFingerprint } from '../fingerprint.ts';

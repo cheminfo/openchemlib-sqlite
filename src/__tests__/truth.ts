@@ -1,17 +1,13 @@
 /* eslint-disable no-await-in-loop -- each page continues the previous one */
 import type { DatabaseSync } from 'node:sqlite';
 
-import {
-  getIndexes,
-  getScreens,
-  substructureSearch,
-} from 'openchemlib-search-wasm';
+import { substructureSearch } from 'openchemlib-search-wasm';
 
-import { popcount32 } from '../chemistry/bits.ts';
 import type { MoleculeIndex } from '../search/MoleculeIndex.ts';
-import type { SimilarityFingerprint } from '../search/fingerprint.ts';
 import type { KeyPage, SearchOptions } from '../search/pages.ts';
 import type { KeyCursor } from '../search/walk/walkPage.ts';
+
+import { storedKeys } from './storedKeys.ts';
 
 /** One molecule as SQL says it is. */
 export interface TruthRow {
@@ -23,24 +19,37 @@ export interface TruthRow {
   charge: number | null;
   listed: boolean;
   sources: Set<number>;
+  /**
+   * The 48 words of `getMoleculeRecords`: FragFp, the screen, the function keys, as the store keeps
+   * them in the molecule's tile slot; empty unless `readTruth` was asked for them.
+   */
+  keys: Int32Array;
 }
 
 /**
  * Every molecule with its application row, from SQL alone, sorted by (key, id).
  * @param db - The test database.
+ * @param options - What else to read.
+ * @param options.keys - Whether to read each molecule's 48 words, for searches with key bits.
  * @returns The rows.
  */
-export function readTruth(db: DatabaseSync): TruthRow[] {
+export function readTruth(
+  db: DatabaseSync,
+  options: { keys?: boolean } = {},
+): TruthRow[] {
   const rows = (
     db
       .prepare(
         'SELECT o.id AS id, o.idCode AS idCode, m.weight AS key, m.logP AS logP, m.hba AS hba, m.charge AS charge, m.listed AS listed FROM ocl_molecule o JOIN molecules m ON m.id = o.id',
       )
-      .all() as Array<Omit<TruthRow, 'listed' | 'sources'> & { listed: number }>
-  ).map((row) => ({
+      .all() as Array<
+      Omit<TruthRow, 'listed' | 'sources' | 'keys'> & { listed: number }
+    >
+  ).map((row): TruthRow => ({
     ...row,
     listed: row.listed === 1,
     sources: new Set<number>(),
+    keys: new Int32Array(0),
   }));
   const byId = new Map(rows.map((row) => [row.id, row]));
   for (const { sourceId, moleculeId } of db
@@ -51,23 +60,50 @@ export function readTruth(db: DatabaseSync): TruthRow[] {
   }>) {
     byId.get(moleculeId)?.sources.add(sourceId);
   }
+  if (options.keys === true) {
+    const keys = storedKeys(db);
+    for (const row of rows) row.keys = keys.get(row.id) as Int32Array;
+  }
   return rows.toSorted((a, b) => a.key - b.key || a.id - b.id);
 }
 
 /**
- * Whether a row passes a search's restriction, filters and key bounds, on exact values.
+ * Whether a row holds a key, as `getMoleculeRecords` numbers its bits.
+ * @param row - The row, read with its keys.
+ * @param bit - The key bit, 0 to 1535.
+ * @returns True when it holds it.
+ */
+export function holdsKey(row: TruthRow, bit: number): boolean {
+  if (row.keys.length === 0) throw new Error('read the truth with its keys');
+  return ((row.keys[bit >> 5] as number) & (1 << (31 - (bit & 31)))) !== 0;
+}
+
+/**
+ * Whether a row belongs to a set of the test specification.
+ * @param row - The row.
+ * @param name - `listed` or `source:<id>`.
+ * @returns True when it belongs to it.
+ */
+export function inSet(row: TruthRow, name: string): boolean {
+  if (name === 'listed') return row.listed;
+  return name.startsWith('source:') && row.sources.has(Number(name.slice(7)));
+}
+
+/**
+ * Whether a row passes a search's sets, key bits, filters and key bounds, on exact values.
  * @param row - The row.
  * @param options - The search's options.
  * @returns True when the index must answer it.
  */
 export function passes(row: TruthRow, options: SearchOptions): boolean {
   const sets = options.sets ?? ['listed'];
-  const inSet = sets.some((name) =>
-    name === 'listed'
-      ? row.listed
-      : name.startsWith('source:') && row.sources.has(Number(name.slice(7))),
-  );
-  if (!inSet) return false;
+  if (!sets.some((name) => inSet(row, name))) return false;
+  if (!(options.allSets ?? []).every((name) => inSet(row, name))) return false;
+  if ((options.noneSets ?? []).some((name) => inSet(row, name))) return false;
+  const { all = [], any = [], none = [] } = options.bits ?? {};
+  if (!all.every((bit) => holdsKey(row, bit))) return false;
+  if (any.length > 0 && !any.some((bit) => holdsKey(row, bit))) return false;
+  if (none.some((bit) => holdsKey(row, bit))) return false;
   if (
     row.key < (options.keyMin ?? -Infinity) ||
     row.key > (options.keyMax ?? Infinity)
@@ -108,10 +144,6 @@ export function substructureTruth(
 }
 
 const matches = new WeakMap<TruthRow[], Map<string, Set<number>>>();
-const fingerprints = new WeakMap<
-  TruthRow[],
-  Map<SimilarityFingerprint, Int32Array[]>
->();
 
 // The positions of the rows a query matches, by the verifier over every row (memoized per truth).
 function matchedRows(rows: TruthRow[], queryIdCode: string): Set<number> {
@@ -124,72 +156,6 @@ function matchedRows(rows: TruthRow[], queryIdCode: string): Set<number> {
     byQuery.set(queryIdCode, found);
   }
   return found;
-}
-
-/**
- * The hits a similarity search must answer: Tanimoto over one fingerprint's words, from the
- * separate wasm calls (FragFp, the screen, or both), score descending then id.
- * @param rows - The truth.
- * @param queryIdCode - The query molecule.
- * @param threshold - The threshold.
- * @param options - The search's options.
- * @param fingerprint - The fingerprint scored.
- * @returns The hits.
- */
-export function similarityTruth(
-  rows: TruthRow[],
-  queryIdCode: string,
-  threshold: number,
-  options: SearchOptions,
-  fingerprint: SimilarityFingerprint = 'fragFp',
-): Array<{ id: number; score: number }> {
-  const query = fingerprintOf([queryIdCode], fingerprint)[0] as Int32Array;
-  let byKind = fingerprints.get(rows);
-  if (byKind === undefined) fingerprints.set(rows, (byKind = new Map()));
-  let words = byKind.get(fingerprint);
-  if (words === undefined) {
-    words = fingerprintOf(
-      rows.map((row) => row.idCode),
-      fingerprint,
-    );
-    byKind.set(fingerprint, words);
-  }
-  const out: Array<{ id: number; score: number }> = [];
-  for (let i = 0; i < rows.length; i++) {
-    const row = rows[i] as TruthRow;
-    if (!passes(row, options)) continue;
-    const fp = words[i] as Int32Array;
-    let shared = 0;
-    let either = 0;
-    for (let w = 0; w < fp.length; w++) {
-      shared += popcount32((fp[w] as number) & (query[w] as number));
-      either += popcount32((fp[w] as number) | (query[w] as number));
-    }
-    const score = shared / either;
-    if (score >= threshold) out.push({ id: row.id, score });
-  }
-  return out.toSorted((a, b) => b.score - a.score || a.id - b.id);
-}
-
-/**
- * Each molecule's words in one fingerprint, from the separate wasm calls.
- * @param idCodes - The molecules.
- * @param fingerprint - The fingerprint.
- * @returns 16 words (FragFp or screen) or 32 (both) per molecule.
- */
-export function fingerprintOf(
-  idCodes: string[],
-  fingerprint: SimilarityFingerprint,
-): Int32Array[] {
-  if (fingerprint === 'fragFp') return getIndexes(idCodes);
-  const screens = getScreens(idCodes);
-  if (fingerprint === 'screen') return screens;
-  return getIndexes(idCodes).map((words, i) => {
-    const both = new Int32Array(32);
-    both.set(words, 0);
-    both.set(screens[i] as Int32Array, 16);
-    return both;
-  });
 }
 
 /**

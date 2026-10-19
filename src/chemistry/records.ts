@@ -8,7 +8,7 @@ import {
   strongHash,
 } from 'openchemlib-search-wasm';
 
-import { FINGERPRINT_WORDS, countBits } from './bits.ts';
+import { FINGERPRINT_WORDS, FUNCTION_WORDS_AT, countBits } from './bits.ts';
 import { clampAtoms } from './key.ts';
 import { MOLECULE_WORDS, bandOfWeight } from './tile.ts';
 
@@ -30,10 +30,8 @@ export interface RecordColumns {
   bands: Int32Array;
   /** FragFp bit counts. */
   bits: Int32Array;
-  /** 32 words per molecule: FragFp then the screen. */
+  /** 48 words per molecule: FragFp, the screen, the function keys; the record of getMoleculeRecords. */
   words: Int32Array;
-  /** 16 words per molecule: the function bits, which the tiles do not store; only counted. */
-  functions: Int32Array;
   /** Hashes of the canonical idCode (StrongHasher); 0 for a molecule with an error. */
   idCodeHashes: BigInt64Array;
   /** No-stereo hashes. */
@@ -60,7 +58,7 @@ export interface FingerprintColumns {
 
 /**
  * Computes, from the idCodes alone and through openchemlib-search-wasm, everything the library
- * stores about each molecule, and its function bits. One parse per molecule.
+ * stores about each molecule. One parse per molecule.
  * @param inputs - The idCodes.
  * @returns The values, column by column, in input order.
  */
@@ -75,8 +73,7 @@ export function computeRecords(inputs: readonly string[]): RecordColumns {
     atoms: new Int32Array(n),
     bands: new Int32Array(n),
     bits: new Int32Array(n),
-    words: wordsOf(records.words, n, 0, MOLECULE_WORDS),
-    functions: wordsOf(records.words, n, MOLECULE_WORDS, FINGERPRINT_WORDS),
+    words: records.words,
     idCodeHashes: new BigInt64Array(n),
     noStereoHashes: records.noStereoHashes,
     tautomerHashes: records.tautomerHashes,
@@ -126,7 +123,7 @@ export function computeFingerprints(
     return {
       fragFp: need.fragFp ? part(0) : null,
       screen: need.screen ? part(FINGERPRINT_WORDS) : null,
-      functions: need.functions ? part(MOLECULE_WORDS) : null,
+      functions: need.functions ? part(FUNCTION_WORDS_AT) : null,
     };
   }
   return {

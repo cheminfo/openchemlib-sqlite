@@ -1,21 +1,21 @@
-<svg xmlns="http://www.w3.org/2000/svg" width="1100" height="1298" viewBox="0 0 1100 1298">
+<svg xmlns="http://www.w3.org/2000/svg" width="1150" height="1298" viewBox="0 0 1150 1298">
 <title>openchemlib-sqlite — the tables it writes</title>
-<rect width="1100" height="1298" fill="#f5f7fa"/>
+<rect width="1150" height="1298" fill="#f5f7fa"/>
 <text x="40" y="44" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif" font-size="22" font-weight="700" fill="#16202c">openchemlib-sqlite — the tables it writes</text>
 <text x="40" y="68" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="12" fill="#5b6875">Drawn by npm run schema-svg. PK primary key · FK foreign key · NN not null · dotted frame: only during a rebuild or a migration.</text>
-<rect x="20" y="92" width="1060" height="392" rx="16" fill="none" stroke="#c3cad3"/>
+<rect x="20" y="92" width="1110" height="392" rx="16" fill="none" stroke="#c3cad3"/>
 <text x="40" y="122" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif" font-size="16" font-weight="700" fill="#16202c">The store — in the application’s database file, created by MoleculeStore.open()</text>
 <text x="40" y="146" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="12" fill="#5b6875">File format openchemlib-sqlite 6. Created, checked and written only by the library; the application keys its own rows by ocl_molecule.id.</text>
 <text x="40" y="166" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="12" fill="#5b6875">Computed from the idCode alone: id = atomCount·2^36 + seq (arrival order, never reused, at most 2^32 − 1), and the three hashes.</text>
-<text x="40" y="186" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="12" fill="#5b6875">ocl_tile: up to 32 molecules of one atom count and 1 Da band as 1,024 bit planes (FragFp 512, screen 512); id = (atoms·2^16 + band)·2^21 + n.</text>
-<text x="40" y="206" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="12" fill="#5b6875">ocl_bits: how many molecules hold each of the 1,536 keys (FragFp 0–511, screen 512–1023, functions 1024–1535), kept by every commit.</text>
+<text x="40" y="186" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="12" fill="#5b6875">ocl_tile: up to 32 molecules of one atom count and 1 Da band as 1,536 bit planes (FragFp, screen, function keys); id = (atoms·2^16 + band)·2^21 + n.</text>
+<text x="40" y="206" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="12" fill="#5b6875">Its function planes are stored sparsely: a 512-bit mask, then the non-zero words. ocl_bits: how many molecules hold each of the 1,536 keys.</text>
 <text x="40" y="226" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="12" fill="#5b6875">ocl_meta: format, stamp, signatures, generation, the last seq, count; and where a rebuild under way is.</text>
-<rect x="20" y="520" width="1060" height="342" rx="16" fill="none" stroke="#8a96a3" stroke-width="2" stroke-dasharray="0.1 6" stroke-linecap="round"/>
+<rect x="20" y="520" width="1110" height="342" rx="16" fill="none" stroke="#8a96a3" stroke-width="2" stroke-dasharray="0.1 6" stroke-linecap="round"/>
 <text x="40" y="550" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif" font-size="16" font-weight="700" fill="#16202c">While a rebuild runs — beside the store’s tables, gone once it switches</text>
 <text x="40" y="574" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="12" fill="#5b6875">MoleculeStore.rebuild() builds new tiles and counts here when the keys change; writers go on and log what they touch.</text>
 <text x="40" y="594" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="12" fill="#5b6875">The switch renames ocl_tile_next to ocl_tile and copies ocl_bits_next into ocl_bits under one write lock, then drops the logs.</text>
 <text x="40" y="614" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="12" fill="#5b6875">A file without idCode hashes gets ocl_molecule.idCodeHash and its index, filled a step at a time.</text>
-<rect x="20" y="898" width="1060" height="376" rx="16" fill="none" stroke="#8a96a3" stroke-width="2" stroke-dasharray="0.1 6" stroke-linecap="round"/>
+<rect x="20" y="898" width="1110" height="376" rx="16" fill="none" stroke="#8a96a3" stroke-width="2" stroke-dasharray="0.1 6" stroke-linecap="round"/>
 <text x="40" y="928" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif" font-size="16" font-weight="700" fill="#16202c">While migrating from 5.x — beside the 5.x tables, until dropV5Tables()</text>
 <text x="40" y="952" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="12" fill="#5b6875">migrateFromV5() converts every entry of the application’s table (here `entries`) while 5.x keeps serving it.</text>
 <text x="40" y="972" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="12" fill="#5b6875">ocl_v5_ids: the id each entry got, or why it got none, for the application to re-key its rows.</text>
@@ -61,13 +61,6 @@
 <text x="52" y="664" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="12" font-weight="700" fill="#ffffff">ocl_rebuild_tiles<tspan font-weight="400" fill-opacity="0.85">  </tspan></text>
 <text x="52" y="693" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="12" font-weight="700" fill="#16202c">seq<tspan fill="#8a96a3">  INTEGER</tspan><tspan fill="#5b6875">  PK</tspan></text>
 <text x="52" y="712" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="12" fill="#16202c">id<tspan fill="#8a96a3">  INTEGER</tspan><tspan fill="#5b6875">  NN</tspan></text>
-</g>
-<g>
-<rect x="40" y="754" width="166" height="80" rx="10" fill="#ffffff" stroke="#c3cad3"/>
-<path d="M40 784V764a10 10 0 0 1 10 -10H196a10 10 0 0 1 10 10V784Z" fill="#5b6875"/>
-<text x="52" y="774" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="12" font-weight="700" fill="#ffffff">ocl_rebuild_removed<tspan font-weight="400" fill-opacity="0.85">  </tspan></text>
-<text x="52" y="803" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="12" font-weight="700" fill="#16202c">id<tspan fill="#8a96a3">  INTEGER</tspan><tspan fill="#5b6875">  PK</tspan></text>
-<text x="52" y="822" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="12" fill="#16202c">idCode<tspan fill="#8a96a3">  TEXT</tspan><tspan fill="#5b6875">  NN</tspan></text>
 </g>
 <g>
 <rect x="420" y="644" width="137" height="80" rx="10" fill="#ffffff" stroke="#c3cad3"/>

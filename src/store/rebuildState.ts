@@ -5,11 +5,11 @@ import type { Signatures } from '../chemistry/stamp.ts';
 import type { CountedFingerprint } from './bitCounts.ts';
 import { COUNTS_AT, FINGERPRINT_BITS } from './bitCounts.ts';
 import { dropInSteps } from './dropInSteps.ts';
+import type { StoredFingerprint } from './metaChecks.ts';
 import {
   CHANGED_TILES_SQL,
   NEXT_COUNTS_SQL,
   NEXT_TILES_SQL,
-  REMOVED_SQL,
 } from './rebuildSchema.ts';
 import {
   ID_CODE_HASH_INDEX_SQL,
@@ -41,7 +41,7 @@ export interface RebuildPosition {
 /** What a rebuild changes. */
 export interface RebuildPlan {
   /** The fingerprints whose tiles are computed again. */
-  tiles: Array<'fragFp' | 'screen'>;
+  tiles: StoredFingerprint[];
   /** The fingerprints counted again. */
   counts: CountedFingerprint[];
   /** Whether the idCode hashes are written again, the column and its index added when missing. */
@@ -61,11 +61,7 @@ const REBUILD_ROWS = [
 ];
 
 /** The tables of a rebuild under way, beside the new tiles. */
-const REBUILD_TABLES = [
-  'ocl_bits_next',
-  'ocl_rebuild_tiles',
-  'ocl_rebuild_removed',
-];
+const REBUILD_TABLES = ['ocl_bits_next', 'ocl_rebuild_tiles'];
 
 /**
  * Starts the rebuild, or takes over the one under way for the same build: creates the new tiles
@@ -123,7 +119,6 @@ export function beginRebuild(
         position.hashFrom = readMeta(db).seq;
       }
       db.exec(CHANGED_TILES_SQL);
-      db.exec(REMOVED_SQL);
       set.run('rebuild', target);
       set.run('rebuild.cursor', -1);
       set.run('rebuild.done', 0);

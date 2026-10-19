@@ -7,7 +7,6 @@ import { prepareSetMeta } from './rebuildState.ts';
 export type RebuildStatements = Record<
   | 'readTiles'
   | 'readIdCode'
-  | 'readRemoved'
   | 'changes'
   | 'source'
   | 'next'
@@ -15,7 +14,6 @@ export type RebuildStatements = Record<
   | 'upsertTile'
   | 'addCount'
   | 'deleteChanges'
-  | 'deleteRemoved'
   | 'pending'
   | 'setMeta',
   StatementSync
@@ -33,7 +31,6 @@ export function prepareStatements(db: DatabaseSync): RebuildStatements {
       'SELECT id, data FROM ocl_tile WHERE id > ? ORDER BY id LIMIT ?',
     ),
     readIdCode: prepare('SELECT idCode FROM ocl_molecule WHERE id = ?'),
-    readRemoved: prepare('SELECT idCode FROM ocl_rebuild_removed WHERE id = ?'),
     changes: prepare(
       'SELECT seq, id FROM ocl_rebuild_tiles ORDER BY seq LIMIT ?',
     ),
@@ -45,7 +42,6 @@ export function prepareStatements(db: DatabaseSync): RebuildStatements {
     ),
     addCount: prepareAddCount(db, 'ocl_bits_next'),
     deleteChanges: prepare('DELETE FROM ocl_rebuild_tiles WHERE seq <= ?'),
-    deleteRemoved: prepare('DELETE FROM ocl_rebuild_removed WHERE id = ?'),
     pending: prepare(
       'SELECT max(seq) - min(seq) + 1 AS n FROM ocl_rebuild_tiles',
     ),
@@ -79,29 +75,14 @@ export function pending(statements: RebuildStatements): number {
 }
 
 /**
- * The idCode of a molecule a tile holds, from the removal log when it left since.
+ * The idCode of a molecule a tile holds, read in the same read transaction as the tile: a removal
+ * empties the slot and deletes the row together.
  * @param statements - The statements.
  * @param id - The molecule.
  * @returns Its idCode.
  */
 export function idCodeOf(statements: RebuildStatements, id: number): string {
-  const row = (statements.readIdCode.get(id) ??
-    statements.readRemoved.get(id)) as { idCode: string } | undefined;
+  const row = statements.readIdCode.get(id) as { idCode: string } | undefined;
   if (row === undefined) throw new Error(`no idCode for id ${id}`);
-  return row.idCode;
-}
-
-/**
- * The idCode of a molecule removed while the rebuild ran.
- * @param statements - The statements.
- * @param id - The molecule.
- * @returns Its idCode.
- */
-export function removedIdCode(
-  statements: RebuildStatements,
-  id: number,
-): string {
-  const row = statements.readRemoved.get(id) as { idCode: string } | undefined;
-  if (row === undefined) throw new Error(`id ${id} left without its idCode`);
   return row.idCode;
 }

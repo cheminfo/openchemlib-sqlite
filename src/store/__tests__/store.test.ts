@@ -5,6 +5,7 @@ import { DatabaseSync } from 'node:sqlite';
 
 import * as OCL from 'openchemlib';
 import {
+  getFunction,
   getIndex,
   getNoStereoHash,
   getScreen,
@@ -16,7 +17,8 @@ import { testThreads } from '../../__tests__/testDatabase.ts';
 import { countBits } from '../../chemistry/bits.ts';
 import { SEQ_SPAN, atomCountOf } from '../../chemistry/key.ts';
 import { computeStamp } from '../../chemistry/stamp.ts';
-import { slotWords, tileViews } from '../../chemistry/tile.ts';
+import { slotWords } from '../../chemistry/tile.ts';
+import { tileViews } from '../../chemistry/tileRecord.ts';
 import { MoleculeStore } from '../MoleculeStore.ts';
 
 const smiles = (text: string) => OCL.Molecule.fromSmiles(text).getIDCode();
@@ -87,8 +89,11 @@ test('prepare computes every stored value from the idCode, and commit writes the
   expect(Array.from(words.subarray(0, 16))).toStrictEqual(
     Array.from(getIndex(BENZENE)),
   );
-  expect(Array.from(words.subarray(16))).toStrictEqual(
+  expect(Array.from(words.subarray(16, 32))).toStrictEqual(
     Array.from(getScreen(BENZENE)),
+  );
+  expect(Array.from(words.subarray(32))).toStrictEqual(
+    Array.from(getFunction(BENZENE)),
   );
   expect(views.bits[0]).toBe(countBits(getIndex(BENZENE), 0, 16));
 });

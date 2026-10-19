@@ -14,80 +14,18 @@ import {
   readIdCodes,
   testThreads,
 } from '../../__tests__/testDatabase.ts';
-import {
-  readAll,
-  readTruth,
-  similarityTruth,
-  substructureTruth,
-} from '../../__tests__/truth.ts';
 import { MoleculeStore } from '../../store/MoleculeStore.ts';
 import { MoleculeIndex } from '../MoleculeIndex.ts';
-import type { SearchOptions } from '../pages.ts';
+
+import { expectExact } from './tailChecks.ts';
 
 const smiles = (text: string) => OCL.Molecule.fromSmiles(text).getIDCode();
-const QUERIES = [
-  '',
-  smiles('c1ccccc1'),
-  smiles('Oc1ccccc1'),
-  smiles('ClCCCO'),
-  'gOp@DjWkB@@Mi`',
-];
-const SETS: SearchOptions[] = [
-  {},
-  { sets: ['source:2'] },
-  { sets: ['source:3'] },
-  { sets: ['source:4'] },
-  { keyMin: 150, keyMax: 300, filters: { logP: { min: 0 } } },
-];
-
 let directory: string;
 let file: string;
 let db: DatabaseSync;
 let store: MoleculeStore;
 let index: MoleculeIndex;
 let late: string[];
-
-/**
- * Every query × set paged to the end through the index, against brute force over SQL.
- * @param label - What the check follows.
- */
-async function expectExact(label: string): Promise<void> {
-  await index.poll();
-  const rows = readTruth(db);
-  for (const query of QUERIES) {
-    for (const options of SETS) {
-      const expected = substructureTruth(rows, query, options);
-      const { ids } = await readAll(index, query, { ...options, limit: 1000 });
-
-      expect(
-        ids,
-        `${label}: ${query || 'browse'} ${JSON.stringify(options)}`,
-      ).toStrictEqual(expected);
-
-      const tight = await readAll(index, query, {
-        ...options,
-        limit: 40,
-        budgetMs: 2,
-      });
-
-      expect(tight.ids, `${label}, 2 ms pages`).toStrictEqual(expected);
-    }
-  }
-  const benzene = smiles('c1ccccc1');
-  // The tail counts the screen bits of each row it appends: every fingerprint must agree.
-  for (const fingerprint of ['fragFp', 'screen', 'both'] as const) {
-    const similar = await index.similarity(benzene, {
-      threshold: 0.5,
-      fingerprint,
-      limit: 1000,
-      budgetMs: 60_000,
-    });
-
-    expect(similar.hits, `${label}: similarity, ${fingerprint}`).toStrictEqual(
-      similarityTruth(rows, benzene, 0.5, {}, fingerprint),
-    );
-  }
-}
 
 beforeAll(async () => {
   directory = mkdtempSync(join(tmpdir(), 'ocl-sqlite-tail-'));
@@ -131,7 +69,7 @@ test('new molecules, into bands the image holds and new ones, are found once pub
 
   expect(page.hits.map((hit) => hit.id)).toStrictEqual([bigId]);
 
-  await expectExact('new molecules');
+  await expectExact(index, db, 'new molecules');
 }, 120_000);
 
 test('entries added, removed and moved, private-only molecules, removed molecules, a late source', async () => {
@@ -176,7 +114,7 @@ test('entries added, removed and moved, private-only molecules, removed molecule
     old[301] as number,
   );
   db.exec('COMMIT');
-  await expectExact('set changes');
+  await expectExact(index, db, 'set changes');
 
   expect(index.sets).toContain('source:4');
 }, 120_000);
@@ -201,7 +139,7 @@ test('one cell filled poll after poll: its append area moves while published', a
     });
     await index.poll();
   }
-  await expectExact('area moves');
+  await expectExact(index, db, 'area moves');
 
   const stats = await index.tailStats();
 
@@ -239,5 +177,5 @@ test('commits during searches: every answer stays in (key, id) order, then exact
 
   await expect(searches).resolves.toBeGreaterThan(0);
 
-  await expectExact('writes during searches');
+  await expectExact(index, db, 'writes during searches');
 }, 120_000);

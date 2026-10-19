@@ -3,6 +3,7 @@ import type { Layout } from '../layout.ts';
 import type { SearchPool } from '../pool/SearchPool.ts';
 import type { SimilarityReply } from '../pool/messages.ts';
 import type { ColumnBound } from '../pool/rowFilter.ts';
+import type { SetExpression } from '../setExpression.ts';
 
 /** A position in a ranked answer: score descending, then id ascending, in one fingerprint. */
 export interface ScoreCursor {
@@ -33,11 +34,21 @@ export interface SimilarityPlan {
   atoms: number;
 }
 
+/** The key planes a similarity search filters on: they never enter the score. */
+export interface KeyFilter {
+  /** The planes a row must hold or lack, by survival, and their flips (0 hold, -1 lack). */
+  planes: Int32Array;
+  flips: Int32Array;
+  /** The planes of the OR group, empty for none. */
+  anyPlanes: Int32Array;
+}
+
 /** One ranked page. */
 export interface SimilarityTask {
   layout: Layout;
   plan: SimilarityPlan;
-  restriction: SharedArrayBuffer;
+  sets: SetExpression;
+  keys: KeyFilter;
   bounds: ColumnBound[];
   keyMin: number;
   keyMax: number;
@@ -75,7 +86,7 @@ export async function similarityPage(
   pool: SearchPool,
   task: SimilarityTask,
 ): Promise<SimilarityResult> {
-  const { layout, plan, limit, unitWords, restriction, bounds } = task;
+  const { layout, plan, limit, unitWords, sets, keys, bounds } = task;
   const { keyMin, keyMax, cursor, deadline, signal } = task;
   const { entries, units } = layout.similarityUnits(unitWords, plan.atoms);
   const nUnits = units.length / 2;
@@ -106,7 +117,10 @@ export async function similarityPage(
       units,
       counter: new SharedArrayBuffer(4),
       planes: plan.planes,
-      restriction,
+      sets,
+      keyPlanes: keys.planes,
+      keyFlips: keys.flips,
+      anyPlanes: keys.anyPlanes,
       low: plan.low,
       high: plan.high,
       threshold: plan.threshold,

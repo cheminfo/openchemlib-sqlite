@@ -3,14 +3,15 @@ import type { DatabaseSync } from 'node:sqlite';
 import { XSadd } from 'ml-xsadd';
 import { strongHash } from 'openchemlib-search-wasm';
 
+import { FINGERPRINT_WORDS, FUNCTION_WORDS_AT } from '../chemistry/bits.ts';
 import { SEQ_SPAN, atomCountOf, seqOf } from '../chemistry/key.ts';
 import {
   MOLECULE_WORDS,
   TILE_SPAN,
   slotWords,
   tileKey,
-  tileViews,
 } from '../chemistry/tile.ts';
+import { tileViews } from '../chemistry/tileRecord.ts';
 
 import type { ChemistryPool } from './chemistryPool.ts';
 
@@ -37,7 +38,7 @@ export function mismatchError(mismatches: CheckMismatch[]): Error {
 /**
  * Recomputes a seeded sample of stored molecules from their idCodes and compares every stored
  * value: the atom count in the id, both identity hashes, the canonical idCode and the hash of the
- * one stored, the cell of its tile slot, its 1,024 bits and its bit count. OpenChemLib's canonical idCode of a few molecules flips
+ * one stored, the cell of its tile slot, its 1,536 bits and its bit count. OpenChemLib's canonical idCode of a few molecules flips
  * between two forms, each canonicalizing to the other (PubChem CID 9942100): an idCode that
  * differs alone is accepted when canonicalizing it again gives back the stored one.
  * @param db - The connection.
@@ -89,7 +90,7 @@ export async function checkSample(
       );
       for (let word = 0; word < MOLECULE_WORDS; word++) {
         if (slot.words[word] !== words[word]) {
-          what.push(word < 16 ? 'FragFp' : 'screen');
+          what.push(wordPart(word));
           break;
         }
       }
@@ -200,4 +201,14 @@ function findSlot(
     }
   }
   return undefined;
+}
+
+/**
+ * The fingerprint a word of a molecule's 48 belongs to.
+ * @param word - The word.
+ * @returns 'FragFp', 'screen' or 'functions'.
+ */
+function wordPart(word: number): string {
+  if (word < FINGERPRINT_WORDS) return 'FragFp';
+  return word < FUNCTION_WORDS_AT ? 'screen' : 'functions';
 }

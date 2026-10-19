@@ -7,7 +7,7 @@ import {
   strongHash,
 } from 'openchemlib-search-wasm';
 
-import { FINGERPRINT_WORDS } from './bits.ts';
+import { FINGERPRINT_WORDS, FUNCTION_WORDS_AT } from './bits.ts';
 import { MAX_TAUTOMERS, computeRecords } from './records.ts';
 import { STAMP_MOLECULES } from './stampData.ts';
 import { MOLECULE_WORDS, bandOfWeight } from './tile.ts';
@@ -28,7 +28,7 @@ export interface Signatures {
   fragFp: string;
   /** The screen keys and the built-in molecules' screen. */
   screen: string;
-  /** The function keys and the built-in molecules' function bits, which are only counted. */
+  /** The function keys and the built-in molecules' function words, stored in the tiles. */
   functions: string;
   /** The hash of the canonical idCode: OpenChemLib's StrongHasher, on the built-in molecules. */
   idCodeHash: string;
@@ -37,14 +37,12 @@ export interface Signatures {
 /** The signatures a stamp is made of: everything a file stores. */
 export type StampParts = Pick<
   Signatures,
-  'identity' | 'fragFp' | 'screen' | 'idCodeHash'
+  'identity' | 'fragFp' | 'screen' | 'functions' | 'idCodeHash'
 >;
 
 interface Built {
   signatures: Signatures;
   stamp: string;
-  upgradeStamp: string;
-  legacyStamp: string;
 }
 
 let built: Promise<Built> | undefined;
@@ -60,9 +58,9 @@ export async function computeSignatures(): Promise<Signatures> {
 }
 
 /**
- * The stamp of this build: the format, then a digest of the identity, FragFp, screen and idCode
- * hash signatures, everything a file stores. A file written under another stamp is refused. The function bits are left out: nothing stores them, so a new list only means counting
- * them again.
+ * The stamp of this build: the format, then a digest of the identity, FragFp, screen, function-key
+ * and idCode hash signatures, everything a file stores. A file written under another stamp is
+ * refused.
  * @returns The stamp, computed once per process.
  */
 export async function computeStamp(): Promise<string> {
@@ -72,35 +70,13 @@ export async function computeStamp(): Promise<string> {
 }
 
 /**
- * The stamp a file written before signatures is given: this build's molecules and tiles, and no
- * idCode hashes yet, which `MoleculeStore.rebuild()` adds.
- * @returns That stamp, computed once per process.
- */
-export async function computeUpgradeStamp(): Promise<string> {
-  built ??= buildSignatures();
-  const { upgradeStamp } = await built;
-  return upgradeStamp;
-}
-
-/**
  * The stamp of what a file stores.
  * @param parts - The signatures of its molecules, tiles and idCode hashes; `''` for a part it lacks.
  * @returns The format, then a digest of the parts.
  */
 export async function stampOf(parts: StampParts): Promise<string> {
-  const { identity, fragFp, screen, idCodeHash } = parts;
-  return `${FORMAT}:${await digest([identity, fragFp, screen, idCodeHash].join('\n'))}`;
-}
-
-/**
- * The stamp a file written before the library kept signatures carries: the same outputs without
- * the key lists. A file holding it is what this build writes, so it is given its signatures.
- * @returns That stamp, computed once per process.
- */
-export async function computeLegacyStamp(): Promise<string> {
-  built ??= buildSignatures();
-  const { legacyStamp } = await built;
-  return legacyStamp;
+  const { identity, fragFp, screen, functions, idCodeHash } = parts;
+  return `${FORMAT}:${await digest([identity, fragFp, screen, functions, idCodeHash].join('\n'))}`;
 }
 
 /**
@@ -118,9 +94,7 @@ export function fingerprintSignature(
 }
 
 async function buildSignatures(): Promise<Built> {
-  const head = [FORMAT, `maxTautomers=${MAX_TAUTOMERS}`];
-  const identity = [...head];
-  const legacy = [...head];
+  const identity = [FORMAT, `maxTautomers=${MAX_TAUTOMERS}`];
   const fragFp: string[] = [];
   const screen: string[] = [];
   const functions: string[] = [];
@@ -145,24 +119,21 @@ async function buildSignatures(): Promise<Built> {
     idCodeHashes.push(hashToHex(strongHash(records.idCodes[i] as string)));
     const noStereo = hashToHex(records.noStereoHashes[i] as bigint);
     const tautomer = hashToHex(records.tautomerHashes[i] as bigint);
-    const molecule = [records.idCodes[i], records.atoms[i], records.bands[i]];
-    const end = [noStereo, tautomer, records.truncated[i]];
-    identity.push([...molecule, ...end].join('|'));
-    legacy.push(
-      [...molecule, hexWords(words), records.bits[i], ...end].join('|'),
+    identity.push(
+      [
+        records.idCodes[i],
+        records.atoms[i],
+        records.bands[i],
+        noStereo,
+        tautomer,
+        records.truncated[i],
+      ].join('|'),
     );
     fragFp.push(
       `${hexWords(words.subarray(0, FINGERPRINT_WORDS))}|${records.bits[i]}`,
     );
-    screen.push(hexWords(words.subarray(FINGERPRINT_WORDS)));
-    functions.push(
-      hexWords(
-        records.functions.subarray(
-          i * FINGERPRINT_WORDS,
-          (i + 1) * FINGERPRINT_WORDS,
-        ),
-      ),
-    );
+    screen.push(hexWords(words.subarray(FINGERPRINT_WORDS, FUNCTION_WORDS_AT)));
+    functions.push(hexWords(words.subarray(FUNCTION_WORDS_AT)));
   }
   const signatures: Signatures = {
     identity: await digest(identity.join('\n')),
@@ -174,12 +145,7 @@ async function buildSignatures(): Promise<Built> {
     ),
     idCodeHash: await digest(idCodeHashes.join('\n')),
   };
-  return {
-    signatures,
-    stamp: await stampOf(signatures),
-    upgradeStamp: await stampOf({ ...signatures, idCodeHash: '' }),
-    legacyStamp: `${FORMAT}:${await digest(legacy.join('\n'))}`,
-  };
+  return { signatures, stamp: await stampOf(signatures) };
 }
 
 async function digest(text: string): Promise<string> {

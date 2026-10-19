@@ -23,7 +23,6 @@ export const STORE_PLACES = new Map<string, Place>([
  */
 export const REBUILD_PLACES = new Map<string, Place>([
   ['ocl_rebuild_tiles', { x: 40, y: 0, tint: SLATE }],
-  ['ocl_rebuild_removed', { x: 40, y: 0, tint: SLATE }],
   ['ocl_tile_next', { x: 420, y: 0, tint: AMBER }],
   ['ocl_bits_next', { x: 420, y: 0, tint: AMBER }],
 ]);
@@ -110,8 +109,8 @@ export function framesOf(drawing: SchemaDrawing): FrameContent[] {
       notes: [
         `File format ${format}. Created, checked and written only by the library; the application keys its own rows by ocl_molecule.id.`,
         'Computed from the idCode alone: id = atomCount·2^36 + seq (arrival order, never reused, at most 2^32 − 1), and the three hashes.',
-        'ocl_tile: up to 32 molecules of one atom count and 1 Da band as 1,024 bit planes (FragFp 512, screen 512); id = (atoms·2^16 + band)·2^21 + n.',
-        'ocl_bits: how many molecules hold each of the 1,536 keys (FragFp 0–511, screen 512–1023, functions 1024–1535), kept by every commit.',
+        'ocl_tile: up to 32 molecules of one atom count and 1 Da band as 1,536 bit planes (FragFp, screen, function keys); id = (atoms·2^16 + band)·2^21 + n.',
+        'Its function planes are stored sparsely: a 512-bit mask, then the non-zero words. ocl_bits: how many molecules hold each of the 1,536 keys.',
         'ocl_meta: format, stamp, signatures, generation, the last seq, count; and where a rebuild under way is.',
       ],
       schema: store,

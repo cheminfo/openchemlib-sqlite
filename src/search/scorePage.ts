@@ -1,8 +1,10 @@
 import type { SimilarityFingerprint } from './fingerprint.ts';
 import { checkFingerprint } from './fingerprint.ts';
+import { readKeyBits } from './keyBits.ts';
 import type { PageContext, SearchOptions } from './pages.ts';
 import { pageLimit } from './pages.ts';
-import { readFilters, restrictionOf, similarityPlan } from './query.ts';
+import { orderPlanes, readFilters, similarityPlan } from './query.ts';
+import { setExpression } from './setExpression.ts';
 import type { ScoreCursor } from './walk/similarityPage.ts';
 import { similarityPage } from './walk/similarityPage.ts';
 
@@ -93,54 +95,74 @@ export async function scorePage(
     fingerprint,
     layout.frequencies,
   );
+  const keys = readKeyBits(options.bits);
   const info = { units: 0, unitsDone: 0, scored: 0, version: layout.version };
-  if (plan.qBits === 0) {
+  const sets = setExpression(layout, options, defaultSets);
+  if (plan.qBits === 0 || sets === null) {
     return {
       hits: [],
       next: undefined,
       total: 0,
       partial: false,
       fingerprint,
-      reason: NO_BIT[fingerprint],
+      reason: plan.qBits === 0 ? NO_BIT[fingerprint] : undefined,
       info,
     };
   }
-  const restriction = restrictionOf(layout, options.sets ?? defaultSets);
   const bounds = readFilters(layout.layout, options.filters);
   const limit = pageLimit(options.limit);
-  const deadline = started + (options.budgetMs ?? budgetMs);
-  return pool.search(async () => {
-    const run = await similarityPage(pool, {
-      layout,
-      plan,
-      restriction,
-      bounds,
-      keyMin: options.keyMin ?? -Infinity,
-      keyMax: options.keyMax ?? Infinity,
-      limit,
-      deadline,
-      signal: options.signal,
-      cursor: after ?? null,
-      unitWords: similarityUnitWords,
-    });
-    const complete = run.reason === 'exhausted';
-    const last = run.top.at(-1);
-    return {
-      hits: run.top.map(([id, score]) => ({ id, score })),
-      next:
-        complete && last !== undefined && run.afterTotal > limit
-          ? { score: last[1], id: last[0], fingerprint }
-          : undefined,
-      total: run.total,
-      partial: !complete,
-      fingerprint,
-      reason: undefined,
-      info: {
-        ...info,
-        units: run.units,
-        unitsDone: run.unitsDone,
-        scored: run.scored,
-      },
-    };
+  const budget = options.budgetMs ?? budgetMs;
+  const lane = options.lane ?? 'interactive';
+  const settle = (): ScorePage => ({
+    hits: [],
+    next: undefined,
+    total: 0,
+    partial: true,
+    fingerprint,
+    reason: undefined,
+    info,
   });
+  return pool.search(
+    async () => {
+      const deadline = (lane === 'bulk' ? performance.now() : started) + budget;
+      const run = await similarityPage(pool, {
+        layout,
+        plan,
+        sets,
+        keys: {
+          ...orderPlanes(keys.all, keys.none, layout.frequencies),
+          anyPlanes: keys.any,
+        },
+        bounds,
+        keyMin: options.keyMin ?? -Infinity,
+        keyMax: options.keyMax ?? Infinity,
+        limit,
+        deadline,
+        signal: options.signal,
+        cursor: after ?? null,
+        unitWords: similarityUnitWords,
+      });
+      const complete = run.reason === 'exhausted';
+      const last = run.top.at(-1);
+      return {
+        hits: run.top.map(([id, score]) => ({ id, score })),
+        next:
+          complete && last !== undefined && run.afterTotal > limit
+            ? { score: last[1], id: last[0], fingerprint }
+            : undefined,
+        total: run.total,
+        partial: !complete,
+        fingerprint,
+        reason: undefined,
+        info: {
+          ...info,
+          units: run.units,
+          unitsDone: run.unitsDone,
+          scored: run.scored,
+        },
+      };
+    },
+    lane,
+    { signal: options.signal, settle },
+  );
 }

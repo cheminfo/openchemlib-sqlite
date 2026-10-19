@@ -5,19 +5,22 @@ import { SEQ_SPAN } from '../../chemistry/key.ts';
 import type { BlockViews } from '../blocks.ts';
 import { blockViews } from '../blocks.ts';
 
+import { newTally, tallyBlock } from './countSink.ts';
 import type {
+  CountPhase,
   IndexedBlock,
   PhaseMessage,
   ScreenPhase,
   SearchWorkerData,
-  SimilarityPhase,
 } from './messages.ts';
 import type { ExactRow } from './rowFilter.ts';
 import { rowFilter } from './rowFilter.ts';
 import type { Collected, ScreenContext } from './screenKernel.ts';
 import { screenWords } from './screenKernel.ts';
-import { similarityWords } from './similarityKernel.ts';
-import type { SimilarityContext, SimilarityTally } from './similarityLane.ts';
+import type { SetWords } from './setWords.ts';
+import { setWords } from './setWords.ts';
+import type { WorkerParts } from './similarityRun.ts';
+import { offsets, runSimilarity } from './similarityRun.ts';
 import { runVerify } from './verifyWorker.ts';
 
 const data = workerData as SearchWorkerData;
@@ -42,15 +45,27 @@ function viewsOf(b: number): BlockViews {
   return found;
 }
 
+const parts: WorkerParts = {
+  port,
+  control,
+  worker: data.worker,
+  layout: data.layout,
+  block: (b) => table[b] as IndexedBlock,
+  views: viewsOf,
+  exact,
+};
+
 port.on(
   'message',
   (message: PhaseMessage | { type: 'blocks'; add: IndexedBlock[] }) => {
     if (message.type === 'screen') {
       runScreen(message);
+    } else if (message.type === 'count') {
+      runCount(message);
     } else if (message.type === 'verify') {
       runVerify(message, db, control, data);
     } else if (message.type === 'sim') {
-      runSimilarity(message);
+      runSimilarity(message, parts);
     } else if (message.type === 'blocks') {
       for (const block of message.add) table[block.index] = block;
     }
@@ -59,33 +74,15 @@ port.on(
 port.postMessage({ type: 'ready', worker: data.worker });
 
 function runScreen(m: ScreenPhase): void {
-  const next = new Int32Array(m.counter);
-  const restr = new Int32Array(m.restriction);
+  const sets = setWords(m.sets);
   const out: Collected = {
     n: 0,
     key: new Float64Array(1024),
     id: new Float64Array(1024),
   };
-  let done = 0;
-  let b = -1;
-  let context: ScreenContext | null = null;
-  while (Atomics.load(control, 0) === m.gen) {
-    const u = Atomics.add(next, 0, 1);
-    if (u >= m.units.length / 2) break;
-    // Entries of one block one after the other go to the kernel in one call.
-    const e1 = m.units[2 * u + 1] as number;
-    for (let e = m.units[2 * u] as number; e < e1;) {
-      if (m.entries[4 * e] !== b) {
-        b = m.entries[4 * e] as number;
-        context = screenContext(m, b, restr);
-      }
-      let to = e + 1;
-      while (to < e1 && m.entries[4 * to] === b) to++;
-      screenWords(context as ScreenContext, m.entries, e, to, out);
-      e = to;
-    }
-    done++;
-  }
+  const done = eachUnit(m, sets, (context, e0, e1) => {
+    screenWords(context, m.entries, e0, e1, out, null, false);
+  });
   port.postMessage(
     {
       type: 'screened',
@@ -100,18 +97,82 @@ function runScreen(m: ScreenPhase): void {
   port.postMessage({ type: 'idle', gen: m.gen, worker: data.worker });
 }
 
+function runCount(m: CountPhase): void {
+  const sets = setWords(m.sets);
+  const tally = newTally(m, exact);
+  let tallied = -1;
+  const done = eachUnit(m, sets, (context, e0, e1, b, u) => {
+    if (b !== tallied) {
+      tallied = b;
+      tallyBlock(tally, viewsOf(b), data.layout, context.kBase);
+    }
+    screenWords(context, m.entries, e0, e1, null, tally, m.whole[u] === 1);
+  });
+  port.postMessage(
+    { type: 'counted', gen: m.gen, units: done, tallies: tally.tallies },
+    [tally.tallies.buffer as ArrayBuffer],
+  );
+  port.postMessage({ type: 'idle', gen: m.gen, worker: data.worker });
+}
+
+/**
+ * Runs the units this worker takes, until none is left or the phase moved on: the entries of one
+ * block one after the other go to the kernel in one call.
+ * @param m - The phase.
+ * @param sets - Its set expression.
+ * @param run - Runs entries [e0, e1) of block b, of unit u.
+ * @returns How many units it ran.
+ */
+function eachUnit(
+  m: ScreenPhase | CountPhase,
+  sets: SetWords,
+  run: (
+    context: ScreenContext,
+    e0: number,
+    e1: number,
+    b: number,
+    u: number,
+  ) => void,
+): number {
+  const next = new Int32Array(m.counter);
+  let done = 0;
+  let b = -1;
+  let context: ScreenContext | null = null;
+  while (Atomics.load(control, 0) === m.gen) {
+    const u = Atomics.add(next, 0, 1);
+    if (u >= m.units.length / 2) break;
+    const e1 = m.units[2 * u + 1] as number;
+    for (let e = m.units[2 * u] as number; e < e1;) {
+      if (m.entries[4 * e] !== b) {
+        b = m.entries[4 * e] as number;
+        context = screenContext(m, b, sets);
+      }
+      let to = e + 1;
+      while (to < e1 && m.entries[4 * to] === b) to++;
+      run(context as ScreenContext, e, to, b, u);
+      e = to;
+    }
+    done++;
+  }
+  return done;
+}
+
 function screenContext(
-  m: ScreenPhase,
+  m: ScreenPhase | CountPhase,
   b: number,
-  restr: Int32Array,
+  sets: SetWords,
 ): ScreenContext {
   const view = viewsOf(b);
   const block = table[b] as IndexedBlock;
   return {
     planes: view.planes,
-    poff: Int32Array.from(m.planes, (plane) => plane * view.W),
+    poff: offsets(m.planes, view.W),
+    flip: m.flips,
     restrictionAt: m.restrictionAt,
-    restr,
+    sets,
+    single: sets.single,
+    aoff: offsets(m.anyPlanes, view.W),
+    anyCount: m.anyPlanes.length,
     base: block.start >>> 5,
     kBase: block.atoms * SEQ_SPAN,
     seq: view.seq,
@@ -119,102 +180,8 @@ function screenContext(
     lo: m.lo,
     hi: m.hi,
     end: m.end,
-    cursorKey: m.cursorKey,
-    cursorId: m.cursorId,
+    cursorKey: m.type === 'screen' ? m.cursorKey : -Infinity,
+    cursorId: m.type === 'screen' ? m.cursorId : -1,
     keep: rowFilter(view, data.layout, m.bounds, exact),
-  };
-}
-
-function runSimilarity(m: SimilarityPhase): void {
-  const next = new Int32Array(m.counter);
-  const restr = new Int32Array(m.restriction);
-  let b = -1;
-  let context: SimilarityContext | null = null;
-  while (Atomics.load(control, 0) === m.gen) {
-    const u = Atomics.add(next, 0, 1);
-    if (u >= m.units.length / 2) break;
-    const tally: SimilarityTally = {
-      scored: 0,
-      matched: 0,
-      afterCount: 0,
-      kept: 0,
-      hasAfter: m.afterScore !== null,
-      afterScore: m.afterScore ?? 0,
-      afterId: m.afterId,
-      topId: new Float64Array(m.limit),
-      topScore: new Float64Array(m.limit),
-    };
-    let stopped = false;
-    const e1 = m.units[2 * u + 1] as number;
-    for (let e = m.units[2 * u] as number; e < e1;) {
-      if (Atomics.load(control, 0) !== m.gen) {
-        stopped = true;
-        break;
-      }
-      if (m.entries[4 * e] !== b) {
-        b = m.entries[4 * e] as number;
-        context = similarityContext(m, b, restr);
-      }
-      let to = e + 1;
-      while (to < e1 && m.entries[4 * to] === b) to++;
-      similarityWords(context as SimilarityContext, m.entries, e, to, tally);
-      e = to;
-    }
-    const top = new Float64Array(2 * tally.kept);
-    for (let i = 0; i < tally.kept; i++) {
-      top[2 * i] = tally.topId[i] as number;
-      top[2 * i + 1] = tally.topScore[i] as number;
-    }
-    port.postMessage({
-      type: 'sim',
-      gen: m.gen,
-      scored: tally.scored,
-      matched: tally.matched,
-      afterCount: tally.afterCount,
-      top,
-      stopped,
-    });
-  }
-  port.postMessage({ type: 'idle', gen: m.gen, worker: data.worker });
-}
-
-function similarityContext(
-  m: SimilarityPhase,
-  b: number,
-  restr: Int32Array,
-): SimilarityContext {
-  const view = viewsOf(b);
-  const block = table[b] as IndexedBlock;
-  const filter = rowFilter(view, data.layout, m.bounds, exact);
-  const keyMin = m.keyMin;
-  const keyMax = m.keyMax;
-  const key = view.key;
-  return {
-    planes: view.planes,
-    poff: Int32Array.from(m.planes, (plane) => plane * view.W),
-    restr,
-    base: block.start >>> 5,
-    kBase: block.atoms * SEQ_SPAN,
-    seq: view.seq,
-    bits: m.fingerprint === 'screen' ? view.screenBits : view.fragFpBits,
-    bits2: m.fingerprint === 'both' ? view.screenBits : null,
-    zoneMin: view.zones[m.fingerprint].min,
-    zoneMax: view.zones[m.fingerprint].max,
-    low: m.low,
-    high: m.high,
-    threshold: m.threshold,
-    qBits: m.qBits,
-    mMin: m.mMin,
-    D: m.D,
-    // In similarity the key bounds are plain filters.
-    keep:
-      keyMin === -Infinity && keyMax === Infinity
-        ? filter
-        : (row, id) => {
-            const k = key[row] as number;
-            return (
-              k >= keyMin && k <= keyMax && (filter === null || filter(row, id))
-            );
-          },
   };
 }

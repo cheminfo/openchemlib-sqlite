@@ -1,4 +1,8 @@
-import { FINGERPRINT_WORDS, countBits, countKeys } from '../chemistry/bits.ts';
+import {
+  FINGERPRINT_WORDS,
+  FUNCTION_WORDS_AT,
+  countBits,
+} from '../chemistry/bits.ts';
 import { makeId } from '../chemistry/key.ts';
 import type {
   FingerprintColumns,
@@ -7,22 +11,22 @@ import type {
 import type { TileViews } from '../chemistry/tile.ts';
 import {
   MOLECULE_WORDS,
-  TILE_BYTES,
   copyTile,
+  newTile,
   splitTileKey,
-  tileViews,
   writeSlot,
 } from '../chemistry/tile.ts';
+import { tileBytes, tileViews } from '../chemistry/tileRecord.ts';
 import { countTileKeys, tileWords } from '../chemistry/tileWords.ts';
 
 import type { Counting } from './bitCounts.ts';
-import { COUNTED_BITS, COUNTS_AT, addCounts } from './bitCounts.ts';
+import { COUNTED_BITS, addCounts } from './bitCounts.ts';
 import type { RebuildStatements } from './rebuildStatements.ts';
 import { idCodeOf } from './rebuildStatements.ts';
 
 /** New tiles, and what they change in the counts. */
 export interface TileUpdate {
-  /** The new tiles, by key. */
+  /** The new tiles, by key, as stored. */
   tiles: Array<[number, Uint8Array]>;
   /** What each count changes by. */
   counts: Float64Array;
@@ -111,7 +115,7 @@ export function liveIds(
 /**
  * The new tiles of a step of the first pass: the same keys, slots and seqs, the recomputed
  * fingerprints over the stored ones, a copy where nothing is recomputed; and what they add to the
- * counts, FragFp and screen from their planes, the function bits from the computed words.
+ * counts, read from their planes.
  * @param keys - The tiles' keys.
  * @param tiles - The tiles in use.
  * @param computed - The fingerprints of their molecules, in {@link liveIds} order.
@@ -130,7 +134,7 @@ export function firstPassTiles(
   for (const [t, tile] of tiles.entries()) {
     const used = tile.used[0] as number;
     let fresh = tile;
-    if (computed !== null && (need.fragFp || need.screen)) {
+    if (computed !== null && (need.fragFp || need.screen || need.functions)) {
       fresh = emptyTile(used);
       const words = tileWords(tile);
       for (let slot = 0; slot < used; slot++) {
@@ -139,6 +143,7 @@ export function firstPassTiles(
         const at = slot * MOLECULE_WORDS;
         replaceWords(words, at, computed.fragFp, m);
         replaceWords(words, at + FINGERPRINT_WORDS, computed.screen, m);
+        replaceWords(words, at + FUNCTION_WORDS_AT, computed.functions, m);
         const bits = countBits(words, at, at + FINGERPRINT_WORDS);
         writeSlot(fresh, slot, words, at, seq, bits);
         m++;
@@ -147,11 +152,9 @@ export function firstPassTiles(
       fresh = copyTile(tile);
     }
     countTileKeys(counts, fresh);
-    built.push([keys[t] as number, fresh.data]);
+    built.push([keys[t] as number, tileBytes(fresh)]);
   }
-  const molecules = liveIds(keys, tiles).length;
-  addFunctions(counts, computed?.functions ?? null, molecules, 1);
-  return { tiles: built, counts, molecules };
+  return { tiles: built, counts, molecules: liveIds(keys, tiles).length };
 }
 
 /**
@@ -160,14 +163,14 @@ export function firstPassTiles(
  * @returns Its views.
  */
 export function emptyTile(used: number): TileViews {
-  const tile = tileViews(new Uint8Array(TILE_BYTES));
+  const tile = newTile();
   tile.used[0] = used;
   return tile;
 }
 
 /**
  * Puts a molecule's recomputed fingerprint over the one its tile held.
- * @param words - Words, 32 per molecule.
+ * @param words - Words, 48 per molecule.
  * @param at - Where the fingerprint starts in them.
  * @param computed - 16 words per molecule, or null when it was not recomputed.
  * @param m - The molecule.
@@ -181,29 +184,4 @@ export function replaceWords(
   if (computed === null) return;
   const from = m * FINGERPRINT_WORDS;
   words.set(computed.subarray(from, from + FINGERPRINT_WORDS), at);
-}
-
-/**
- * Adds molecules' function bits to the counts, or takes them away.
- * @param counts - The counts.
- * @param functions - 16 words per molecule, or null when not counted.
- * @param molecules - How many molecules.
- * @param sign - 1 adds them, -1 takes them away.
- */
-export function addFunctions(
-  counts: Float64Array,
-  functions: Int32Array | null,
-  molecules: number,
-  sign: number,
-): void {
-  if (functions === null) return;
-  for (let m = 0; m < molecules; m++) {
-    countKeys(
-      counts,
-      COUNTS_AT.functions,
-      functions,
-      m * FINGERPRINT_WORDS,
-      sign,
-    );
-  }
 }

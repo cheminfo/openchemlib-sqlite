@@ -12,14 +12,9 @@ export const NEXT_COUNTS_SQL: readonly string[] =
 export const CHANGED_TILES_SQL =
   'CREATE TABLE ocl_rebuild_tiles (seq INTEGER PRIMARY KEY AUTOINCREMENT, id INTEGER NOT NULL)';
 
-/** The molecules writers remove while a rebuild runs, with the idCode their counts come from. */
-export const REMOVED_SQL =
-  'CREATE TABLE ocl_rebuild_removed (id INTEGER PRIMARY KEY, idCode TEXT NOT NULL)';
-
 /** Every table a rebuild keeps until its switch, in the order it creates them. */
 export const REBUILD_SQL: readonly string[] = [
   NEXT_TILES_SQL,
   ...NEXT_COUNTS_SQL,
   CHANGED_TILES_SQL,
-  REMOVED_SQL,
 ];

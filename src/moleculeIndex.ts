@@ -8,7 +8,17 @@ export type {
   LoadStep,
 } from './search/load/loadProgress.ts';
 export type { SimilarityFingerprint } from './search/fingerprint.ts';
-export type { KeyPage, SearchOptions } from './search/pages.ts';
+export type {
+  KeyBits,
+  KeyPage,
+  SearchLane,
+  SearchOptions,
+} from './search/pages.ts';
+export type {
+  CountHistogram,
+  CountOptions,
+  Counts,
+} from './search/countPage.ts';
 export type { ScorePage, SimilarityOptions } from './search/scorePage.ts';
 export type { FilterRange } from './search/query.ts';
 export type {

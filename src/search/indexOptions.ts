@@ -31,6 +31,11 @@ export interface MoleculeIndexOptions {
    */
   similarityUnitWords?: number;
   /**
+   * Rows of one chunk of a count, about: each chunk is a turn of the count's lane.
+   * @default 33554432
+   */
+  countChunkRows?: number;
+  /**
    * The budget of a page, in milliseconds.
    * @default 4500
    */
@@ -133,6 +138,7 @@ export function settleOptions(
     blockRows: options.blockRows ?? 2 ** 22,
     firstSliceRows: options.firstSliceRows ?? 65_536,
     similarityUnitWords: options.similarityUnitWords ?? 8192,
+    countChunkRows: options.countChunkRows ?? 2 ** 25,
     budgetMs: options.budgetMs ?? 4500,
     follow: options.follow ?? true,
     pollMs: options.pollMs ?? 500,

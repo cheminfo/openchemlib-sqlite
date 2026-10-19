@@ -1,11 +1,19 @@
 import { keepTop } from './bitSlices.ts';
+import type { SetWords } from './setWords.ts';
 
 /** What the similarity scan of one block reads. */
 export interface SimilarityContext {
   planes: Int32Array;
   /** Where each query plane starts in the block's planes. */
   poff: Int32Array;
-  restr: Int32Array;
+  /** The set expression, and its one bitmap when it is a single one, else null. */
+  sets: SetWords;
+  single: Int32Array | null;
+  /** Where each key plane starts, by survival, and its flip: 0 to hold it, -1 to lack it. */
+  koff: Int32Array;
+  keyFlip: Int32Array;
+  /** Where each plane of the OR group starts; empty for none. */
+  aoff: Int32Array;
   base: number;
   kBase: number;
   seq: Uint32Array;

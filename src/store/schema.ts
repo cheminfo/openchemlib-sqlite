@@ -153,96 +153,6 @@ export function createStore(
 }
 
 /**
- * Gives a file written before the library kept signatures the signatures of this build, when it
- * carries the stamp this build gives such a file: those of its molecules and tiles, with bit
- * counts at zero that count nothing yet, and no idCode hashes, which `rebuild()` adds. Done once,
- * in one write transaction.
- * @param db - The connection, outside any transaction.
- * @param stamps - The stamp such a file takes, and the stamp it carries.
- * @param stamps.stamp - The stamp of this build's molecules and tiles without idCode hashes.
- * @param stamps.legacy - The stamp of a file written before signatures.
- * @param signatures - This build's signatures.
- * @returns True when the file was upgraded.
- */
-export function ensureSignatures(
-  db: DatabaseSync,
-  stamps: { stamp: string; legacy: string },
-  signatures: Signatures,
-): boolean {
-  const has = db.prepare(
-    "SELECT 1 AS found FROM ocl_meta WHERE name = 'signature.identity'",
-  );
-  if (has.get() !== undefined) return false;
-  db.exec('BEGIN IMMEDIATE');
-  try {
-    // Another connection may have upgraded it while this one waited for the lock.
-    if (has.get() !== undefined || readMeta(db).stamp !== stamps.legacy) {
-      db.exec('COMMIT');
-      return false;
-    }
-    const insert = db.prepare(
-      'INSERT OR REPLACE INTO ocl_meta (name, value) VALUES (?, ?)',
-    );
-    insert.run('stamp', stamps.stamp);
-    insert.run('generation', 0);
-    for (const [name, value] of signatureRows({
-      ...signatures,
-      idCodeHash: '',
-    })) {
-      insert.run(name, value);
-    }
-    if (!hasTable(db, 'ocl_bits')) {
-      for (const sql of countsTableSql('ocl_bits')) db.exec(sql);
-    }
-    db.exec('COMMIT');
-    return true;
-  } catch (error) {
-    db.exec('ROLLBACK');
-    throw error;
-  }
-}
-
-/**
- * Adds the two distinct-hash counters to a file written before the library kept them: each is
- * counted once, walking its hash index, inside one write transaction so no commit lands between
- * the count and the row. Every commit and removal keeps them exact afterwards.
- * @param db - The connection, outside any transaction.
- * @returns True when they were added, false when the file had them.
- */
-export function ensureDistinctCounts(db: DatabaseSync): boolean {
-  const has = db.prepare(
-    "SELECT 1 AS found FROM ocl_meta WHERE name = 'distinctNoStereo'",
-  );
-  if (has.get() !== undefined) return false;
-  db.exec('BEGIN IMMEDIATE');
-  try {
-    // Another connection may have added them while this one waited for the lock.
-    if (has.get() !== undefined) {
-      db.exec('COMMIT');
-      return false;
-    }
-    // One statement per column: each walks its covering index, where counting both at once
-    // would scan the table into two temporary B-trees.
-    const distinct = (column: string) =>
-      (
-        db
-          .prepare(`SELECT count(DISTINCT ${column}) AS n FROM ocl_molecule`)
-          .get() as { n: number }
-      ).n;
-    const insert = db.prepare(
-      'INSERT INTO ocl_meta (name, value) VALUES (?, ?)',
-    );
-    insert.run('distinctNoStereo', distinct('noStereoHash'));
-    insert.run('distinctTautomer', distinct('tautomerHash'));
-    db.exec('COMMIT');
-    return true;
-  } catch (error) {
-    db.exec('ROLLBACK');
-    throw error;
-  }
-}
-
-/**
  * Reads `ocl_meta`.
  * @param db - The connection.
  * @returns Its values.
@@ -264,6 +174,7 @@ export function readMeta(db: DatabaseSync): StoreMeta {
             identity,
             fragFp: text(values.get('signature.fragFp')),
             screen: text(values.get('signature.screen')),
+            functions: text(values.get('signature.functions')),
             idCodeHash: text(values.get('signature.idCodeHash')),
           },
     counted: {
@@ -292,6 +203,7 @@ export function signatureRows(
     ['signature.identity', signatures.identity],
     ['signature.fragFp', signatures.fragFp],
     ['signature.screen', signatures.screen],
+    ['signature.functions', signatures.functions],
     ['signature.idCodeHash', signatures.idCodeHash],
   ];
 }
@@ -311,93 +223,15 @@ export function countedRows(
   ];
 }
 
+/**
+ * A meta value as text, `''` when the row is missing. `value` has numeric affinity, so a signature
+ * made of digits alone comes back as a number.
+ * @param value - The value read.
+ * @returns It as text.
+ */
 function text(value: unknown): string {
-  return typeof value === 'string' ? value : '';
-}
-
-/**
- * Refuses a file this build cannot search or write: another format, molecules computed under
- * another identity, or fingerprints computed under other keys. Searching it would screen stored
- * fingerprints against query fingerprints computed differently, and miss matches without any
- * error. Each refusal says what to do.
- * @param meta - The file's `ocl_meta`.
- * @param stamp - The stamp of this build.
- * @param signatures - The signatures of this build.
- */
-export function validateMeta(
-  meta: StoreMeta,
-  stamp: string,
-  signatures: Signatures,
-): void {
-  if (meta.format !== FORMAT) {
-    throw new Error(
-      `ocl_meta.format is "${meta.format}", this build reads "${FORMAT}": the file must be migrated`,
-    );
-  }
-  const stored = meta.signatures;
-  if (stored === null) {
-    throw new Error(
-      `the file was written under stamp ${meta.stamp} by an earlier build, which this one cannot read: commit its idCodes into a new file`,
-    );
-  }
-  if (stored.identity !== signatures.identity) {
-    throw new Error(
-      'the file holds molecules canonized or hashed differently from this build: commit its idCodes into a new file',
-    );
-  }
-  const stale = staleTiles(stored, signatures);
-  if (stale.length > 0) {
-    throw new Error(
-      `the ${stale.join(' and ')} bits of the file were computed under other keys: run MoleculeStore.rebuild() with this build, while the build that wrote it keeps serving`,
-    );
-  }
-  if (stored.idCodeHash !== signatures.idCodeHash) {
-    throw new Error(
-      'the file holds no idCode hashes, or hashes computed otherwise: run MoleculeStore.rebuild() with this build, while the build that wrote it keeps serving',
-    );
-  }
-  if (meta.stamp !== stamp) {
-    throw new Error(
-      `the file was written under stamp ${meta.stamp}, this build computes ${stamp}: its fingerprints and hashes must be rebuilt`,
-    );
-  }
-}
-
-/**
- * The fingerprints a file's tiles hold under other keys than this build's.
- * @param stored - What the file was computed under.
- * @param signatures - This build's signatures.
- * @returns `fragFp`, `screen`, both or none.
- */
-export function staleTiles(
-  stored: StoredSignatures,
-  signatures: Signatures,
-): Array<'fragFp' | 'screen'> {
-  const stale: Array<'fragFp' | 'screen'> = [];
-  if (stored.fragFp !== signatures.fragFp) stale.push('fragFp');
-  if (stored.screen !== signatures.screen) stale.push('screen');
-  return stale;
-}
-
-/**
- * Refuses a file an index cannot search with this build, by its stamp alone.
- * @param meta - The file's `ocl_meta`.
- * @param stamp - The stamp of this build.
- */
-export function validateStamp(meta: StoreMeta, stamp: string): void {
-  if (meta.format !== FORMAT) {
-    throw new Error(
-      `ocl_meta.format is "${meta.format}", this build reads "${FORMAT}": the file must be migrated`,
-    );
-  }
-  if (meta.signatures === null) {
-    throw new Error(
-      'the file was written before the library kept signatures: open it once with MoleculeStore, which upgrades it',
-    );
-  }
-  if (meta.stamp !== stamp) {
-    throw new Error(
-      `the file was written under stamp ${meta.stamp}, this build computes ${stamp}: MoleculeStore.rebuild() must bring it to this build first`,
-    );
-  }
+  if (typeof value === 'string') return value;
+  return typeof value === 'number' || typeof value === 'bigint'
+    ? String(value)
+    : '';
 }

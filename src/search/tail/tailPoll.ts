@@ -3,15 +3,8 @@ import type { DatabaseSync, StatementSync } from 'node:sqlite';
 import { getMoleculeSizes } from 'openchemlib-search-wasm';
 
 import { SEQ_SPAN } from '../../chemistry/key.ts';
-import {
-  BITS_AT,
-  N_AT,
-  PLANES,
-  SEQ_AT,
-  SLOTS,
-  bandOfWeight,
-  tileKey,
-} from '../../chemistry/tile.ts';
+import { bandOfWeight, newTile, tileKey } from '../../chemistry/tile.ts';
+import { readTile } from '../../chemistry/tileRecord.ts';
 import type { NormalizedSpec } from '../spec.ts';
 import { memberParameters } from '../spec.ts';
 
@@ -159,25 +152,16 @@ function readCell(
   const base = atoms * SEQ_SPAN;
   let tileSeq = band.tailFrom;
   let pending = -1;
+  const tile = newTile();
+  const { planes, seqs, bits: counts } = tile;
   const from = tileKey(atoms, band.band, band.tailFrom);
   for (const [rawId, blob] of statements.tiles.iterate(
     from,
     tileKey(atoms, band.band + 1, 0),
   ) as Iterable<[number, Uint8Array]>) {
     tileSeq = rawId - tileKey(atoms, band.band, 0);
-    const data = blob.byteOffset % 4 === 0 ? blob : blob.slice();
-    const planes = new Int32Array(data.buffer, data.byteOffset, PLANES);
-    const seqs = new Uint32Array(data.buffer, data.byteOffset + SEQ_AT, SLOTS);
-    const counts = new Uint16Array(
-      data.buffer,
-      data.byteOffset + BITS_AT,
-      SLOTS,
-    );
-    const used = new Uint32Array(
-      data.buffer,
-      data.byteOffset + N_AT,
-      1,
-    )[0] as number;
+    readTile(blob, tile);
+    const used = tile.used[0] as number;
     for (let i = 0; i < used; i++) {
       const seq = seqs[i] as number;
       if (seq > read.cap && pending < 0) pending = tileSeq;

@@ -1,15 +1,39 @@
+import { readKeyBits } from './keyBits.ts';
 import type { Layout } from './layout.ts';
 import type { SearchPool } from './pool/SearchPool.ts';
 import type { FilterRange } from './query.ts';
-import {
-  readFilters,
-  restrictionOf,
-  restrictionRank,
-  substructurePlan,
-} from './query.ts';
+import { readFilters, restrictionRank, substructurePlan } from './query.ts';
+import { setExpression } from './setExpression.ts';
 import type { HungMemory } from './walk/verifySlice.ts';
 import type { KeyCursor } from './walk/walkPage.ts';
-import { walkPage } from './walk/walkPage.ts';
+import { after as isAfter, walkPage } from './walk/walkPage.ts';
+
+/**
+ * Keys a row holds or lacks, as bits of the 48-word record `getMoleculeRecords` writes, numbered
+ * MSB first: bit b is word `b >> 5`, mask `1 << (31 - (b & 31))`. FragFp is 0-511, the screen
+ * 512-1023, the function keys 1024-1535. They are stored, so a condition on them is exact and needs
+ * no verification.
+ */
+export interface KeyBits {
+  /**
+   * Bits an answered row holds, every one.
+   * @default []
+   */
+  all?: readonly number[];
+  /**
+   * Bits of which an answered row holds at least one. Empty, it puts no condition.
+   * @default []
+   */
+  any?: readonly number[];
+  /**
+   * Bits an answered row holds none of.
+   * @default []
+   */
+  none?: readonly number[];
+}
+
+/** Which queue a search waits in when the workers are busy. */
+export type SearchLane = 'interactive' | 'bulk';
 
 /** What every search takes. */
 export interface SearchOptions {
@@ -19,11 +43,27 @@ export interface SearchOptions {
    */
   limit?: number;
   /**
-   * The sets the answer is restricted to (their union), e.g. `['listed']` or `['source:3']`; an
-   * unknown name adds nothing.
-   * @default the index's `defaultSets`
+   * The sets an answered row belongs to at least one of (their union), e.g. `['listed']` or
+   * `['source:3']`. Unknown names add nothing; when no name is known, or `[]`, nothing answers.
+   * @default the index's `defaultSets`; every alive row when it has none
    */
   sets?: string[];
+  /**
+   * Sets an answered row belongs to, every one. An unknown name answers nothing.
+   * @default []
+   */
+  allSets?: string[];
+  /**
+   * Sets an answered row belongs to none of. An unknown name removes nothing.
+   * @default []
+   */
+  noneSets?: string[];
+  /**
+   * Keys an answered row holds or lacks. A browse with keys is answered without any verification,
+   * and a substructure search verifies its query alone.
+   * @default {}
+   */
+  bits?: KeyBits;
   /** Inclusive bounds on filter columns, by name. */
   filters?: Record<string, FilterRange>;
   /**
@@ -37,7 +77,14 @@ export interface SearchOptions {
    */
   keyMax?: number;
   /**
-   * The page answers by this many milliseconds after the call, partial if it must.
+   * The queue the search waits in. An interactive search runs before any bulk one waiting, and its
+   * budget counts from the call; a bulk search's budget counts from when it starts running.
+   * @default 'interactive'
+   */
+  lane?: SearchLane;
+  /**
+   * The page answers by this many milliseconds, partial if it must: after the call in the
+   * interactive lane, after it starts in the bulk lane.
    * @default the index's `budgetMs`
    */
   budgetMs?: number;
@@ -104,46 +151,60 @@ export function keyPage(
     hung,
     searchId,
   } = context;
-  const plan = substructurePlan(queryIdCode, layout.frequencies);
-  const restriction = restrictionOf(layout, options.sets ?? defaultSets);
+  const keys = readKeyBits(options.bits);
+  const plan = substructurePlan(queryIdCode, layout.frequencies, keys);
+  const sets = setExpression(layout, options, defaultSets);
   const bounds = readFilters(layout.layout, options.filters);
-  const deadline = started + (options.budgetMs ?? budgetMs);
   const limit = pageLimit(options.limit);
-  return pool.search(async () => {
-    const { counters, hits, reason, resume } = await walkPage(pool, {
-      layout,
-      plan,
-      restriction,
-      restrictionAt: restrictionRank(layout, restriction, plan),
-      bounds,
-      keyMin: options.keyMin ?? -Infinity,
-      keyMax: options.keyMax ?? Infinity,
-      limit,
-      deadline,
-      signal: options.signal,
-      cursor: after ?? null,
-      firstSliceRows,
-      hung: hung(plan.browse ? '' : queryIdCode),
-      searchId,
-      verifyChunkMinMs: verify.chunkMinMs,
-      verifyChunkFactor: verify.chunkFactor,
-      verifySingleMs: verify.singleMs,
-    });
-    return {
-      hits,
-      next: reason === 'exhausted' ? undefined : resume,
-      partial: reason !== 'full' && reason !== 'exhausted',
-      unverified: counters.unverified,
-      info: {
-        slices: counters.slices,
-        bands: counters.bands,
-        candidates: counters.candidates,
-        verified: counters.verified,
-        kills: counters.kills,
-        version: layout.version,
-      },
-    };
-  });
+  const budget = options.budgetMs ?? budgetMs;
+  const lane = options.lane ?? 'interactive';
+  if (sets === null) {
+    return Promise.resolve(pageOf(layout.version, undefined, false));
+  }
+  // A page stopped before it ran continues from where it would have started.
+  const start = { key: options.keyMin ?? -Infinity, id: -1 };
+  const resume = after !== undefined && isAfter(after, start) ? after : start;
+  const settle = () => pageOf(layout.version, resume, true);
+  return pool.search(
+    async () => {
+      const deadline = (lane === 'bulk' ? performance.now() : started) + budget;
+      const { counters, hits, reason, resume } = await walkPage(pool, {
+        layout,
+        plan,
+        sets,
+        restrictionAt: restrictionRank(layout, sets, plan),
+        bounds,
+        keyMin: options.keyMin ?? -Infinity,
+        keyMax: options.keyMax ?? Infinity,
+        limit,
+        deadline,
+        signal: options.signal,
+        cursor: after ?? null,
+        firstSliceRows,
+        hung: hung(plan.browse ? '' : queryIdCode),
+        searchId,
+        verifyChunkMinMs: verify.chunkMinMs,
+        verifyChunkFactor: verify.chunkFactor,
+        verifySingleMs: verify.singleMs,
+      });
+      return {
+        hits,
+        next: reason === 'exhausted' ? undefined : resume,
+        partial: reason !== 'full' && reason !== 'exhausted',
+        unverified: counters.unverified,
+        info: {
+          slices: counters.slices,
+          bands: counters.bands,
+          candidates: counters.candidates,
+          verified: counters.verified,
+          kills: counters.kills,
+          version: layout.version,
+        },
+      };
+    },
+    lane,
+    { signal: options.signal, settle },
+  );
 }
 
 /** The most hits one page answers. */
@@ -163,4 +224,25 @@ export function pageLimit(limit: number | undefined): number {
     );
   }
   return value;
+}
+
+function pageOf(
+  version: number,
+  next: KeyCursor | undefined,
+  partial: boolean,
+): KeyPage {
+  return {
+    hits: [],
+    next,
+    partial,
+    unverified: 0,
+    info: {
+      slices: 0,
+      bands: 0,
+      candidates: 0,
+      verified: 0,
+      kills: 0,
+      version,
+    },
+  };
 }

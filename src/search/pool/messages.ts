@@ -1,5 +1,6 @@
 import type { Block, ColumnLayout } from '../blocks.ts';
 import type { SimilarityFingerprint } from '../fingerprint.ts';
+import type { SetExpression } from '../setExpression.ts';
 
 import type { ColumnBound } from './rowFilter.ts';
 
@@ -32,20 +33,54 @@ export interface PhaseBase {
   counter: SharedArrayBuffer;
 }
 
-/** Screen the units of a slice. */
-export interface ScreenPhase extends PhaseBase {
-  type: 'screen';
+/** What the per-word filter of a screen or a count reads. */
+export interface FilterPhase extends PhaseBase {
   entries: Float64Array;
   units: Int32Array;
+  /** The planes a row must hold or lack, by survival, and their flips (0 hold, -1 lack). */
   planes: Int32Array;
-  restriction: SharedArrayBuffer;
+  flips: Int32Array;
+  /** The planes of the OR group, empty for none. */
+  anyPlanes: Int32Array;
+  sets: SetExpression;
+  /** How many planes are tested before the restriction word. */
   restrictionAt: number;
+  /** The range [lo, hi) of keys, and the inclusive end of the walk or the count. */
   lo: number;
   hi: number;
   end: number;
+  bounds: ColumnBound[];
+}
+
+/** Screen the units of a slice. */
+export interface ScreenPhase extends FilterPhase {
+  type: 'screen';
   cursorKey: number;
   cursorId: number;
-  bounds: ColumnBound[];
+}
+
+/** A histogram as the workers tally it: `column` -1 for the order key. */
+export interface HistogramTask {
+  column: number;
+  min: number;
+  width: number;
+  bins: number;
+}
+
+/** Count the rows of a key range, and tally them. */
+export interface CountPhase extends FilterPhase {
+  type: 'count';
+  /** Per unit, 1 when every row of its bands has a key inside the range: no key is read. */
+  whole: Uint8Array;
+  /** The bitmaps of `bySets`, null for an unknown name. */
+  bySets: Array<SharedArrayBuffer | null>;
+  /** The planes of `byKeys`. */
+  byKeys: Int32Array;
+  /** The bitmaps of `membershipOf`, null for an unknown name. */
+  membership: Array<SharedArrayBuffer | null>;
+  histogram: HistogramTask | null;
+  /** The length of the tallies: total, bySets, byKeys, membership, histogram. */
+  tallies: number;
 }
 
 /** Verify a slice's candidates, in (key, id) order. */
@@ -71,7 +106,11 @@ export interface SimilarityPhase extends PhaseBase {
   entries: Float64Array;
   units: Int32Array;
   planes: Int32Array;
-  restriction: SharedArrayBuffer;
+  sets: SetExpression;
+  /** The key planes a row must hold or lack, by survival, their flips, and the OR group. */
+  keyPlanes: Int32Array;
+  keyFlips: Int32Array;
+  anyPlanes: Int32Array;
   low: number;
   high: number;
   threshold: number;
@@ -87,7 +126,8 @@ export interface SimilarityPhase extends PhaseBase {
 }
 
 /** A phase message. */
-export type PhaseMessage = ScreenPhase | VerifyPhase | SimilarityPhase;
+export type PhaseMessage =
+  ScreenPhase | VerifyPhase | SimilarityPhase | CountPhase;
 
 type WithoutTimes<M> = M extends PhaseMessage
   ? Omit<M, 'gen' | 'killAt' | 'deadlineAt'>
@@ -135,5 +175,15 @@ export interface SimilarityReply {
   stopped: boolean;
 }
 
+/** What the count of one worker tallied. */
+export interface CountedReply {
+  type: 'counted';
+  gen: number;
+  units: number;
+  /** Its tallies, in the layout of the count. */
+  tallies: Float64Array;
+}
+
 /** A reply a phase hears. */
-export type PhaseReply = ScreenedReply | VerifiedReply | SimilarityReply;
+export type PhaseReply =
+  ScreenedReply | VerifiedReply | SimilarityReply | CountedReply;

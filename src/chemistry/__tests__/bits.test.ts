@@ -1,9 +1,9 @@
 import * as OCL from 'openchemlib';
-import { getIndex, getScreen } from 'openchemlib-search-wasm';
+import { getFunction, getIndex, getScreen } from 'openchemlib-search-wasm';
 import { expect, test } from 'vitest';
 
 import { countKeys } from '../bits.ts';
-import { TILE_BYTES, addSlot, tileViews } from '../tile.ts';
+import { addSlot, newTile } from '../tile.ts';
 import { countTileKeys } from '../tileWords.ts';
 
 const smiles = (text: string) => OCL.Molecule.fromSmiles(text).getIDCode();
@@ -43,20 +43,23 @@ test('a molecule taken away leaves the counts as they were', () => {
   expect(counts).toStrictEqual(new Float64Array(1024));
 });
 
-test("a tile's planes count as its slots' words do", () => {
-  const tile = tileViews(new Uint8Array(TILE_BYTES));
-  const expected = new Float64Array(1024);
+test("a tile's planes count as its slots' words do, the function keys included", () => {
+  const tile = newTile();
+  const expected = new Float64Array(1536);
   for (const [i, molecule] of ['CO', 'Oc1ccccc1', 'CCN', 'ClCCBr'].entries()) {
     const idCode = smiles(molecule);
-    const words = new Int32Array(32);
+    const words = new Int32Array(48);
     words.set(getIndex(idCode), 0);
     words.set(getScreen(idCode), 16);
+    words.set(getFunction(idCode), 32);
     addSlot(tile, words, 0, i + 1, 0);
     countKeys(expected, 0, words, 0, 1);
     countKeys(expected, 512, words, 16, 1);
+    countKeys(expected, 1024, words, 32, 1);
   }
-  const counts = new Float64Array(1024);
+  const counts = new Float64Array(1536);
   countTileKeys(counts, tile);
 
   expect(counts).toStrictEqual(expected);
+  expect(counts.subarray(1024).some((count) => count > 0)).toBe(true);
 });

@@ -33,6 +33,7 @@ export interface SliceWork extends WorkUnits {
  * @param lo - The slice's start.
  * @param hi - Its exclusive end.
  * @param end - The walk's inclusive end.
+ * @param select - Which of those bands to read; every one when left out.
  * @returns The work.
  */
 export function sliceWork(
@@ -41,6 +42,7 @@ export function sliceWork(
   lo: number,
   hi: number,
   end: number,
+  select?: (band: Band) => boolean,
 ): SliceWork {
   const entries: number[] = [];
   const units: number[] = [];
@@ -62,7 +64,8 @@ export function sliceWork(
         band.rows === 0 ||
         band.zmax < lo ||
         !(band.zmin < hi) ||
-        band.zmin > end
+        band.zmin > end ||
+        (select !== undefined && !select(band))
       ) {
         continue;
       }

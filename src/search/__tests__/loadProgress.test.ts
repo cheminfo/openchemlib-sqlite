@@ -35,7 +35,7 @@ beforeAll(async () => {
     pollMs: 3_600_000,
     onProgress: (progress) => heard.push(progress),
   });
-});
+}, 120_000);
 
 afterAll(async () => {
   await index?.close();

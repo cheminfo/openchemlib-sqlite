@@ -2,6 +2,7 @@ import type { Layout } from '../layout.ts';
 import type { SearchPool } from '../pool/SearchPool.ts';
 import type { ScreenedReply } from '../pool/messages.ts';
 import type { ColumnBound } from '../pool/rowFilter.ts';
+import type { SetExpression } from '../setExpression.ts';
 
 import { orderByKeyId } from './order.ts';
 import type { HungMemory, WalkCounters } from './verifySlice.ts';
@@ -13,13 +14,20 @@ export interface KeyCursor {
   id: number;
 }
 
-/** A substructure query as the walk runs it; a browse has no planes and is not verified. */
+/**
+ * A substructure query as the walk runs it. A browse is never verified: it has no query planes,
+ * only the key planes of its search.
+ */
 export interface SubstructurePlan {
   browse: boolean;
   /** The query, as the verifier takes it. */
   queryIdCode: string;
-  /** Its bits, as plane numbers, rarest first. */
+  /** Its bits and the search's key planes, as plane numbers, by survival ascending. */
   planes: Int32Array;
+  /** Per plane: 0 for a plane a row must hold, -1 for one it must lack. */
+  flips: Int32Array;
+  /** The planes of the search's OR group of keys, empty for none. */
+  anyPlanes: Int32Array;
   /** Its atom floor: no molecule with fewer atoms can match. */
   floor: number;
 }
@@ -28,7 +36,7 @@ export interface SubstructurePlan {
 export interface WalkTask {
   layout: Layout;
   plan: SubstructurePlan;
-  restriction: SharedArrayBuffer;
+  sets: SetExpression;
   restrictionAt: number;
   bounds: ColumnBound[];
   keyMin: number;
@@ -62,7 +70,7 @@ export interface WalkResult {
  * cursor; the candidates are put in (key, id) order and verified in that order, the in-order prefix
  * answered. A partial answer is therefore an exact prefix of the full order, its cursor just before
  * the first row not settled. keyMin and keyMax bound the walk. A browse is the same walk with no
- * planes and no verification.
+ * query planes and no verification: its key planes are exact.
  * @param pool - The workers.
  * @param task - The page.
  * @returns The page.
@@ -71,16 +79,8 @@ export async function walkPage(
   pool: SearchPool,
   task: WalkTask,
 ): Promise<WalkResult> {
-  const {
-    layout,
-    plan,
-    limit,
-    deadline,
-    signal,
-    restriction,
-    restrictionAt,
-    bounds,
-  } = task;
+  const { layout, plan, limit, deadline, signal, sets, restrictionAt, bounds } =
+    task;
   const { keyMin, keyMax: end, firstSliceRows, cursor: from } = task;
   let cursor: KeyCursor = { key: keyMin, id: -1 };
   if (from !== null && after(from, cursor)) cursor = from;
@@ -128,7 +128,9 @@ export async function walkPage(
           units: work.units,
           counter: new SharedArrayBuffer(4),
           planes: plan.planes,
-          restriction,
+          flips: plan.flips,
+          anyPlanes: plan.anyPlanes,
+          sets,
           restrictionAt,
           lo,
           hi,

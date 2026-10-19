@@ -29,7 +29,7 @@ export type Counting = Record<CountedFingerprint, boolean>;
 /**
  * How many of the stored molecules hold each key, per fingerprint, in key order: entry k counts
  * the molecules holding key k of `getFragFpKeys()`, `getScreenKeys()` or
- * `getFunctionKeyFragments()`.
+ * `getFunctionKeyFragments()`. The function rows count the planes 1024-1535 the tiles store.
  */
 export interface BitCounts {
   /** The molecules the store holds: a share is a count divided by it. */

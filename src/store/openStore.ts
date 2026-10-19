@@ -2,25 +2,15 @@ import { availableParallelism } from 'node:os';
 import type { DatabaseSync } from 'node:sqlite';
 
 import type { Signatures } from '../chemistry/stamp.ts';
-import {
-  computeLegacyStamp,
-  computeSignatures,
-  computeStamp,
-  computeUpgradeStamp,
-} from '../chemistry/stamp.ts';
+import { computeSignatures, computeStamp } from '../chemistry/stamp.ts';
 
 import { countingOf } from './bitCounts.ts';
 import { checkSample, mismatchError } from './check.ts';
 import { ChemistryPool } from './chemistryPool.ts';
+import { ensureDistinctCounts } from './distinctCounts.ts';
+import { validateMeta } from './metaChecks.ts';
 import { ReaderPool } from './readerPool.ts';
-import {
-  createStore,
-  ensureDistinctCounts,
-  ensureSignatures,
-  hasStore,
-  readMeta,
-  validateMeta,
-} from './schema.ts';
+import { createStore, hasStore, readMeta } from './schema.ts';
 import type { MoleculeStoreOptions } from './storeOptions.ts';
 import { refuseV5 } from './v5Schema.ts';
 import type { WriteState } from './writeState.ts';
@@ -40,10 +30,10 @@ export interface StoreParts {
 }
 
 /**
- * Opens the store's tables in a database: creates them in a new one, gives signatures to one
- * written before the library kept them, refuses one written in another format or under other
- * signatures, counts the distinct hashes of one written before the library kept them, recomputes a
- * sample of its molecules, then starts the readers when asked to.
+ * Opens the store's tables in a database: creates them in a new one, refuses one written in
+ * another format, by a pre-release 6.0 build or under other signatures, counts the distinct hashes
+ * of one written before the library kept them, recomputes a sample of its molecules, then starts
+ * the readers when asked to.
  * @param db - The application's connection, outside any transaction.
  * @param options - Threads, the opening check and the readers.
  * @param migrating - Whether a migration from 5.x opens it, which takes a file still holding 5.x
@@ -71,14 +61,6 @@ export async function openStoreParts(
   const stamp = await computeStamp();
   const signatures = await computeSignatures();
   if (hasStore(db)) {
-    ensureSignatures(
-      db,
-      {
-        stamp: await computeUpgradeStamp(),
-        legacy: await computeLegacyStamp(),
-      },
-      signatures,
-    );
     validateMeta(readMeta(db), stamp, signatures);
   } else {
     createStore(db, stamp, signatures);

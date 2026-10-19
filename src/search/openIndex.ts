@@ -1,5 +1,6 @@
 import { computeStamp } from '../chemistry/stamp.ts';
-import { readMeta, validateStamp } from '../store/schema.ts';
+import { validateStamp } from '../store/metaChecks.ts';
+import { readMeta } from '../store/schema.ts';
 import { refuseV5 } from '../store/v5Schema.ts';
 
 import type { MoleculeIndexOptions } from './indexOptions.ts';
