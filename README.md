@@ -49,7 +49,7 @@ CREATE TABLE ocl_bits (bit INTEGER PRIMARY KEY, population INTEGER NOT NULL); --
 ```
 
 - **`ocl_tile`** holds the fingerprints once, as bit planes: up to 32 molecules of one cell (an atom
-  count and a 1 Da band of OpenChemLib's own weight) per record: 1,024 plane words (FragFp 512,
+  count and a 1 Da band of OCL's own weight) per record: 1,024 plane words (FragFp 512,
   then the 512-key screen), 32 seqs, 32 FragFp bit counts, the slots used, then the 512 function-key
   planes sparsely: a 512-bit mask of those holding a bit, then their words. A record is 4,356 bytes
   without any function word and 6,404 with all of them; a full tile of the test sample's molecules
@@ -70,7 +70,7 @@ CREATE TABLE ocl_bits (bit INTEGER PRIMARY KEY, population INTEGER NOT NULL); --
   `counted.fragFp`, `counted.screen`,
   `counted.functions` (the bit counts). A fingerprint's
   signature digests its key list and its bits for built-in molecules: the keys catch a changed key
-  no built-in molecule holds, the bits catch OpenChemLib reading the same keys differently.
+  no built-in molecule holds, the bits catch OCL reading the same keys differently.
 - **The stamp** digests the identity, FragFp, screen, function-key and idCode-hash signatures:
   everything a file stores. A file written under another stamp is refused, and opening a store recomputes 32
   sampled molecules. What a query is read into is left out: it is never stored, so a release that
@@ -100,14 +100,14 @@ db.exec('COMMIT');
 | Method                                    | What it does                                                                                                                  |
 | ----------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------- |
 | `MoleculeStore.open(db, options)`         | creates the tables, or refuses a foreign format or stamp; recomputes `checkRows` (32) sampled molecules; `threads`, `readers` |
-| `prepare(idCodes)`                        | computes the canonical idCode, atom count, band, FragFp, screen and both hashes; per-molecule `error`                         |
+| `prepare(idCodes)`                        | computes the canonical idCode, atom count, band, FragFp, screen, function keys and the three hashes; per-molecule `error`     |
 | `commit(batch)`                           | writes a prepared batch in the caller's transaction; `{ id, created }` per molecule; duplicates get their id back             |
 | `find(idCodes)`                           | the id of each stored molecule (canonical or not), or undefined                                                               |
 | `prefetch(batch, reads)`                  | the readers read the index pages a commit of the batch writes, and run the application's `reads` once per key                 |
 | `stereoisomers(idCode, { after, limit })` | ids with the same no-stereo hash, in id order                                                                                 |
 | `tautomers(idCode, { after, limit })`     | ids with the same tautomer hash, in id order                                                                                  |
 | `byHashes(kind, hashes)`                  | ids holding each `'idCode'`, `'noStereo'` or `'tautomer'` hash: one indexed seek per hash                                     |
-| `keys(ids)`                               | `{ idCode, noStereoHash, tautomerHash }` by id                                                                                |
+| `keys(ids)`                               | `{ idCode, noStereoHash, tautomerHash, idCodeHash }` by id                                                                    |
 | `remove(ids)`                             | administrative clean-up in the caller's transaction: rows deleted, tile slots emptied, seqs never reused                      |
 | `count()`, `lastSeq()`                    | from `ocl_meta`                                                                                                               |
 | `distinctHashes()`                        | `{ noStereo, tautomer }`: what `count(DISTINCT …)` over `ocl_molecule` answers, from `ocl_meta`                               |
@@ -134,7 +134,7 @@ library knows which part to compute again:
 | ----------------------------------------- | ------------------------------------------ | ------------------------------------------------------------------------------ |
 | function keys                             | refuses the file, naming the function keys | computes the function words of every molecule (2.0 ms) and counts them         |
 | screen keys                               | refuses the file, naming the screen        | computes the screen of every molecule (0.75 ms) and counts it again            |
-| FragFp (OpenChemLib)                      | refuses the file, naming FragFp            | computes FragFp, and the screen if it changed too (2.4 ms with both)           |
+| FragFp (OCL)                              | refuses the file, naming FragFp            | computes FragFp, and the screen if it changed too (2.4 ms with both)           |
 | idCode hashes, or a file without them     | refuses the file                           | adds the column and its index, and hashes every stored idCode                  |
 | canonization or identity hashes           | refuses the file                           | nothing: commit the idCodes into a new file                                    |
 | a pre-release 6.0 file (4,292-byte tiles) | refuses it                                 | nothing: commit its idCodes into a new file, or migrate its 5.x original again |
@@ -211,14 +211,15 @@ const index = await MoleculeIndex.open(
   { threads: 6 },
 );
 
-const page = await index.substructure(queryIdCode, {
+const options = {
   limit: 24,
   sets: ['source:3'],
   filters: { logP: { min: 2 } },
   keyMin: 250, // a seek, not a filter
-});
+};
+const page = await index.substructure(queryIdCode, options);
 const next = await index.substructure(queryIdCode, {
-  limit: 24,
+  ...options,
   after: page.next,
 });
 ```
@@ -230,7 +231,7 @@ const next = await index.substructure(queryIdCode, {
 | `browse(options)`                                     | the same walk without a structure                                                                                                             |
 | `count(options)`                                      | `{ total, bySet, byKey, membership, combinations, histogram, complete }`: what a browse with the same options answers, counted in the workers |
 | `similarity(idCode, { threshold, fingerprint, ... })` | `{ hits: [{ id, score }], next, total, partial, fingerprint, reason, info }`, by Tanimoto then id                                             |
-| `poll()`, `waitForSeq(seq)`                           | catch up now; wait until a seq is searchable                                                                                                  |
+| `poll()`, `waitForSeq(seq, timeoutMs)`                | catch up now; wait until a seq is searchable, rejecting after `timeoutMs` (60,000)                                                            |
 | `version`, `watermark`, `rowCount`, `sets`            | the version searched                                                                                                                          |
 | `saveSnapshot()`                                      | saves the index to its `snapshot` now: null, or why it was not                                                                                |
 | `tailStats()`, `errors`, `close()`                    |                                                                                                                                               |
@@ -252,12 +253,12 @@ const page = await index.browse({
 **Key bits.** A key is bit b of the 48-word record `getMoleculeRecords` writes, numbered from the
 highest bit of word 0: word `b >> 5`, mask `1 << (31 - (b & 31))`. FragFp keys are 0–511, the screen
 512–1023, the function keys 1024–1535 (`getFunctionKeyFragments()` order, the dictionary's
-`plane` + 1024). For a function key of the dictionary, openchemlib-search-wasm's
-`getRecordBit(key)` gives `{ word, mask }`, so b is `32 * word + Math.clz32(mask)`; it gives
-undefined for a key computed on demand, which no tile stores. The tiles store every key, so a
-condition on them is exact: a browse with `bits` is never verified, and a substructure search
-verifies its query alone. `all`, `any` and `none` take 256 bits each at most; `any` puts no
-condition when empty.
+`plane` + 1024). For a function key of the dictionary, `getRecordBit(key)` from
+`openchemlib-search-wasm/function-keys` gives `{ word, mask }`, so b is
+`32 * word + Math.clz32(mask)`; it gives undefined for a key computed on demand, which no tile
+stores. The tiles store every key, so a condition on them is exact: a browse with `bits` is never
+verified, and a substructure search verifies its query alone. `all`, `any` and `none` take 256
+bits each at most; `any` puts no condition when empty.
 
 **Lanes.** A search waits in one of two queues when the workers are busy: when they free up, the
 oldest `'interactive'` search runs before any `'bulk'` one, and a running search is never
@@ -273,7 +274,7 @@ it starts running, so waiting never eats it.
   the atom counts read (nearest the query's first) and no `next`. `info.scored` counts the rows
   whose Tanimoto was computed (inside the bit-count window and the filters): at least `total`.
 - **Fingerprints.** Each similarity search chooses what it scores: `fingerprint: 'fragFp'`
-  (OpenChemLib's 512 FragFp keys, the default, so scores are FragFp Tanimoto as before),
+  (OCL's 512 FragFp keys, the default, so scores are FragFp Tanimoto as before),
   `'screen'` (the 512 query-fragment keys) or `'both'` (1,024 bits). The index keeps each row's
   FragFp and screen bit counts (`both` is their sum) and a bit-count zone map per fingerprint, so
   the window prunes in every mode; that costs 2.25 B per row. A cursor belongs to its fingerprint:
@@ -368,6 +369,18 @@ the last column multiplies their cost by 60 M rows, which the search workers the
 
 A filter column adds its test to every row the sets and keys keep, as in a search.
 
+## Other exports
+
+From `openchemlib-sqlite`:
+
+- `makeId(atoms, seq)`, `atomCountOf(id)` and `seqOf(id)` build and read an id,
+  `atomCount·2^36 + seq`. `SEQ_SPAN` is 2^36, and `MAX_ATOMS` (65,535) the largest atom count an
+  id holds: a larger molecule is clamped.
+- `FORMAT` is the file format this version writes and reads; `computeSignatures()` and
+  `computeStamp()` give this build's signatures and stamp, as `ocl_meta` records them.
+- `LIBRARY_SQL` holds the statements that create the library's tables.
+- `MAX_TAUTOMERS` (5,000) caps the tautomer enumeration.
+
 ## Migrating from 5.x
 
 6.0 is a new file format and a new API; nothing of 5.x is read.
@@ -379,7 +392,7 @@ A filter column adds its test to every row the sets and keys keep, as in a searc
   `openchemlib-sqlite/worker` entry.
 - The library no longer takes values from the caller: `mwColumn`, `trustMwColumn` and the
   precomputed entries `insert()` accepted have no equivalent. It computes the atom count, its
-  weight (for the band), the fingerprints and both hashes itself.
+  weight (for the band), the fingerprints and the three hashes itself.
 - `maxTautomers` is gone: the enumeration stops at 5,000 tautomers, and a molecule that reaches the
   cap gets its no-stereo hash as its tautomer hash, which can differ from its 5.x value.
 - The entries table is the application's: the library keys nothing by the application's id; the

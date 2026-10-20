@@ -1,14 +1,14 @@
 # Porting molecules.cheminfo.org to openchemlib-sqlite 6.0
 
 What the app must create, and how it calls the store and the index. The schema is
-`out/schema-v3.sql` of the molecules checkout; the library creates its three tables itself.
+`out/schema-v3.sql` of the molecules checkout; the library creates its four tables itself.
 
 ## 1. The app's tables
 
 Create, in `data/sqlite/db.sqlite` (one file, 4 KiB pages, WAL), everything of `schema-v3.sql`
-except `ocl_molecule`, `ocl_tile` and `ocl_meta`: `formulas`, `molecules` (keyed by the library's
-id, no idCode, no hashes, no `ssIndex`), `sources`, `tokens`, `molecule_sources`, `counters`,
-`stats`, `stats_mass`, their indexes, and the triggers (counts, `listed`, guards).
+except `ocl_molecule`, `ocl_tile`, `ocl_meta` and `ocl_bits`: `formulas`, `molecules` (keyed by
+the library's id, no idCode, no hashes, no `ssIndex`), `sources`, `tokens`, `molecule_sources`,
+`counters`, `stats`, `stats_mass`, their indexes, and the triggers (counts, `listed`, guards).
 
 Open the store before inserting any app row: `MoleculeStore.open(db)` creates the library's
 tables, and `molecules.id REFERENCES ocl_molecule (id)`.
@@ -37,7 +37,7 @@ applied reports it in `index.errors` and must be opened again.
 
 ```js
 const batch = await store.prepare(idCodes); // worker threads: canonical idCode, atom count, band,
-// FragFp, screen, both hashes; nothing written
+// FragFp, screen, function keys, the three hashes; nothing written
 db.exec('BEGIN IMMEDIATE');
 const results = store.commit(batch);
 for (const [i, result] of results.entries()) {
@@ -54,19 +54,19 @@ db.exec('COMMIT');
 - `molecules.createdAt`, the formula and the properties are the app's, computed from
   `molecule.idCode` (the canonical form the library stores).
 - `noStereoID`, `noStereoTautomerID` and `failedTautomerID` are no longer stored: compute them on
-  demand. `ssIndex` is in the tiles; `store.keys(ids)` gives the idCode and both hashes.
+  demand. `ssIndex` is in the tiles; `store.keys(ids)` gives the idCode and its three hashes.
 - Removing a molecule (admin): delete its `molecule_sources` and `molecules` rows (logged), then
   `store.remove([id])` in the same transaction.
 
 ## 4. Identity
 
-| Before                             | Now                                                                                     |
-| ---------------------------------- | --------------------------------------------------------------------------------------- |
-| lookup by `molecules.idCode`       | `store.find(idCodes)`                                                                   |
-| "Any stereoisomer"                 | `store.stereoisomers(idCode, { after })`                                                |
-| "Any tautomer"                     | `store.tautomers(idCode, { after })`                                                    |
-| `byHash(es)`, naturals' candidates | `store.byHashes('idCode', 'noStereo' or 'tautomer', hashes)`: one indexed seek per hash |
-| the hit's idCode and hashes        | `store.keys(ids)`                                                                       |
+| Before                             | Now                                                                                                      |
+| ---------------------------------- | -------------------------------------------------------------------------------------------------------- |
+| lookup by `molecules.idCode`       | `store.find(idCodes)`                                                                                    |
+| "Any stereoisomer"                 | `store.stereoisomers(idCode, { after })`                                                                 |
+| "Any tautomer"                     | `store.tautomers(idCode, { after })`                                                                     |
+| `byHash(es)`, naturals' candidates | `store.byHashes(kind, hashes)`, kind `'idCode'`, `'noStereo'` or `'tautomer'`: one indexed seek per hash |
+| the hit's idCode and hashes        | `store.keys(ids)`                                                                                        |
 
 ## 5. The index
 

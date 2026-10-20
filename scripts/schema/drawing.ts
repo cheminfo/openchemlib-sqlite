@@ -111,7 +111,7 @@ export function framesOf(drawing: SchemaDrawing): FrameContent[] {
         'Computed from the idCode alone: id = atomCount·2^36 + seq (arrival order, never reused, at most 2^32 − 1), and the three hashes.',
         'ocl_tile: up to 32 molecules of one atom count and 1 Da band as 1,536 bit planes (FragFp, screen, function keys); id = (atoms·2^16 + band)·2^21 + n.',
         'Its function planes are stored sparsely: a 512-bit mask, then the non-zero words. ocl_bits: how many molecules hold each of the 1,536 keys.',
-        'ocl_meta: format, stamp, signatures, generation, the last seq, count; and where a rebuild under way is.',
+        'ocl_meta: format, stamp, signatures, generation, the last seq, the molecule and distinct-hash counts; where a rebuild or a migration is.',
       ],
       schema: store,
       places: STORE_PLACES,
@@ -122,7 +122,8 @@ export function framesOf(drawing: SchemaDrawing): FrameContent[] {
         'While a rebuild runs — beside the store’s tables, gone once it switches',
       notes: [
         'MoleculeStore.rebuild() builds new tiles and counts here when the keys change; writers go on and log what they touch.',
-        'The switch renames ocl_tile_next to ocl_tile and copies ocl_bits_next into ocl_bits under one write lock, then drops the logs.',
+        'The switch, under one write lock, renames ocl_tile to ocl_tile_old and ocl_tile_next to ocl_tile, and copies the rebuilt counts into ocl_bits.',
+        'It drops ocl_bits_next and the log; ocl_tile_old is then freed a thousand rows per transaction.',
         'A file without idCode hashes gets ocl_molecule.idCodeHash and its index, filled a step at a time.',
       ],
       schema: rebuild,
