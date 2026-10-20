@@ -39,7 +39,8 @@ export interface WriteStatements {
   meta: StatementSync;
   setMeta: StatementSync;
   addMeta: StatementSync;
-  sameHash: StatementSync;
+  sameIdCode: StatementSync;
+  sameNoStereo: StatementSync;
   sameTautomer: StatementSync;
   insertMolecule: StatementSync;
   lastTile: StatementSync;
@@ -58,8 +59,11 @@ export function prepareWriteStatements(db: DatabaseSync): WriteStatements {
     meta: db.prepare('SELECT value FROM ocl_meta WHERE name = ?'),
     setMeta: db.prepare('UPDATE ocl_meta SET value = ? WHERE name = ?'),
     addMeta: db.prepare('UPDATE ocl_meta SET value = value + ? WHERE name = ?'),
-    sameHash: db.prepare(
-      'SELECT id, idCode FROM ocl_molecule WHERE noStereoHash = ?',
+    sameIdCode: db.prepare(
+      'SELECT id, idCode FROM ocl_molecule WHERE idCodeHash = ?',
+    ),
+    sameNoStereo: db.prepare(
+      'SELECT 1 AS found FROM ocl_molecule WHERE noStereoHash = ? LIMIT 1',
     ),
     sameTautomer: db.prepare(
       'SELECT 1 AS found FROM ocl_molecule WHERE tautomerHash = ? LIMIT 1',
@@ -125,7 +129,12 @@ export function commitRecords(
     const idCode = records.idCodes[i] as string;
     const noStereoHash = records.noStereoHashes[i] as bigint;
     const tautomerHash = records.tautomerHashes[i] as bigint;
-    const same = findSame(statements, noStereoHash, idCode);
+    const same = findSame(
+      statements,
+      records.idCodeHashes[i] as bigint,
+      noStereoHash,
+      idCode,
+    );
     if (same.id !== undefined) {
       results[i] = { id: same.id, created: false };
       continue;
@@ -204,27 +213,30 @@ function countMolecule(
 }
 
 /**
- * The stored molecule with this no-stereo hash and canonical idCode, and whether any stored
- * molecule carries the hash.
+ * The stored molecule with this canonical idCode, found by one seek of its hash, and whether any
+ * stored molecule carries its no-stereo hash, by one more: neither reads the stored stereoisomers.
  * @param statements - The write statements.
+ * @param idCodeHash - The hash of its canonical idCode.
  * @param noStereoHash - Its no-stereo hash.
- * @param idCode - Its canonical idCode.
- * @returns The id, or undefined; and whether the hash is stored already.
+ * @param idCode - Its canonical idCode, which tells apart two idCodes sharing a hash.
+ * @returns The id, or undefined; and whether the no-stereo hash is stored already.
  */
 export function findSame(
   statements: WriteStatements,
+  idCodeHash: bigint,
   noStereoHash: bigint,
   idCode: string,
 ): { id: number | undefined; hashSeen: boolean } {
-  let hashSeen = false;
-  for (const row of statements.sameHash.iterate(noStereoHash) as Iterable<{
+  for (const row of statements.sameIdCode.iterate(idCodeHash) as Iterable<{
     id: number;
     idCode: string;
   }>) {
     if (row.idCode === idCode) return { id: row.id, hashSeen: true };
-    hashSeen = true;
   }
-  return { id: undefined, hashSeen };
+  return {
+    id: undefined,
+    hashSeen: statements.sameNoStereo.get(noStereoHash) !== undefined,
+  };
 }
 
 function readNumber(statements: WriteStatements, name: string): number {

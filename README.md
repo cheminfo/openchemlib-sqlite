@@ -120,10 +120,16 @@ db.exec('COMMIT');
 `commit()` accepts only batches the store itself prepared: no value computed by the caller ever
 reaches the library's tables.
 
+A stored molecule is recognized by one seek of the hash of its idCode, the idCode itself telling
+apart two that share a hash; whether its compound is stored is one more seek, of its no-stereo hash.
+Neither `find()` nor `commit()` reads the stored stereoisomers of a molecule, so their cost does not
+grow with them. `find()` computes a canonical idCode only for an idCode it did not find whose
+compound is stored: a stereoisomer, or an idCode given in another form.
+
 For a connection that commits many new molecules, `readers: n` takes the reads off its thread: it
-starts `n` threads with read-only connections of their own. `find()` reads the stored molecules of
-the hashes it needs there, and `prefetch()` seeks, ahead of a commit, the pages of both hash indexes
-where the batch's molecules go, so that the commit finds them in the operating system's cache.
+starts `n` threads with read-only connections of their own. `find()` makes its seeks there, and
+`prefetch()` seeks, ahead of a commit, the pages of the three hash indexes where the batch's
+molecules go, so that the commit finds them in the operating system's cache.
 
 ### When keys change: rebuild beside, then switch
 

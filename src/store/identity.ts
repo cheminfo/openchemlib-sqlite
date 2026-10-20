@@ -36,7 +36,10 @@ export interface IdentityStatements {
   byHash: Record<HashKind, StatementSync>;
   /** Per hash kind: a page of the ids holding a hash, after an id. */
   hashAfter: Record<HashKind, StatementSync>;
-  idCodes: StatementSync;
+  /** The stored molecules holding an idCode hash, with their idCodes. */
+  exact: StatementSync;
+  /** Whether a stored molecule holds a no-stereo hash. */
+  family: StatementSync;
 }
 
 /**
@@ -67,8 +70,11 @@ export function prepareIdentityStatements(
       (column) =>
         `SELECT id FROM ocl_molecule WHERE ${column} = ? AND id > ? ORDER BY id LIMIT ?`,
     ),
-    idCodes: db.prepare(
-      'SELECT id, idCode FROM ocl_molecule WHERE noStereoHash = ?',
+    exact: db.prepare(
+      'SELECT id, idCode FROM ocl_molecule WHERE idCodeHash = ?',
+    ),
+    family: db.prepare(
+      'SELECT 1 AS found FROM ocl_molecule WHERE noStereoHash = ? LIMIT 1',
     ),
   };
 }
@@ -169,18 +175,34 @@ export function idsAfter(
 }
 
 /**
- * The stored molecules sharing a no-stereo hash, with their idCodes.
+ * The stored molecule of an idCode: one seek of its hash, the idCode itself telling apart two
+ * that share it.
  * @param statements - The identity statements.
- * @param hash - The no-stereo hash.
- * @returns Their ids and canonical idCodes.
+ * @param hash - The idCode's hash, `strongHash(idCode)`.
+ * @param idCode - The idCode.
+ * @returns Its id, or undefined when it is not stored.
  */
-export function sameNoStereo(
+export function storedIdOf(
   statements: IdentityStatements,
   hash: bigint,
-): Array<{ id: number; idCode: string }> {
-  const rows = statements.idCodes.all(hash) as Array<{
-    id: number;
-    idCode: string;
-  }>;
-  return rows.map((row) => ({ id: row.id, idCode: row.idCode }));
+  idCode: string,
+): number | undefined {
+  for (const row of statements.exact.iterate(hash)) {
+    const stored = row as { id: number; idCode: string };
+    if (stored.idCode === idCode) return stored.id;
+  }
+  return undefined;
+}
+
+/**
+ * Whether a stored molecule holds a no-stereo hash: one seek, however many stereoisomers hold it.
+ * @param statements - The identity statements.
+ * @param hash - The no-stereo hash.
+ * @returns True when one does.
+ */
+export function holdsNoStereo(
+  statements: IdentityStatements,
+  hash: bigint,
+): boolean {
+  return statements.family.get(hash) !== undefined;
 }

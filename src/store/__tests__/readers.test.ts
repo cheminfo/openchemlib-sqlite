@@ -10,6 +10,7 @@ import { testThreads } from '../../__tests__/testDatabase.ts';
 import { MoleculeStore } from '../MoleculeStore.ts';
 import type { DistinctHashes } from '../schema.ts';
 
+import { FLIP_A, FLIP_B } from './flipPair.ts';
 import { commitIds, commitSteps, countedDistinct } from './storeSteps.ts';
 
 const smiles = (text: string) => OCL.Molecule.fromSmiles(text).getIDCode();
@@ -174,6 +175,14 @@ test('with readers, find and commit follow what another connection commits, and 
   }
 });
 
+test('an idCode that is not canonical is found through its canonical form, with or without readers', async () => {
+  const plain = await storeAndFindFlipped(0);
+  const fast = await storeAndFindFlipped(2);
+
+  expect(plain.found).toStrictEqual([plain.id, plain.id, undefined]);
+  expect(fast.found).toStrictEqual([fast.id, fast.id, undefined]);
+});
+
 test('readers need a database file', async () => {
   const db = new DatabaseSync(':memory:');
 
@@ -183,3 +192,26 @@ test('readers need a database file', async () => {
 
   db.close();
 });
+
+/**
+ * Stores FLIP_A, which the store keeps as its canonical form FLIP_B, then looks up both forms and
+ * ethanol, which is not stored.
+ * @param readers - The store's readers.
+ * @returns The stored id, and what each lookup found.
+ */
+async function storeAndFindFlipped(
+  readers: number,
+): Promise<{ id: number | undefined; found: Array<number | undefined> }> {
+  const db = new DatabaseSync(join(directory, `flip-${readers}.sqlite`));
+  const store = await MoleculeStore.open(db, {
+    threads: testThreads(1),
+    readers,
+  });
+  try {
+    const [id] = await commitIds(store, db, [FLIP_A]);
+    return { id, found: await store.find([FLIP_A, FLIP_B, ETHANOL]) };
+  } finally {
+    await store.close();
+    db.close();
+  }
+}

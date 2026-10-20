@@ -3,7 +3,7 @@ import { Worker } from 'node:worker_threads';
 
 import { isReply } from '../workerReplies.ts';
 
-import type { ReaderRequest, StoredRow } from './readerWorker.ts';
+import type { ReaderRequest } from './readerWorker.ts';
 
 const FROM_SOURCE = import.meta.url.endsWith('.ts');
 const WORKER_URL = new URL(
@@ -71,34 +71,62 @@ export class ReaderPool {
   }
 
   /**
-   * The stored molecules carrying each hash, read by all the readers at once.
-   * @param hashes - The no-stereo hashes.
-   * @returns Per hash, its molecules' ids and canonical idCodes.
+   * The stored molecule of each idCode, sought by the hash of that idCode, by all the readers at
+   * once: one seek each, whatever the number of its stereoisomers.
+   * @param hashes - The idCodes' hashes, `strongHash(idCode)`.
+   * @param idCodes - The idCodes, as many: a hash two idCodes share is told apart by them.
+   * @returns Per idCode, the id of the stored molecule, -1 for none.
    */
-  async sameNoStereo(hashes: readonly bigint[]): Promise<StoredRow[][]> {
+  async exact(
+    hashes: readonly bigint[],
+    idCodes: readonly string[],
+  ): Promise<Float64Array> {
     const parts = this.#split(hashes.length, (from, to) => ({
-      kind: 'same' as const,
+      kind: 'exact' as const,
       hashes: BigInt64Array.from(hashes.slice(from, to)),
+      idCodes: idCodes.slice(from, to),
     }));
-    const answers = (await Promise.all(parts)) as StoredRow[][][];
-    return answers.flat();
+    return joinParts(
+      (await Promise.all(parts)) as Float64Array[],
+      (length) => new Float64Array(length),
+    );
   }
 
   /**
-   * Seeks each hash in its index, so that the pages where the commit will write them are read.
+   * Whether a stored molecule carries each no-stereo hash, by all the readers at once.
+   * @param hashes - The no-stereo hashes.
+   * @returns Per hash, 1 when stored, else 0.
+   */
+  async families(hashes: readonly bigint[]): Promise<Uint8Array> {
+    const parts = this.#split(hashes.length, (from, to) => ({
+      kind: 'family' as const,
+      hashes: BigInt64Array.from(hashes.slice(from, to)),
+    }));
+    return joinParts(
+      (await Promise.all(parts)) as Uint8Array[],
+      (length) => new Uint8Array(length),
+    );
+  }
+
+  /**
+   * Seeks each hash in its index, so that the pages where the commit will read and write them are
+   * read.
    * @param noStereo - No-stereo hashes.
    * @param tautomer - Tautomer hashes, as many.
+   * @param idCode - IdCode hashes, as many.
    * @returns Once read.
    */
   async touch(
     noStereo: readonly bigint[],
     tautomer: readonly bigint[],
+    idCode: readonly bigint[],
   ): Promise<void> {
     await Promise.all(
       this.#split(noStereo.length, (from, to) => ({
         kind: 'touch' as const,
         noStereo: BigInt64Array.from(noStereo.slice(from, to)),
         tautomer: BigInt64Array.from(tautomer.slice(from, to)),
+        idCode: BigInt64Array.from(idCode.slice(from, to)),
       })),
     );
   }
@@ -150,4 +178,25 @@ export class ReaderPool {
       reader.worker.postMessage({ ...request, id });
     });
   }
+}
+
+/**
+ * The parts of an answer, joined in order.
+ * @param parts - The readers' answers.
+ * @param create - Makes the joined array, of a length.
+ * @returns One array.
+ */
+function joinParts<T extends Float64Array | Uint8Array>(
+  parts: readonly T[],
+  create: (length: number) => T,
+): T {
+  let length = 0;
+  for (const part of parts) length += part.length;
+  const out = create(length);
+  let at = 0;
+  for (const part of parts) {
+    out.set(part, at);
+    at += part.length;
+  }
+  return out;
 }
