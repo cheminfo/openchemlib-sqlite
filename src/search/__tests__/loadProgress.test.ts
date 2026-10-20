@@ -46,6 +46,12 @@ afterAll(async () => {
 
 test('each step of the load is heard starting, then finished with every task taken', () => {
   const finished = heard.filter((progress) => progress.finished);
+  // A step is first heard starting. A slow runner may add a periodic report of
+  // 0 tasks taken before the first one is, so the starts are not counted.
+  const firstHeard = new Map<string, LoadProgress>();
+  for (const progress of heard) {
+    if (!firstHeard.has(progress.step)) firstHeard.set(progress.step, progress);
+  }
 
   expect(finished).toStrictEqual([
     { step: 'plan', done: 0, total: 0, finished: true },
@@ -63,8 +69,14 @@ test('each step of the load is heard starting, then finished with every task tak
     { step: 'workers', done: 0, total: 0, finished: true },
   ]);
   expect(
-    heard.filter((progress) => !progress.finished && progress.done === 0),
-  ).toHaveLength(10);
+    [...firstHeard.values()].map(({ step, done, finished: over }) => ({
+      step,
+      done,
+      finished: over,
+    })),
+  ).toStrictEqual(
+    finished.map(({ step }) => ({ step, done: 0, finished: false })),
+  );
   expect(index.rowCount).toBe(store.count());
 });
 
