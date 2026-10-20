@@ -276,7 +276,8 @@ test('commits and removals on another connection, while the screen is rebuilt, l
     'ocl_molecule',
     'ocl_tile',
   ]);
-});
+  // 1,500 molecules computed while another connection writes: 34 s on a CI runner.
+}, 120_000);
 
 test('a store opened before a rebuild for another build writes nothing', async () => {
   const { db, store } = await files.storeWith('foreign', idCodes.slice(0, 50));
