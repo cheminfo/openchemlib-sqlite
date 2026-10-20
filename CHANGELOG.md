@@ -1,5 +1,26 @@
 # Changelog
 
+## [6.0.0](https://github.com/cheminfo/openchemlib-sqlite/compare/v5.3.0...v6.0.0) (2026-10-20)
+
+
+### ⚠ BREAKING CHANGES
+
+* store the function words in the tiles, and filter and count by key bits and source sets
+* a new file format and API. MoleculesDBSQLite gives way to MoleculeStore and openchemlib-sqlite/index; a 5.x file is migrated in place with migrateFromV5().
+
+### Features
+
+* count the molecules a browse of sets answers, on their bitmaps ([c485f0b](https://github.com/cheminfo/openchemlib-sqlite/commit/c485f0b8b74ce0099be00f9d1e2c64be34203cc1))
+* store and search molecules from the idCode alone, in one file ([fe9de02](https://github.com/cheminfo/openchemlib-sqlite/commit/fe9de02e4e5cd39085c2218839990216ea2f088d))
+* store the function words in the tiles, and filter and count by key bits and source sets ([412038a](https://github.com/cheminfo/openchemlib-sqlite/commit/412038a85e08779c158307a364594e9b12c98ced))
+
+
+### Bug Fixes
+
+* recognize a stored molecule by its idCode hash, never by reading its stereoisomers ([a09a64e](https://github.com/cheminfo/openchemlib-sqlite/commit/a09a64ee9d22fbe62bfbf528c1c2f60706af4364))
+* slice an index that started empty by the weights the tail added ([a3441fa](https://github.com/cheminfo/openchemlib-sqlite/commit/a3441faf1fd23fdc4818661d833a14032d13dad3))
+* take openchemlib-search-wasm 2.1.1 ([685483f](https://github.com/cheminfo/openchemlib-sqlite/commit/685483f7f16bf2e33da515f46e83d002f123e6cb))
+
 ## [5.3.0](https://github.com/cheminfo/openchemlib-sqlite/compare/v5.2.0...v5.3.0) (2026-10-08)
 
 
