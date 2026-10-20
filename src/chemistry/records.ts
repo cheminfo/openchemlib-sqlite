@@ -26,7 +26,7 @@ export interface RecordColumns {
   errors: Array<string | null>;
   /** Atom counts, explicit hydrogens included, clamped to the key's range. */
   atoms: Int32Array;
-  /** Bands: the floor of OpenChemLib's own weight, clamped. */
+  /** Bands: the floor of OCL's own weight, clamped. */
   bands: Int32Array;
   /** FragFp bit counts. */
   bits: Int32Array;

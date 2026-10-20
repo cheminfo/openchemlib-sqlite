@@ -36,9 +36,15 @@ export interface RebuildOptions {
    * @default 256
    */
   tilesPerStep?: number;
-  /** Stops the rebuild between steps; calling `rebuild()` again resumes it. */
+  /**
+   * Stops the rebuild between steps; calling `rebuild()` again resumes it.
+   * @default none
+   */
   signal?: AbortSignal;
-  /** Hears each step. */
+  /**
+   * Hears each step.
+   * @default none
+   */
   onProgress?: (progress: RebuildProgress) => void;
 }
 

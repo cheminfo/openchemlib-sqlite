@@ -1,5 +1,6 @@
 import { readKeyBits } from './keyBits.ts';
 import type { Layout } from './layout.ts';
+import { pageLimit } from './pageLimit.ts';
 import type { SearchPool } from './pool/SearchPool.ts';
 import type { FilterRange } from './query.ts';
 import { readFilters, restrictionRank, substructurePlan } from './query.ts';
@@ -64,7 +65,10 @@ export interface SearchOptions {
    * @default {}
    */
   bits?: KeyBits;
-  /** Inclusive bounds on filter columns, by name. */
+  /**
+   * Inclusive bounds on filter columns, by name.
+   * @default {}
+   */
   filters?: Record<string, FilterRange>;
   /**
    * The least order key answered: a seek, not a filter.
@@ -88,7 +92,10 @@ export interface SearchOptions {
    * @default the index's `budgetMs`
    */
   budgetMs?: number;
-  /** Stops the page; it answers what it settled. */
+  /**
+   * Stops the page; it answers what it settled.
+   * @default none
+   */
   signal?: AbortSignal;
 }
 
@@ -205,25 +212,6 @@ export function keyPage(
     lane,
     { signal: options.signal, settle },
   );
-}
-
-/** The most hits one page answers. */
-export const MAX_PAGE_LIMIT = 1_000_000;
-
-/**
- * The hits a page asks for, checked before any worker sizes a buffer by it.
- * @param limit - The option given.
- * @returns It, 24 when not given.
- * @throws {Error} When it is not a whole number from 1 to MAX_PAGE_LIMIT.
- */
-export function pageLimit(limit: number | undefined): number {
-  const value = limit ?? 24;
-  if (!Number.isInteger(value) || value < 1 || value > MAX_PAGE_LIMIT) {
-    throw new Error(
-      `limit is a whole number from 1 to ${MAX_PAGE_LIMIT}, not ${String(limit)}`,
-    );
-  }
-  return value;
 }
 
 function pageOf(

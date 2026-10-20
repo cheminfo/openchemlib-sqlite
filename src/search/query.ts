@@ -23,9 +23,15 @@ import type { SubstructurePlan } from './walk/walkPage.ts';
 
 /** Inclusive bounds on one filter column. */
 export interface FilterRange {
-  /** The least value kept. */
+  /**
+   * The least value kept.
+   * @default no lower bound
+   */
   min?: number;
-  /** The largest value kept. */
+  /**
+   * The largest value kept.
+   * @default no upper bound
+   */
   max?: number;
 }
 

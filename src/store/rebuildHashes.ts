@@ -65,7 +65,7 @@ export function readHashStep(
 }
 
 /**
- * Writes the idCode hash of molecules whose stored one differs: OpenChemLib's StrongHasher of the
+ * Writes the idCode hash of molecules whose stored one differs: OCL's StrongHasher of the
  * canonical idCode, which no chemistry is needed for.
  * @param statements - The statements.
  * @param rows - The molecules.

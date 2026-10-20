@@ -88,7 +88,7 @@ export function splitTileKey(key: number): {
 /**
  * The band of a weight: its floor in Da, clamped to 0..65,535 (0 for a weight that is not a
  * number). The band only places a molecule: results are ordered by the caller's key.
- * @param weight - OpenChemLib's relative weight of the molecule.
+ * @param weight - OCL's relative weight of the molecule.
  * @returns The band.
  */
 export function bandOfWeight(weight: number): number {

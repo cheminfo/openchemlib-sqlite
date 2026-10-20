@@ -7,7 +7,7 @@ import { MoleculeStore } from '../MoleculeStore.ts';
 
 import { commitIds } from './storeSteps.ts';
 
-// PubChem CID 9942100: OpenChemLib canonicalizes each of these two idCodes to the other.
+// PubChem CID 9942100: OCL canonicalizes each of these two idCodes to the other.
 const FLIP_A =
   'dSdeHC``@CaLRkz@\\@chQERtcLqlgEpBLbjjvhXvkn{^PYFq|Xdi@GBl\\BYprW@hbHQH`hjDRLaDcHRDqLaHRDRDQDqHSHrDcHqDKHaHaDaBaHbdRAQDPdQHqDRDaLRDaLRDaHaHsH`daHjDqHrDcDaHQDRHSDrBRdJHQHbdMNQtgHKBdgHJp]DaTVEqDPfjjjjiijZZjjjjfjifjjjjjjjBBJfjifjjjjjjijZjjjjjjfijjjjhj`@`RJXSiSh';
 const FLIP_B =

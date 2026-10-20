@@ -37,9 +37,15 @@ export interface MigrateFromV5Options {
    * @default false
    */
   finish?: boolean;
-  /** Stops it between steps; the next call continues from there. */
+  /**
+   * Stops it between steps; the next call continues from there.
+   * @default none
+   */
   signal?: AbortSignal;
-  /** Hears what was done after each step. */
+  /**
+   * Hears what was done after each step.
+   * @default none
+   */
   onProgress?: (counts: V5Counts) => void;
 }
 

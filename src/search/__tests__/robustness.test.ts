@@ -16,7 +16,7 @@ import {
 } from '../../__tests__/testDatabase.ts';
 import { MoleculeStore } from '../../store/MoleculeStore.ts';
 import { MoleculeIndex } from '../MoleculeIndex.ts';
-import { MAX_PAGE_LIMIT } from '../pages.ts';
+import { MAX_PAGE_LIMIT } from '../pageLimit.ts';
 import { nextGeneration } from '../pool/SearchPool.ts';
 
 let directory: string;

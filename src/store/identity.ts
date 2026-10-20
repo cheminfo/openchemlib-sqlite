@@ -12,7 +12,7 @@ export interface MoleculeKeys {
   noStereoHash: bigint;
   /** The hash of its no-stereo generic tautomer; its no-stereo hash when truncated. */
   tautomerHash: bigint;
-  /** The hash of its canonical idCode: OpenChemLib's StrongHasher, `strongHash(idCode)`. */
+  /** The hash of its canonical idCode: OCL's StrongHasher, `strongHash(idCode)`. */
   idCodeHash: bigint;
 }
 

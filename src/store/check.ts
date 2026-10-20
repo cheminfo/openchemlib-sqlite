@@ -38,7 +38,7 @@ export function mismatchError(mismatches: CheckMismatch[]): Error {
 /**
  * Recomputes a seeded sample of stored molecules from their idCodes and compares every stored
  * value: the atom count in the id, both identity hashes, the canonical idCode and the hash of the
- * one stored, the cell of its tile slot, its 1,536 bits and its bit count. OpenChemLib's canonical idCode of a few molecules flips
+ * one stored, the cell of its tile slot, its 1,536 bits and its bit count. OCL's canonical idCode of a few molecules flips
  * between two forms, each canonicalizing to the other (PubChem CID 9942100): an idCode that
  * differs alone is accepted when canonicalizing it again gives back the stored one.
  * @param db - The connection.

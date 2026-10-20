@@ -18,19 +18,19 @@ export const FORMAT = 'openchemlib-sqlite 6';
 /**
  * What each part of a store is computed under, as this build computes it: a digest of outputs for
  * built-in molecules and, for a fingerprint, of its key list too. The keys catch a changed key that
- * no built-in molecule holds; the outputs catch OpenChemLib reading the same keys differently. A
+ * no built-in molecule holds; the outputs catch OCL reading the same keys differently. A
  * store records the signatures it was written under, so a build knows which part it must recompute.
  */
 export interface Signatures {
   /** The canonical idCode, the atom count, the band and both hashes, with the tautomer cap. */
   identity: string;
-  /** OpenChemLib's FragFp keys, the built-in molecules' FragFp and their bit counts. */
+  /** OCL's FragFp keys, the built-in molecules' FragFp and their bit counts. */
   fragFp: string;
   /** The screen keys and the built-in molecules' screen. */
   screen: string;
   /** The function keys and the built-in molecules' function words, stored in the tiles. */
   functions: string;
-  /** The hash of the canonical idCode: OpenChemLib's StrongHasher, on the built-in molecules. */
+  /** The hash of the canonical idCode: OCL's StrongHasher, on the built-in molecules. */
   idCodeHash: string;
 }
 

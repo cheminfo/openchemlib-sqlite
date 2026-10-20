@@ -1,8 +1,8 @@
 import type { SimilarityFingerprint } from './fingerprint.ts';
 import { checkFingerprint } from './fingerprint.ts';
 import { readKeyBits } from './keyBits.ts';
+import { pageLimit } from './pageLimit.ts';
 import type { PageContext, SearchOptions } from './pages.ts';
-import { pageLimit } from './pages.ts';
 import { orderPlanes, readFilters, similarityPlan } from './query.ts';
 import { setExpression } from './setExpression.ts';
 import type { ScoreCursor } from './walk/similarityPage.ts';
@@ -16,12 +16,15 @@ export interface SimilarityOptions extends SearchOptions {
    */
   threshold?: number;
   /**
-   * The fingerprint scored: `'fragFp'` (OpenChemLib's 512 FragFp keys), `'screen'` (the 512
+   * The fingerprint scored: `'fragFp'` (OCL's 512 FragFp keys), `'screen'` (the 512
    * query-fragment keys) or `'both'` (all 1,024 bits).
    * @default 'fragFp'
    */
   fingerprint?: SimilarityFingerprint;
-  /** The previous page's `next`; it must belong to the same fingerprint. */
+  /**
+   * The previous page's `next`; it must belong to the same fingerprint.
+   * @default the first page
+   */
   after?: ScoreCursor;
 }
 

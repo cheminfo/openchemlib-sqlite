@@ -104,7 +104,7 @@ export function readIdCodes(): string[] {
 
 /**
  * Adds molecules to a test database through the store, with their application rows, in
- * transactions of `batch`: a deterministic key near OpenChemLib's weight (with ties and a few
+ * transactions of `batch`: a deterministic key near OCL's weight (with ties and a few
  * outliers far from it), filter values (with float32 and int16 edge cases) and sources.
  * @param db - The connection.
  * @param store - The store.

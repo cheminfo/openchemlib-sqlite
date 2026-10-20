@@ -37,7 +37,8 @@ export interface ColumnsSpec {
 export interface SetFamily {
   /**
    * A SELECT listing the family's sets, one name (text or integer) per row in the first column;
-   * read at load and at every poll. Omitted: the family is a single set named after its key.
+   * read at load and at every poll.
+   * @default a single set, named after the family's key
    */
   names?: string;
   /**
@@ -74,7 +75,10 @@ export interface IndexSpec {
    * @default every molecule the columns SQL returns
    */
   defaultSets?: string[];
-  /** The change log; without it, changes to molecules already loaded are not followed. */
+  /**
+   * The change log; without it, changes to molecules already loaded are not followed.
+   * @default none
+   */
   changes?: ChangeLogSpec;
 }
 

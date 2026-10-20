@@ -1,5 +1,5 @@
 /**
- * The fingerprint a similarity search scores: `'fragFp'`, OpenChemLib's 512 FragFp keys;
+ * The fingerprint a similarity search scores: `'fragFp'`, OCL's 512 FragFp keys;
  * `'screen'`, the 512 query-fragment keys of the screen; `'both'`, all 1,024 bits.
  */
 export type SimilarityFingerprint = 'fragFp' | 'screen' | 'both';
