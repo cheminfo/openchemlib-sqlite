@@ -93,7 +93,7 @@ async function readScores(
   }
 }
 
-test.each<SimilarityFingerprint>(['fragFp', 'screen', 'both'])(
+test.each<SimilarityFingerprint>(['fragFp', 'screen', 'both', 'functions'])(
   'similarity on %s, at 0.8 and 0.6, paged with its cursor, equals Tanimoto brute force',
   async (fingerprint) => {
     const failures: string[] = [];
@@ -198,6 +198,16 @@ test('a query with no bit in the fingerprint answers an empty page with a reason
     similarityTruth(rows, methane, 0.5, {}, 'screen').length,
   );
 
+  const noFunction = await index.similarity(methane, {
+    fingerprint: 'functions',
+    threshold: 0.5,
+  });
+
+  expect(noFunction.reason).toBe(
+    'The query holds no function key, so no molecule was scored. Choose the FragFp fingerprint, or the screen.',
+  );
+  expect(noFunction.hits).toStrictEqual([]);
+
   const emptyMolecule = await index.similarity('d@', { fingerprint: 'both' });
 
   expect(emptyMolecule.reason).toBe(
@@ -244,5 +254,5 @@ test('a cursor belongs to its fingerprint: another one refuses it', async () => 
     index.similarity(query, {
       fingerprint: 'tanimoto' as SimilarityFingerprint,
     }),
-  ).rejects.toThrow("is 'fragFp', 'screen' or 'both'");
+  ).rejects.toThrow("is 'fragFp', 'screen', 'both' or 'functions'");
 });

@@ -24,6 +24,7 @@ const LAYOUT: ColumnLayout = {
   seqAt: 0,
   fragFpBitsAt: 0,
   screenBitsAt: 0,
+  functionBitsAt: 0,
   filters: [{ name: 'hba', type: 'int16', at: 0 }],
 };
 
@@ -55,6 +56,7 @@ function seededBlock(seed: number): BlockViews {
     seq: Uint32Array.from({ length: 32 * W }, (_, r) => r + 1),
     fragFpBits: new Uint16Array(32 * W),
     screenBits: new Uint16Array(32 * W),
+    functionBits: new Uint16Array(32 * W),
     filters: [hba],
     zones: {} as BlockViews['zones'],
   };

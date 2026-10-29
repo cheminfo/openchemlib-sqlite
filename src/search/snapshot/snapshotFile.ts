@@ -11,7 +11,7 @@ import { ZONE_BYTES } from '../zones.ts';
 /** The first bytes of a snapshot. */
 export const MAGIC = 'ocl-sqlite index';
 /** Bumped whenever what a snapshot holds, or how it lays it out, changes. */
-export const SNAPSHOT_VERSION = 1;
+export const SNAPSHOT_VERSION = 2;
 /** Bytes read or written at a time: large, so the file is streamed in order. */
 export const CHUNK_BYTES = 32 * 1024 * 1024;
 /** The magic, then the header's length as a little-endian uint32. */

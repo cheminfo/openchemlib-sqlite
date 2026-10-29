@@ -26,7 +26,12 @@ export function zoneViews(
     min: new Uint16Array(columns, at + 4 * k * W, W),
     max: new Uint16Array(columns, at + (4 * k + 2) * W, W),
   });
-  return { fragFp: zone(0), screen: zone(1), both: zone(2) };
+  return {
+    fragFp: zone(0),
+    screen: zone(1),
+    both: zone(2),
+    functions: zone(3),
+  };
 }
 
 /**
@@ -46,16 +51,19 @@ export function emptyZones(zones: Record<SimilarityFingerprint, Zone>): void {
  * @param w - The word.
  * @param fragFp - The row's FragFp bit count.
  * @param screen - Its screen bit count.
+ * @param functions - Its function bit count.
  */
 export function widenZones(
   zones: Record<SimilarityFingerprint, Zone>,
   w: number,
   fragFp: number,
   screen: number,
+  functions: number,
 ): void {
   widen(zones.fragFp, w, fragFp);
   widen(zones.screen, w, screen);
   widen(zones.both, w, fragFp + screen);
+  widen(zones.functions, w, functions);
 }
 
 /**

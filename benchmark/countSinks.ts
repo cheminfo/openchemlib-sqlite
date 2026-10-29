@@ -28,6 +28,7 @@ const LAYOUT: ColumnLayout = {
   seqAt: 0,
   fragFpBitsAt: 0,
   screenBitsAt: 0,
+  functionBitsAt: 0,
   filters: [
     { name: 'int16', type: 'int16', at: 0 },
     { name: 'float32', type: 'float32', at: 0 },

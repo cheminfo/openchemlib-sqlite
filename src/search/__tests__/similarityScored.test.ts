@@ -64,7 +64,7 @@ afterAll(async () => {
   rmSync(directory, { recursive: true, force: true });
 });
 
-test.each<SimilarityFingerprint>(['fragFp', 'screen', 'both'])(
+test.each<SimilarityFingerprint>(['fragFp', 'screen', 'both', 'functions'])(
   'a similarity page on %s counts the rows it scored: at least those reaching the threshold, at most those of the bit-count window',
   async (fingerprint) => {
     const rowBits = bitCounts(

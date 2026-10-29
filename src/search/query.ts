@@ -1,4 +1,5 @@
 import {
+  getFunction,
   getIndex,
   getMoleculeSizes,
   getQueryAtomFloor,
@@ -9,6 +10,7 @@ import {
 
 import { countBits } from '../chemistry/bits.ts';
 import { clampAtoms } from '../chemistry/key.ts';
+import { MOLECULE_WORDS } from '../chemistry/tile.ts';
 
 import type { ColumnLayout } from './blocks.ts';
 import type { SimilarityFingerprint } from './fingerprint.ts';
@@ -126,9 +128,10 @@ export function similarityPlan(
     );
   }
   const [from, to] = fingerprintWords(fingerprint);
-  const words = new Int32Array(32);
+  const words = new Int32Array(MOLECULE_WORDS);
   if (from === 0) words.set(getIndex(idCode), 0);
-  if (to === 32) words.set(getScreen(idCode), 16);
+  if (from <= 16 && to >= 32) words.set(getScreen(idCode), 16);
+  if (to === MOLECULE_WORDS) words.set(getFunction(idCode), 32);
   const qBits = countBits(words, from, to);
   const low = Math.max(0, Math.ceil(threshold * qBits - 1e-9));
   const high = Math.floor(qBits / threshold + 1e-9);

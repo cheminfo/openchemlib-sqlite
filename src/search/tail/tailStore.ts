@@ -149,16 +149,19 @@ export class TailStore {
     const w = r >>> 5;
     const lane = r & 31;
     let screen = 0;
+    let functions = 0;
     for (let p = 0; p < PLANES; p++) {
       if ((((planes[p] as number) >>> slot) & 1) !== 0) {
         Atomics.or(view.planes, p * view.W + w, 1 << lane);
-        if (p >= FRAGFP_PLANES && p < FUNCTION_PLANES_AT) screen++;
+        if (p >= FUNCTION_PLANES_AT) functions++;
+        else if (p >= FRAGFP_PLANES) screen++;
       }
     }
     view.seq[r] = seq;
     view.fragFpBits[r] = fragFpBits;
     view.screenBits[r] = screen;
-    widenZones(view.zones, w, fragFpBits, screen);
+    view.functionBits[r] = functions;
+    widenZones(view.zones, w, fragFpBits, screen, functions);
     writeColumns(view, this.layout, r, values);
     const g = (this.blocks[band.ab] as Block).start + r;
     const key = view.key[r] as number;

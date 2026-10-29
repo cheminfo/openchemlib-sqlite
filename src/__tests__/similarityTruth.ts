@@ -1,4 +1,4 @@
-import { getIndexes, getScreens } from 'openchemlib-search-wasm';
+import { getFunctions, getIndexes, getScreens } from 'openchemlib-search-wasm';
 
 import { popcount32 } from '../chemistry/bits.ts';
 import type { MoleculeIndex } from '../search/MoleculeIndex.ts';
@@ -17,7 +17,7 @@ const fingerprints = new WeakMap<
 
 /**
  * The hits a similarity search must answer: Tanimoto over one fingerprint's words, from the
- * separate wasm calls (FragFp, the screen, or both), score descending then id.
+ * separate wasm calls (FragFp, the screen, both, or the function keys), score descending then id.
  * @param rows - The truth.
  * @param queryIdCode - The query molecule.
  * @param threshold - The threshold.
@@ -64,13 +64,14 @@ export function similarityTruth(
  * Each molecule's words in one fingerprint, from the separate wasm calls.
  * @param idCodes - The molecules.
  * @param fingerprint - The fingerprint.
- * @returns 16 words (FragFp or screen) or 32 (both) per molecule.
+ * @returns 16 words (FragFp, screen or functions) or 32 (both) per molecule.
  */
 export function fingerprintOf(
   idCodes: string[],
   fingerprint: SimilarityFingerprint,
 ): Int32Array[] {
   if (fingerprint === 'fragFp') return getIndexes(idCodes);
+  if (fingerprint === 'functions') return getFunctions(idCodes);
   const screens = getScreens(idCodes);
   if (fingerprint === 'screen') return screens;
   return getIndexes(idCodes).map((words, i) => {

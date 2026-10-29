@@ -81,8 +81,13 @@ export async function expectExact(
     );
   }
   const benzene = smiles('c1ccccc1');
-  // The tail counts the screen bits of each row it appends: every fingerprint must agree.
-  for (const fingerprint of ['fragFp', 'screen', 'both'] as const) {
+  // The tail counts the screen and function bits of each row it appends: every fingerprint must agree.
+  for (const fingerprint of [
+    'fragFp',
+    'screen',
+    'both',
+    'functions',
+  ] as const) {
     const similar = await index.similarity(benzene, {
       threshold: 0.5,
       fingerprint,

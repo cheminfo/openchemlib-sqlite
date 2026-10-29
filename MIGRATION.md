@@ -103,8 +103,8 @@ source or collection.
   `'bulk'`, which runs in short turns between them.
 - **Formula ranges** stay the application's: the index has no formula column. Bound the key by the
   formulas' weights, and check each hit.
-- **Similarity** takes `fingerprint: 'fragFp'` (the default), `'screen'` or `'both'`. Keep it in
-  the page's address with the cursor, which belongs to it.
+- **Similarity** takes `fingerprint: 'fragFp'` (the default), `'screen'`, `'both'` or
+  `'functions'`. Keep it in the page's address with the cursor, which belongs to it.
 - **Read your writes.** After a commit, `await index.waitForSeq(store.lastSeq())`: the tail
   publishes within `pollMs` (500 ms).
 - **Deploy.**

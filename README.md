@@ -281,12 +281,14 @@ it starts running, so waiting never eats it.
   whose Tanimoto was computed (inside the bit-count window and the filters): at least `total`.
 - **Fingerprints.** Each similarity search chooses what it scores: `fingerprint: 'fragFp'`
   (OCL's 512 FragFp keys, the default, so scores are FragFp Tanimoto as before),
-  `'screen'` (the 512 query-fragment keys) or `'both'` (1,024 bits). The index keeps each row's
-  FragFp and screen bit counts (`both` is their sum) and a bit-count zone map per fingerprint, so
-  the window prunes in every mode; that costs 2.25 B per row. A cursor belongs to its fingerprint:
-  a search on another refuses it with an error, and a cursor without one is a FragFp cursor. A
-  query that sets no bit of the fingerprint (methane has no FragFp bit) answers an empty page whose
-  `reason` says so, in a sentence the caller can show.
+  `'screen'` (the 512 query-fragment keys), `'both'` (those 1,024 bits) or `'functions'` (the 512
+  function keys: molecules sharing functional groups, whatever their skeleton). The index keeps
+  each row's FragFp, screen and function bit counts (`both` is the first two's sum) and a
+  bit-count zone map per fingerprint, so the window prunes in every mode; that costs 4.375 B per
+  row. A cursor belongs to its fingerprint: a search on another refuses it with an error, and a
+  cursor without one is a FragFp cursor. A query that sets no bit of the fingerprint (methane has
+  no FragFp bit and no function key) answers an empty page whose `reason` says so, in a sentence
+  the caller can show.
 - **Deadlines.** Every page answers by `budgetMs`. Verifications run in wasm worker threads with a
   watchdog: a verification still running past its own limit is killed, its candidates verified one
   by one, and a candidate whose check alone is killed is left out, counted in `unverified`, and

@@ -6,6 +6,7 @@ import {
   N_AT,
   SEQ_AT,
   SLOTS,
+  TILE_FIXED_BYTES,
   TILE_SPAN,
   tileKey,
 } from '../../chemistry/tile.ts';
@@ -18,6 +19,9 @@ import { widenZones } from '../zones.ts';
 import { RUN } from './layoutBlocks.ts';
 import type { ReaderContext } from './readerContext.ts';
 import { pull } from './readerContext.ts';
+
+/** Where a tile record's stored function words start, in 32-bit words. */
+const STORED_WORD_AT = TILE_FIXED_BYTES / 4;
 
 /**
  * The cells of atom counts, two seeks each: (atoms, band, first tile, tiles) quadruples.
@@ -96,6 +100,7 @@ export function runTiles(
   const totals = { rows: 0, tiles: 0, masked: 0, skipped: 0 };
   const fragFpCounts = new Uint16Array(SLOTS);
   const screen = new Uint16Array(SLOTS);
+  const functions = new Uint16Array(SLOTS);
   const slices = new Int32Array(10);
   for (const t of pull(counter, chunks.length / 2)) {
     const r1 = chunks[2 * t + 1] as number;
@@ -136,7 +141,9 @@ export function runTiles(
         new Uint16Array(words.buffer, words.byteOffset + BITS_AT, SLOTS),
       );
       const used = words[N_AT / 4] as number;
-      screenCounts(words, screen, slices);
+      laneCounts(words, FRAGFP_PLANES, FUNCTION_PLANES_AT, screen, slices);
+      // The stored function words, the zero ones left out, end the record.
+      laneCounts(words, STORED_WORD_AT, words.length, functions, slices);
       let take = 0;
       let mask = 0;
       const row0 = w * SLOTS;
@@ -150,9 +157,11 @@ export function runTiles(
         view.seq[row0 + i] = seq;
         const fragFp = fragFpCounts[i] as number;
         const screenCount = screen[i] as number;
+        const functionCount = functions[i] as number;
         view.fragFpBits[row0 + i] = fragFp;
         view.screenBits[row0 + i] = screenCount;
-        widenZones(view.zones, w, fragFp, screenCount);
+        view.functionBits[row0 + i] = functionCount;
+        widenZones(view.zones, w, fragFp, screenCount, functionCount);
       }
       if (take < used) {
         totals.masked += used - take;
@@ -204,18 +213,23 @@ export function runTiles(
 }
 
 /**
- * Each slot's screen bit count (planes 512-1023), with 10 bit-sliced counters.
- * @param words - The tile record's words, its 1,024 FragFp and screen planes first.
- * @param counts - Its slots' screen bit counts, written.
+ * Each slot's bit count over a range of plane words (at most 1,023 planes), with 10 bit-sliced
+ * counters.
+ * @param words - The tile record's words.
+ * @param from - The first plane word counted.
+ * @param to - One past the last.
+ * @param counts - Its slots' bit counts, written.
  * @param s - The counters, 10 words, reused from tile to tile.
  */
-function screenCounts(
+function laneCounts(
   words: Int32Array,
+  from: number,
+  to: number,
   counts: Uint16Array,
   s: Int32Array,
 ): void {
   s.fill(0);
-  for (let p = FRAGFP_PLANES; p < FUNCTION_PLANES_AT; p++) {
+  for (let p = from; p < to; p++) {
     let carry = words[p] as number;
     for (let b = 0; b < 10 && carry !== 0; b++) {
       const v = s[b] as number;
@@ -224,11 +238,11 @@ function screenCounts(
     }
   }
   for (let lane = 0; lane < SLOTS; lane++) {
-    let screen = 0;
+    let count = 0;
     for (let b = 9; b >= 0; b--) {
-      screen = (screen << 1) | (((s[b] as number) >>> lane) & 1);
+      count = (count << 1) | (((s[b] as number) >>> lane) & 1);
     }
-    counts[lane] = screen;
+    counts[lane] = count;
   }
 }
 

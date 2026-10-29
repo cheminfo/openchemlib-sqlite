@@ -17,7 +17,7 @@ export interface SimilarityOptions extends SearchOptions {
   threshold?: number;
   /**
    * The fingerprint scored: `'fragFp'` (OCL's 512 FragFp keys), `'screen'` (the 512
-   * query-fragment keys) or `'both'` (all 1,024 bits).
+   * query-fragment keys), `'both'` (those 1,024 bits) or `'functions'` (the 512 function keys).
    * @default 'fragFp'
    */
   fingerprint?: SimilarityFingerprint;
@@ -64,6 +64,8 @@ const NO_BIT: Record<SimilarityFingerprint, string> = {
   screen:
     'The query sets no screen bit, so no molecule was scored. Choose the FragFp fingerprint, or both.',
   both: 'The query sets no fingerprint bit, so no molecule was scored.',
+  functions:
+    'The query holds no function key, so no molecule was scored. Choose the FragFp fingerprint, or the screen.',
 };
 
 /**

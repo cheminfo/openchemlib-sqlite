@@ -19,9 +19,10 @@ export interface ColumnLayout {
   rowBytes: number;
   /** The seq column (Uint32). */
   seqAt: number;
-  /** The FragFp and the screen bit count columns (Uint16). */
+  /** The FragFp, the screen and the function bit count columns (Uint16). */
   fragFpBitsAt: number;
   screenBitsAt: number;
+  functionBitsAt: number;
   /** The filter columns, in the specification's order. */
   filters: Array<{ name: string; type: FilterType; at: number }>;
 }
@@ -52,9 +53,10 @@ export interface BlockViews {
   W: number;
   key: Float64Array;
   seq: Uint32Array;
-  /** Each row's FragFp and screen bit counts; `both` counts their sum. */
+  /** Each row's FragFp, screen and function bit counts; `both` counts the first two's sum. */
   fragFpBits: Uint16Array;
   screenBits: Uint16Array;
+  functionBits: Uint16Array;
   filters: Array<Float64Array | Float32Array | Int32Array | Int16Array>;
   /** The zone map of each fingerprint, so the bit-count window prunes in every mode. */
   zones: Record<SimilarityFingerprint, Zone>;
@@ -69,7 +71,7 @@ const SIZE: Record<FilterType, number> = {
 
 /**
  * The column layout of a specification's filters: the key and the 8-byte columns first, then the
- * 4-byte ones (seq among them), then the 2-byte ones (the two bit counts among them), so every
+ * 4-byte ones (seq among them), then the 2-byte ones (the three bit counts among them), so every
  * column is aligned whatever the capacity (a multiple of 32).
  * @param filters - The filter columns.
  * @returns The layout.
@@ -92,7 +94,8 @@ export function columnLayout(
   place(4);
   const fragFpBitsAt = at;
   const screenBitsAt = at + 2;
-  at += 4;
+  const functionBitsAt = at + 4;
+  at += 6;
   place(2);
   const order = new Map(filters.map((filter, index) => [filter.name, index]));
   placed.sort((a, b) => (order.get(a.name) ?? 0) - (order.get(b.name) ?? 0));
@@ -101,6 +104,7 @@ export function columnLayout(
     seqAt,
     fragFpBitsAt,
     screenBitsAt,
+    functionBitsAt,
     filters: placed,
   };
 }
@@ -152,6 +156,7 @@ export function blockViews(block: Block, layout: ColumnLayout): BlockViews {
     seq: new Uint32Array(columns, layout.seqAt * c, c),
     fragFpBits: new Uint16Array(columns, layout.fragFpBitsAt * c, c),
     screenBits: new Uint16Array(columns, layout.screenBitsAt * c, c),
+    functionBits: new Uint16Array(columns, layout.functionBitsAt * c, c),
     filters: layout.filters.map((filter) => {
       const offset = filter.at * c;
       if (filter.type === 'float64') {
@@ -175,7 +180,7 @@ export type RowColumn =
   | BlockViews['filters'][number];
 
 /**
- * Every row column of a block: the seq, the two bit counts, the key, then the filters.
+ * Every row column of a block: the seq, the three bit counts, the key, then the filters.
  * @param views - The block's views.
  * @returns The columns, in that order.
  */
@@ -184,6 +189,7 @@ export function rowColumns(views: BlockViews): RowColumn[] {
     views.seq,
     views.fragFpBits,
     views.screenBits,
+    views.functionBits,
     views.key,
     ...views.filters,
   ];

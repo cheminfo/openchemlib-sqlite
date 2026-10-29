@@ -2,6 +2,7 @@ import type { MessagePort } from 'node:worker_threads';
 
 import { SEQ_SPAN } from '../../chemistry/key.ts';
 import type { BlockViews, ColumnLayout } from '../blocks.ts';
+import type { SimilarityFingerprint } from '../fingerprint.ts';
 
 import type { IndexedBlock, SimilarityPhase } from './messages.ts';
 import type { ExactRow } from './rowFilter.ts';
@@ -107,7 +108,7 @@ function similarityContext(
     base: block.start >>> 5,
     kBase: block.atoms * SEQ_SPAN,
     seq: view.seq,
-    bits: m.fingerprint === 'screen' ? view.screenBits : view.fragFpBits,
+    bits: countsOf(view, m.fingerprint),
     bits2: m.fingerprint === 'both' ? view.screenBits : null,
     zoneMin: view.zones[m.fingerprint].min,
     zoneMax: view.zones[m.fingerprint].max,
@@ -128,6 +129,21 @@ function similarityContext(
             );
           },
   };
+}
+
+/**
+ * Each row's bit count in a fingerprint; for `both`, its FragFp part, the screen being `bits2`.
+ * @param view - The block's views.
+ * @param fingerprint - The fingerprint scored.
+ * @returns The counts.
+ */
+function countsOf(
+  view: BlockViews,
+  fingerprint: SimilarityFingerprint,
+): Uint16Array {
+  if (fingerprint === 'screen') return view.screenBits;
+  if (fingerprint === 'functions') return view.functionBits;
+  return view.fragFpBits;
 }
 
 /**
