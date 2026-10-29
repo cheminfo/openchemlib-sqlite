@@ -1,6 +1,6 @@
 {
   "name": "openchemlib-sqlite",
-  "version": "6.0.0",
+  "version": "6.1.0",
   "description": "The storage and in-memory substructure and similarity search engine of a molecule database, in one SQLite file, computed from the idCode alone with openchemlib-search-wasm",
   "type": "module",
   "exports": {

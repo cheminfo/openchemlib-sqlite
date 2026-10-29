@@ -1,5 +1,12 @@
 # Changelog
 
+## [6.1.0](https://github.com/cheminfo/openchemlib-sqlite/compare/v6.0.0...v6.1.0) (2026-10-29)
+
+
+### Features
+
+* add the 'functions' similarity fingerprint ([86ff52a](https://github.com/cheminfo/openchemlib-sqlite/commit/86ff52a205a62e84bbcd3d1f21e854255643f750))
+
 ## [6.0.0](https://github.com/cheminfo/openchemlib-sqlite/compare/v5.3.0...v6.0.0) (2026-10-20)
 
 
