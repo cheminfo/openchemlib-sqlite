@@ -48,7 +48,7 @@
   "dependencies": {
     "ml-spectra-processing": "^14.35.1",
     "ml-xsadd": "^3.0.1",
-    "openchemlib-search-wasm": "^2.1.1"
+    "openchemlib-search-wasm": "^2.1.2"
   },
   "devDependencies": {
     "@types/benchmark": "^2.1.5",
