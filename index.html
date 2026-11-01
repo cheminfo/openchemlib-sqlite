@@ -84,7 +84,11 @@ only reads queries better keeps every file.</li>
 <tbody>
 <tr>
 <td><code>MoleculeStore.open(db, options)</code></td>
-<td>creates the tables, or refuses a foreign format or stamp; recomputes <code>checkRows</code> (32) sampled molecules; <code>threads</code>, <code>readers</code></td>
+<td>creates the tables, or refuses a foreign format or stamp; recomputes <code>checkRows</code> (32) sampled molecules; <code>threads</code>, <code>readers</code>, <code>workers</code></td>
+</tr>
+<tr>
+<td><code>MoleculeStore.workers(threads)</code></td>
+<td>threads several stores share through <code>open(db, { workers })</code>; a store's <code>close()</code> leaves them be</td>
 </tr>
 <tr>
 <td><code>prepare(idCodes)</code></td>
