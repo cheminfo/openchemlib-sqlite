@@ -3,6 +3,7 @@ export type {
   GroupOptions,
   MoleculeStoreOptions,
 } from './store/storeOptions.ts';
+export type { ChemistryWorkers } from './store/chemistryPool.ts';
 export type { PreparedBatch, PreparedMolecule } from './store/prepared.ts';
 export type { CommitResult } from './store/commit.ts';
 export type { BitCounts, CountedFingerprint } from './store/bitCounts.ts';

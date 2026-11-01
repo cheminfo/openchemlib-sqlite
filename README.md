@@ -97,25 +97,26 @@ for (const [i, result] of results.entries()) {
 db.exec('COMMIT');
 ```
 
-| Method                                    | What it does                                                                                                                  |
-| ----------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------- |
-| `MoleculeStore.open(db, options)`         | creates the tables, or refuses a foreign format or stamp; recomputes `checkRows` (32) sampled molecules; `threads`, `readers` |
-| `prepare(idCodes)`                        | computes the canonical idCode, atom count, band, FragFp, screen, function keys and the three hashes; per-molecule `error`     |
-| `commit(batch)`                           | writes a prepared batch in the caller's transaction; `{ id, created }` per molecule; duplicates get their id back             |
-| `find(idCodes)`                           | the id of each stored molecule (canonical or not), or undefined                                                               |
-| `prefetch(batch, reads)`                  | the readers read the index pages a commit of the batch writes, and run the application's `reads` once per key                 |
-| `stereoisomers(idCode, { after, limit })` | ids with the same no-stereo hash, in id order                                                                                 |
-| `tautomers(idCode, { after, limit })`     | ids with the same tautomer hash, in id order                                                                                  |
-| `byHashes(kind, hashes)`                  | ids holding each `'idCode'`, `'noStereo'` or `'tautomer'` hash: one indexed seek per hash                                     |
-| `keys(ids)`                               | `{ idCode, noStereoHash, tautomerHash, idCodeHash }` by id                                                                    |
-| `remove(ids)`                             | administrative clean-up in the caller's transaction: rows deleted, tile slots emptied, seqs never reused                      |
-| `count()`, `lastSeq()`                    | from `ocl_meta`                                                                                                               |
-| `distinctHashes()`                        | `{ noStereo, tautomer }`: what `count(DISTINCT …)` over `ocl_molecule` answers, from `ocl_meta`                               |
-| `bitCounts()`                             | `{ molecules, fragFp, screen, functions }`: per key, how many molecules hold it; null for one counted under other keys        |
-| `MoleculeStore.updates(db)`               | what this build would rebuild: `{ identity, tiles, counts, rebuilding }`; writes nothing                                      |
-| `MoleculeStore.rebuild(db, options)`      | brings the file to this build while the build that wrote it keeps searching it; see below                                     |
-| `MoleculeStore.abandonRebuild(db)`        | stops a rebuild and frees what it built; writes resume                                                                        |
-| `close()`                                 | stops the worker threads                                                                                                      |
+| Method                                    | What it does                                                                                                                             |
+| ----------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------- |
+| `MoleculeStore.open(db, options)`         | creates the tables, or refuses a foreign format or stamp; recomputes `checkRows` (32) sampled molecules; `threads`, `readers`, `workers` |
+| `MoleculeStore.workers(threads)`          | threads several stores share through `open(db, { workers })`; a store's `close()` leaves them be                                         |
+| `prepare(idCodes)`                        | computes the canonical idCode, atom count, band, FragFp, screen, function keys and the three hashes; per-molecule `error`                |
+| `commit(batch)`                           | writes a prepared batch in the caller's transaction; `{ id, created }` per molecule; duplicates get their id back                        |
+| `find(idCodes)`                           | the id of each stored molecule (canonical or not), or undefined                                                                          |
+| `prefetch(batch, reads)`                  | the readers read the index pages a commit of the batch writes, and run the application's `reads` once per key                            |
+| `stereoisomers(idCode, { after, limit })` | ids with the same no-stereo hash, in id order                                                                                            |
+| `tautomers(idCode, { after, limit })`     | ids with the same tautomer hash, in id order                                                                                             |
+| `byHashes(kind, hashes)`                  | ids holding each `'idCode'`, `'noStereo'` or `'tautomer'` hash: one indexed seek per hash                                                |
+| `keys(ids)`                               | `{ idCode, noStereoHash, tautomerHash, idCodeHash }` by id                                                                               |
+| `remove(ids)`                             | administrative clean-up in the caller's transaction: rows deleted, tile slots emptied, seqs never reused                                 |
+| `count()`, `lastSeq()`                    | from `ocl_meta`                                                                                                                          |
+| `distinctHashes()`                        | `{ noStereo, tautomer }`: what `count(DISTINCT …)` over `ocl_molecule` answers, from `ocl_meta`                                          |
+| `bitCounts()`                             | `{ molecules, fragFp, screen, functions }`: per key, how many molecules hold it; null for one counted under other keys                   |
+| `MoleculeStore.updates(db)`               | what this build would rebuild: `{ identity, tiles, counts, rebuilding }`; writes nothing                                                 |
+| `MoleculeStore.rebuild(db, options)`      | brings the file to this build while the build that wrote it keeps searching it; see below                                                |
+| `MoleculeStore.abandonRebuild(db)`        | stops a rebuild and frees what it built; writes resume                                                                                   |
+| `close()`                                 | stops the worker threads                                                                                                                 |
 
 `commit()` accepts only batches the store itself prepared: no value computed by the caller ever
 reaches the library's tables.

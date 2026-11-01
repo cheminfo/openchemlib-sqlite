@@ -34,11 +34,23 @@ interface Slot {
 }
 
 /**
+ * Chemistry worker threads that several stores can share, from `MoleculeStore.workers()`. They
+ * compute from idCodes alone, so they hold nothing of any store.
+ */
+export interface ChemistryWorkers {
+  /**
+   * Terminates the workers; the stores using them compute nothing afterwards.
+   * @returns Once they are stopped.
+   */
+  close(): Promise<void>;
+}
+
+/**
  * Worker threads that compute, through openchemlib-search-wasm, what the library stores about a
  * molecule (`prepare()`), and the identity hashes the lookups need. Started on the first
  * job, so a store that only reads never spawns one.
  */
-export class ChemistryPool {
+export class ChemistryPool implements ChemistryWorkers {
   readonly #threads: number;
   readonly #slots: Slot[] = [];
   readonly #queue: Job[] = [];

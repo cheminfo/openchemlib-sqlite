@@ -1,3 +1,4 @@
+import { availableParallelism } from 'node:os';
 import type { DatabaseSync } from 'node:sqlite';
 
 import type { RecordColumns } from '../chemistry/records.ts';
@@ -6,6 +7,8 @@ import { computeSignatures } from '../chemistry/stamp.ts';
 
 import type { BitCounts } from './bitCounts.ts';
 import { readBitCounts } from './bitCounts.ts';
+import type { ChemistryWorkers } from './chemistryPool.ts';
+import { ChemistryPool } from './chemistryPool.ts';
 import type { CommitResult, WriteStatements } from './commit.ts';
 import { commitRecords, prepareWriteStatements } from './commit.ts';
 import type { FindContext } from './find.ts';
@@ -44,6 +47,7 @@ export class MoleculeStore extends StoreReads {
   readonly #batches = new WeakMap<PreparedBatch, RecordColumns>();
   readonly #signatures: Signatures;
   readonly #state: WriteState;
+  readonly #ownsPool: boolean;
   /** The stamp of this build, which the file was written under. */
   readonly stamp: string;
 
@@ -52,6 +56,7 @@ export class MoleculeStore extends StoreReads {
     this.stamp = parts.stamp;
     this.#signatures = parts.signatures;
     this.#state = parts.state;
+    this.#ownsPool = parts.ownsPool;
     this.#write = prepareWriteStatements(db);
     this.#find = { ...parts, identity: this.identity };
   }
@@ -69,6 +74,24 @@ export class MoleculeStore extends StoreReads {
     options: MoleculeStoreOptions = {},
   ): Promise<MoleculeStore> {
     return new MoleculeStore(db, await openStoreParts(db, options));
+  }
+
+  /**
+   * Chemistry worker threads that several stores can share, passed to {@link MoleculeStore.open} as
+   * `workers`: each thread loads the chemistry once, however many stores it serves. Started on
+   * first use; idle, they do not keep the process alive.
+   *
+   * ```js
+   * const workers = MoleculeStore.workers(1);
+   * const store = await MoleculeStore.open(db, { workers });
+   * ```
+   * @param threads - How many, at least 1.
+   * @returns The workers; close them once no store needs them.
+   */
+  static workers(
+    threads: number = Math.max(1, availableParallelism() - 1),
+  ): ChemistryWorkers {
+    return new ChemistryPool(threads);
   }
 
   /**
@@ -191,10 +214,14 @@ export class MoleculeStore extends StoreReads {
   }
 
   /**
-   * Stops the worker threads. The connection stays the caller's.
+   * Stops the worker threads, except shared `workers`, which stay their creator's. The connection
+   * stays the caller's.
    * @returns Once they are stopped.
    */
   async close(): Promise<void> {
-    await Promise.all([this.pool.close(), this.#find.readers?.close()]);
+    await Promise.all([
+      this.#ownsPool ? this.pool.close() : undefined,
+      this.#find.readers?.close(),
+    ]);
   }
 }

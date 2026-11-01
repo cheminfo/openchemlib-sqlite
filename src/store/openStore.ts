@@ -25,6 +25,8 @@ export interface StoreParts {
   state: WriteState;
   /** The chemistry workers. */
   pool: ChemistryPool;
+  /** Whether the store started them, and so stops them when it closes. */
+  ownsPool: boolean;
   /** The readers, when asked for. */
   readers: ReaderPool | undefined;
 }
@@ -50,7 +52,11 @@ export async function openStoreParts(
     checkRows = 32,
     checkSeed = 1,
     readers = 0,
+    workers,
   } = options;
+  if (workers !== undefined && !(workers instanceof ChemistryPool)) {
+    throw new TypeError('workers come from MoleculeStore.workers()');
+  }
   const file = readers > 0 ? db.location() : null;
   if (readers > 0 && file === null) {
     throw new Error(
@@ -67,11 +73,12 @@ export async function openStoreParts(
   }
   ensureDistinctCounts(db);
   const meta = readMeta(db);
-  const pool = new ChemistryPool(threads);
+  const pool = workers ?? new ChemistryPool(threads);
+  const ownsPool = workers === undefined;
   if (checkRows > 0) {
     const mismatches = await checkSample(db, pool, checkRows, checkSeed);
     if (mismatches.length > 0) {
-      await pool.close();
+      if (ownsPool) await pool.close();
       throw mismatchError(mismatches);
     }
   }
@@ -83,6 +90,7 @@ export async function openStoreParts(
       counting: countingOf(meta.counted, signatures),
     },
     pool,
+    ownsPool,
     readers: file === null ? undefined : new ReaderPool(file, readers),
   };
 }
