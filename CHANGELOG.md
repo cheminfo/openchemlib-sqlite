@@ -1,5 +1,12 @@
 # Changelog
 
+## [6.2.0](https://github.com/cheminfo/openchemlib-sqlite/compare/v6.1.0...v6.2.0) (2026-11-01)
+
+
+### Features
+
+* let several stores share their chemistry workers ([eba6dca](https://github.com/cheminfo/openchemlib-sqlite/commit/eba6dcaa4c75ff186687270b3db816bd8e668c63))
+
 ## [6.1.0](https://github.com/cheminfo/openchemlib-sqlite/compare/v6.0.0...v6.1.0) (2026-10-29)
 
 
