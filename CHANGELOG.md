@@ -1,5 +1,12 @@
 # Changelog
 
+## [6.3.0](https://github.com/cheminfo/openchemlib-sqlite/compare/v6.2.0...v6.3.0) (2026-11-07)
+
+
+### Features
+
+* read the fingerprints of molecules by id from the index ([06e7e93](https://github.com/cheminfo/openchemlib-sqlite/commit/06e7e93fc1ff899a2f45e8f24d7989ae20c0c250))
+
 ## [6.2.0](https://github.com/cheminfo/openchemlib-sqlite/compare/v6.1.0...v6.2.0) (2026-11-01)
 
 
