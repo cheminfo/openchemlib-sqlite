@@ -378,6 +378,32 @@ the last column multiplies their cost by 60 M rows, which the search workers the
 
 A filter column adds its test to every row the sets and keys keep, as in a search.
 
+### Reading fingerprints
+
+`fingerprints(ids, options)` reads the bits of molecules by id from the bit planes in memory, so an
+application never computes them again from the idCode: to lay out a map of a search's matches,
+cluster them, or score them against each other.
+
+```js
+const { words, width, found } = await index.fingerprints(ids, {
+  fingerprint: 'fragFp',
+});
+// words: `width` 32-bit words per id, in the order asked, as getMoleculeRecords writes them
+```
+
+`fingerprint` names the keys read: a similarity fingerprint, `'fragFp'` (16 words, the default),
+`'screen'` (16), `'both'` (32: the FragFp then the screen) or `'functions'` (16), or any of the three
+key sets of 512 keys in the order wanted, e.g. `['fragFp', 'functions']` (32 words) or
+`['fragFp', 'screen', 'functions']` (48); `keySets` in the result says which words come in which
+order. `found[i]` is 1 when a search may answer `ids[i]`, and 0, its
+words zeros, for an id that is unknown, removed, left out by the columns SQL or not followed yet. The
+rows are read block by block in row order, each plane once over all the rows asked in its block,
+on the calling thread, which gets a turn back every 4,096 molecules; `signal` stops it there.
+
+Measured by `benchmark/fingerprints.ts` for 10,000 molecules drawn at random among 54,421 HMDB
+metabolites, node 26 on an Apple M4 Pro: 1.8 µs per molecule read (18 ms), against 544 µs per
+molecule to compute the FragFp again from the idCode with `getIndexes` (5.4 s).
+
 ## Other exports
 
 From `openchemlib-sqlite`:

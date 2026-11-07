@@ -9,6 +9,11 @@ export type {
 } from './search/load/loadProgress.ts';
 export type { SimilarityFingerprint } from './search/fingerprint.ts';
 export type {
+  FingerprintOptions,
+  Fingerprints,
+  KeySet,
+} from './search/fingerprintRows.ts';
+export type {
   KeyBits,
   KeyPage,
   SearchLane,

@@ -1,6 +1,8 @@
 import type { CountContext } from './countChunk.ts';
 import type { CountOptions, Counts } from './countPage.ts';
 import { countPage } from './countPage.ts';
+import type { FingerprintOptions, Fingerprints } from './fingerprintRows.ts';
+import { readFingerprints } from './fingerprintRows.ts';
 import type { MoleculeIndexOptions } from './indexOptions.ts';
 import type { Layout } from './layout.ts';
 import type { IndexParts } from './openIndex.ts';
@@ -163,6 +165,23 @@ export class MoleculeIndex {
     options: SimilarityOptions = {},
   ): Promise<ScorePage> {
     return scorePage(this.#context(), idCode, options);
+  }
+
+  /**
+   * The fingerprints of molecules by id, read from the bit planes in memory: the words the store
+   * computed, with nothing computed again from an idCode. It runs on the calling thread, giving the
+   * event loop a turn every 4,096 molecules, and reads the version searched now: a molecule removed
+   * meanwhile may read as zeros.
+   * @param ids - The molecules, by id.
+   * @param options - The keys read, a similarity fingerprint or a list of key sets (default
+   * `'fragFp'`), and a signal.
+   * @returns Their words, `width` per id in the order asked, and which ids a search may answer.
+   */
+  async fingerprints(
+    ids: readonly number[],
+    options: FingerprintOptions = {},
+  ): Promise<Fingerprints> {
+    return readFingerprints(this.#current, ids, options);
   }
 
   /**
